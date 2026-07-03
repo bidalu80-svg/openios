@@ -183,6 +183,19 @@ private struct AgentActivityStep: Identifiable, Hashable {
     }
 }
 
+private struct CollapsedStatusGroup {
+    let startIndex: Int
+    let action: String
+    let stepKey: String
+    var subject: String
+    var statuses: [ChatStatusUpdate]
+
+    var key: String {
+        let stepComponent = stepKey.isEmpty ? action : "\(action)::\(stepKey)"
+        return subject.isEmpty ? stepComponent : "\(stepComponent)::\(subject)"
+    }
+}
+
 private struct LocalAlpineInstructionSpan {
     let range: Range<String.Index>
     let body: String
@@ -726,45 +739,42 @@ private struct AgentActivityItem: Identifiable, Hashable {
         officePreviewReferences: [String],
         officeDocumentFiles: [ChatMessageFile]
     ) -> [AgentActivityStep] {
-        statusHistory.enumerated().compactMap { index, status in
-            guard status.hidden != true else { return nil }
-            guard !isReasoningOrThinkingStatus(status) else { return nil }
-            let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let groups = collapsedStatusGroups(from: statusHistory) { _, action in
             if action.contains("local_alpine_agent") || action.contains("local_alpine_tool") {
-                return nil
+                return false
             }
-            guard action.contains("web_search")
-                    || action.contains("browser_web_search")
-                    || action.contains("code_interpreter")
-                    || action.contains("get_readable")
-                    || action.contains("readable")
-                    || action.contains("local_native_tool")
-                    || action.contains("local_office_agent") else {
-                return nil
-            }
+            return action.contains("web_search")
+                || action.contains("browser_web_search")
+                || action.contains("code_interpreter")
+                || action.contains("get_readable")
+                || action.contains("readable")
+                || action.contains("local_native_tool")
+                || action.contains("local_office_agent")
+        }
 
+        return groups.compactMap { group in
+            guard let status = group.statuses.last else { return nil }
+            let action = group.action
             let title = title(for: status, action: action)
-            let detail = status.query?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                ? status.query!
-                : (status.description ?? status.status ?? title)
-            let output = statusPreview(status)
+            let detail = statusDetail(
+                for: group.statuses,
+                fallbackTitle: title
+            )
+            let output = statusPreviewText(for: group.statuses)
             let previewThumbnail = statusThumbnailReference(
-                for: status,
+                for: group.statuses,
                 action: action,
                 officePreviewReferences: officePreviewReferences
             )
-            let previewURL = statusOpenURL(for: status, action: action)
+            let previewURL = statusOpenURL(for: group.statuses, action: action)
             let previewFile = action.contains("local_office_agent") ? officeDocumentFiles.first : nil
-            let stepKey = status.status?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased() ?? ""
-            let stepIdentity = stepKey.isEmpty ? action : "\(action)-\(stepKey)"
+            let isRunning = status.done != true
             return AgentActivityStep(
-                id: "status-\(index)-\(stepIdentity)-\(detail.hashValue)",
+                id: "status-\(group.startIndex)-\(group.key)",
                 kind: .status,
                 title: title,
                 detail: detail,
-                isRunning: status.done != true,
+                isRunning: isRunning,
                 failed: false,
                 outputPreview: output.isEmpty ? detail : output,
                 fullOutput: output.isEmpty ? detail : output,
@@ -784,14 +794,15 @@ private struct AgentActivityItem: Identifiable, Hashable {
     }
 
     private static func localStatusSteps(from statusHistory: [ChatStatusUpdate]) -> [AgentActivityStep] {
-        statusHistory.enumerated().compactMap { index, status in
-            guard status.hidden != true else { return nil }
-            let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-            guard action == "local_alpine"
-                    || action == "local_alpine_agent"
-                    || action == "local_alpine_tool" else {
-                return nil
-            }
+        let groups = collapsedStatusGroups(from: statusHistory) { _, action in
+            action == "local_alpine"
+                || action == "local_alpine_agent"
+                || action == "local_alpine_tool"
+        }
+
+        return groups.compactMap { group in
+            guard let status = group.statuses.last else { return nil }
+            let action = group.action
             guard isConcreteLocalStatus(status, action: action) else { return nil }
 
             let title = title(for: status, action: action)
@@ -799,7 +810,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 ?? status.status?.trimmingCharacters(in: .whitespacesAndNewlines)
                 ?? title
             return AgentActivityStep(
-                id: "local-status-\(index)-\(action)-\(detail.hashValue)",
+                id: "local-status-\(group.startIndex)-\(group.key)",
                 kind: .status,
                 title: title,
                 detail: detail == title ? "" : detail,
@@ -887,6 +898,166 @@ private struct AgentActivityItem: Identifiable, Hashable {
         .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
         .joined(separator: " ")
+    }
+
+    private static func statusGroupingSubject(for status: ChatStatusUpdate) -> String {
+        let queryParts = ([status.query].compactMap { $0 } + status.queries)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        if !queryParts.isEmpty {
+            return "query:\(queryParts.joined(separator: "|"))"
+        }
+
+        let urlParts = status.urls
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        if !urlParts.isEmpty {
+            return "url:\(urlParts.joined(separator: "|"))"
+        }
+
+        let itemLinks = status.items.compactMap { item -> String? in
+            let value = item.link?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            return value.isEmpty ? nil : value
+        }
+        if !itemLinks.isEmpty {
+            return "item:\(itemLinks.joined(separator: "|"))"
+        }
+
+        return ""
+    }
+
+    private static func statusGroupingStepKey(for status: ChatStatusUpdate) -> String {
+        var key = status.status?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        for suffix in [
+            ".start",
+            ".waiting_verification",
+            ".verification_completed",
+            ".reading_results",
+            ".completed"
+        ] where key.hasSuffix(suffix) {
+            key.removeLast(suffix.count)
+            break
+        }
+        return key
+    }
+
+    private static func collapsedStatusGroups(
+        from statusHistory: [ChatStatusUpdate],
+        include: (ChatStatusUpdate, String) -> Bool
+    ) -> [CollapsedStatusGroup] {
+        var groups: [CollapsedStatusGroup] = []
+        var currentGroup: CollapsedStatusGroup?
+
+        for (index, status) in statusHistory.enumerated() {
+            guard status.hidden != true else { continue }
+            guard !isReasoningOrThinkingStatus(status) else { continue }
+
+            let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            guard include(status, action) else { continue }
+
+            let stepKey = statusGroupingStepKey(for: status)
+            let subject = statusGroupingSubject(for: status)
+            if var group = currentGroup,
+               group.action == action,
+               group.stepKey == stepKey {
+                if !group.subject.isEmpty, !subject.isEmpty, group.subject != subject {
+                    groups.append(group)
+                    currentGroup = CollapsedStatusGroup(
+                        startIndex: index,
+                        action: action,
+                        stepKey: stepKey,
+                        subject: subject,
+                        statuses: [status]
+                    )
+                    continue
+                }
+
+                if group.subject.isEmpty, !subject.isEmpty {
+                    group.subject = subject
+                }
+                group.statuses.append(status)
+                currentGroup = group
+            } else {
+                if let group = currentGroup {
+                    groups.append(group)
+                }
+                currentGroup = CollapsedStatusGroup(
+                    startIndex: index,
+                    action: action,
+                    stepKey: stepKey,
+                    subject: subject,
+                    statuses: [status]
+                )
+            }
+        }
+
+        if let group = currentGroup {
+            groups.append(group)
+        }
+
+        return groups
+    }
+
+    private static func statusDetail(
+        for statuses: [ChatStatusUpdate],
+        fallbackTitle: String
+    ) -> String {
+        for status in statuses.reversed() {
+            if let query = status.query?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !query.isEmpty {
+                return query
+            }
+            if let description = status.description?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !description.isEmpty {
+                return description
+            }
+            if let value = status.status?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !value.isEmpty {
+                return value
+            }
+        }
+        return fallbackTitle
+    }
+
+    private static func statusPreviewText(for statuses: [ChatStatusUpdate]) -> String {
+        for status in statuses.reversed() {
+            let preview = statusPreview(status)
+            if !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return preview
+            }
+        }
+        return ""
+    }
+
+    private static func statusThumbnailReference(
+        for statuses: [ChatStatusUpdate],
+        action: String,
+        officePreviewReferences: [String]
+    ) -> String? {
+        for status in statuses.reversed() {
+            if let reference = statusThumbnailReference(
+                for: status,
+                action: action,
+                officePreviewReferences: officePreviewReferences
+            ) {
+                return reference
+            }
+        }
+        return nil
+    }
+
+    private static func statusOpenURL(
+        for statuses: [ChatStatusUpdate],
+        action: String
+    ) -> String? {
+        for status in statuses.reversed() {
+            if let url = statusOpenURL(for: status, action: action) {
+                return url
+            }
+        }
+        return nil
     }
 
     private static func title(for status: ChatStatusUpdate, action: String) -> String {

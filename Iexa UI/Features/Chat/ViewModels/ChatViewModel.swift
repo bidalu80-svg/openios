@@ -20569,16 +20569,76 @@ final class ChatViewModel {
                 || action == "local_office_agent"
                 || action == "local_native_tool"
         }
-        let incomingKey = status.status?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingAction = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if !incomingAction.isEmpty, status.done == true {
+            for index in history.indices where
+                localBrowserStatusBelongsToSameStep(history[index], status)
+                && history[index].done != true {
+                history[index].done = true
+            }
+        }
+
         if let lastIndex = history.indices.last,
-           history[lastIndex].done != true,
-           history[lastIndex].action == status.action,
-           history[lastIndex].status?.trimmingCharacters(in: .whitespacesAndNewlines) == incomingKey {
+           localBrowserStatusBelongsToSameStep(history[lastIndex], status) {
             history[lastIndex] = status
         } else {
             history.append(status)
         }
         return Array(history.suffix(12))
+    }
+
+    private static func localBrowserStatusBelongsToSameStep(
+        _ lhs: ChatStatusUpdate,
+        _ rhs: ChatStatusUpdate
+    ) -> Bool {
+        let lhsAction = lhs.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let rhsAction = rhs.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        guard !lhsAction.isEmpty, lhsAction == rhsAction else { return false }
+
+        let lhsStep = localBrowserStatusBaseStepKey(lhs.status)
+        let rhsStep = localBrowserStatusBaseStepKey(rhs.status)
+        if !lhsStep.isEmpty, !rhsStep.isEmpty, lhsStep != rhsStep {
+            return false
+        }
+
+        let lhsSubject = localBrowserStatusSubject(lhs)
+        let rhsSubject = localBrowserStatusSubject(rhs)
+        return lhsSubject.isEmpty || rhsSubject.isEmpty || lhsSubject == rhsSubject
+    }
+
+    private static func localBrowserStatusBaseStepKey(_ value: String?) -> String {
+        var key = value?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        for suffix in [
+            ".start",
+            ".waiting_verification",
+            ".verification_completed",
+            ".reading_results",
+            ".completed"
+        ] where key.hasSuffix(suffix) {
+            key.removeLast(suffix.count)
+            break
+        }
+        return key
+    }
+
+    private static func localBrowserStatusSubject(_ status: ChatStatusUpdate) -> String {
+        let queries = ([status.query].compactMap { $0 } + status.queries)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        if !queries.isEmpty { return "query:\(queries.joined(separator: "|"))" }
+
+        let urls = status.urls
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+        if !urls.isEmpty { return "url:\(urls.joined(separator: "|"))" }
+
+        let itemLinks = status.items.compactMap { item -> String? in
+            let value = item.link?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            return value.isEmpty ? nil : value
+        }
+        return itemLinks.isEmpty ? "" : "item:\(itemLinks.joined(separator: "|"))"
     }
 
     private func localNativeContinuationStatusHistory(from messageId: String) -> [ChatStatusUpdate] {

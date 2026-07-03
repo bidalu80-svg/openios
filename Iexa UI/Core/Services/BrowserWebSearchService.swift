@@ -135,7 +135,7 @@ final class BrowserWebSearchService: NSObject {
         case "browser.use", "browser_use":
             return await executeNativeBrowserUse(call)
         case "browser.open", "browser.navigate", "browser_open", "browser.navigate_url", "navigate":
-            return await executeNativeOpen(call, readable: true)
+            return await executeNativeOpen(call, readable: false)
         case "browser.readable", "browser.get_readable", "browser_readable", "get_readable", "read_webpage":
             return await executeNativeOpen(call, readable: true)
         case "browser.text", "browser.get_text", "browser_text", "get_text":
