@@ -305,6 +305,7 @@ jobs:
 
       - name: Prepare Local Alpine iSH runtime
         run: |
+          export HOMEBREW_NO_REQUIRE_TAP_TRUST=1
           brew list pkg-config >/dev/null 2>&1 || brew install pkg-config
           brew list meson >/dev/null 2>&1 || brew install meson
           brew list ninja >/dev/null 2>&1 || brew install ninja
