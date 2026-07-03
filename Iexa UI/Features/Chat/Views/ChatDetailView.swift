@@ -107,14 +107,33 @@ private struct AgentActivityStep: Identifiable, Hashable {
         kind == .status && id.hasPrefix("local-status-")
     }
 
+    var isInteractiveBrowserStatusStep: Bool {
+        guard kind == .status else { return false }
+        return Self.isInteractiveBrowserStatusId(id.lowercased())
+    }
+
     var isWebSearchStatusStep: Bool {
         guard kind == .status else { return false }
         let normalizedId = id.lowercased()
+        if Self.isInteractiveBrowserStatusId(normalizedId) {
+            return false
+        }
         return normalizedId.contains("web_search")
             || normalizedId.contains("websearch")
             || normalizedId.contains("browser_web_search")
             || normalizedId.contains("get_readable")
             || normalizedId.contains("readable")
+    }
+
+    private static func isInteractiveBrowserStatusId(_ value: String) -> Bool {
+        [
+            "browser.open", "browser.navigate", "browser.find_elements",
+            "browser.click", "browser.type", "browser.hover", "browser.scroll",
+            "browser.scroll_and_collect", "browser.get_backbone", "browser.get_page_info",
+            "browser.screenshot", "browser.wait_for_dom_stable", "browser.wait_for_image",
+            "browser.execute_js", "browser.fetch", "browser.new_tab", "browser.close_tab",
+            "browser.list_tabs", "browser.set_viewport", "browser.set_user_agent", "browser.get_cookies"
+        ].contains { value.contains($0) }
     }
 
     static func == (lhs: AgentActivityStep, rhs: AgentActivityStep) -> Bool {
@@ -251,6 +270,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
 
     var hasOnlyWebSearchStatusSteps: Bool {
         hasConcreteSteps && steps.allSatisfy(\.isWebSearchStatusStep)
+    }
+
+    var hasInteractiveBrowserStatusSteps: Bool {
+        steps.contains { $0.isInteractiveBrowserStatusStep }
     }
 
     var currentStep: AgentActivityStep? {
@@ -732,8 +755,12 @@ private struct AgentActivityItem: Identifiable, Hashable {
             )
             let previewURL = statusOpenURL(for: status, action: action)
             let previewFile = action.contains("local_office_agent") ? officeDocumentFiles.first : nil
+            let stepKey = status.status?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() ?? ""
+            let stepIdentity = stepKey.isEmpty ? action : "\(action)-\(stepKey)"
             return AgentActivityStep(
-                id: "status-\(index)-\(action)-\(detail.hashValue)",
+                id: "status-\(index)-\(stepIdentity)-\(detail.hashValue)",
                 kind: .status,
                 title: title,
                 detail: detail,
@@ -864,6 +891,28 @@ private struct AgentActivityItem: Identifiable, Hashable {
 
     private static func title(for status: ChatStatusUpdate, action: String) -> String {
         let description = status.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let step = status.status?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if step.contains("browser.open") || step.contains("browser.navigate") { return "打开网页" }
+        if step.contains("browser.search") { return status.query?.isEmpty == false ? "搜索 \(status.query!)" : "搜索网页" }
+        if step.contains("browser.readable") || step.contains("browser.text") { return "查看网页内容" }
+        if step.contains("browser.find_elements") { return "识别网页元素" }
+        if step.contains("browser.click") { return "点击网页控件" }
+        if step.contains("browser.type") { return "输入网页内容" }
+        if step.contains("browser.hover") { return "悬停网页控件" }
+        if step.contains("browser.scroll_and_collect") { return "滚动收集网页内容" }
+        if step.contains("browser.scroll") { return "滚动网页" }
+        if step.contains("browser.screenshot") { return "截取网页画面" }
+        if step.contains("browser.wait_for_dom_stable") { return "等待网页加载稳定" }
+        if step.contains("browser.wait_for_image") { return "等待网页生成结果" }
+        if step.contains("browser.get_backbone") || step.contains("browser.get_page_info") { return "分析网页结构" }
+        if step.contains("browser.execute_js") { return "执行网页脚本" }
+        if step.contains("browser.fetch") { return "下载网页资源" }
+        if step.contains("browser.new_tab") { return "打开新标签页" }
+        if step.contains("browser.close_tab") { return "关闭标签页" }
+        if step.contains("browser.list_tabs") { return "查看标签页" }
+        if step.contains("browser.set_viewport") { return "调整浏览器视口" }
+        if step.contains("browser.set_user_agent") { return "切换浏览器标识" }
+        if step.contains("browser.get_cookies") { return "读取站点 Cookie" }
         if action.contains("readable") { return "读取搜索结果摘要" }
         if action.contains("local_alpine_agent") || action.contains("local_alpine_tool") {
             if description.contains("重新请求") { return "准备下一步" }
@@ -3015,6 +3064,13 @@ struct ChatDetailView: View {
             return false
         }
         let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let step = status.status?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if !step.isEmpty,
+           !step.contains("browser.search"),
+           !step.contains("browser.readable"),
+           !step.contains("browser.text") {
+            return false
+        }
         return action == "web_search"
             || action == "websearch"
             || action == "web search"
@@ -7808,6 +7864,7 @@ struct ChatDetailView: View {
 
     private struct PreparedImageAttachmentPayload: Sendable {
         let uploadData: Data
+        let fileName: String
         let thumbnailData: Data?
         let displayDataURL: String
         let displayImageReference: String?
@@ -7822,14 +7879,15 @@ struct ChatDetailView: View {
         originalName: String
     ) async -> PreparedImageAttachmentPayload {
         await Task.detached(priority: .userInitiated) {
-            let uploadData = FileAttachmentService.downsampleForUpload(data: data)
+            let prepared = FileAttachmentService.prepareImageForUpload(data: data, originalName: originalName)
             return PreparedImageAttachmentPayload(
-                uploadData: uploadData,
-                thumbnailData: FileAttachmentService.thumbnailJPEGData(from: uploadData),
-                displayDataURL: "data:image/jpeg;base64,\(uploadData.base64EncodedString())",
+                uploadData: prepared.data,
+                fileName: prepared.fileName,
+                thumbnailData: FileAttachmentService.thumbnailJPEGData(from: prepared.data),
+                displayDataURL: FileAttachmentService.imageDataURL(data: prepared.data, fileName: prepared.fileName),
                 displayImageReference: FileAttachmentService.writeImagePreviewToCache(
-                    data: uploadData,
-                    originalName: originalName
+                    data: prepared.data,
+                    originalName: prepared.fileName
                 )
             )
         }.value
@@ -7842,14 +7900,16 @@ struct ChatDetailView: View {
         let sendableImage = SendableUIImage(image: image)
         return await Task.detached(priority: .userInitiated) {
             let uploadData = FileAttachmentService.downsampleForUpload(image: sendableImage.image)
+            let fileName = FileAttachmentService.imageFileNamePreservingDetectedExtension(originalName: originalName, data: uploadData)
             return PreparedImageAttachmentPayload(
                 uploadData: uploadData,
+                fileName: fileName,
                 thumbnailData: FileAttachmentService.thumbnailJPEGData(from: uploadData)
                     ?? FileAttachmentService.thumbnailJPEGData(from: sendableImage.image),
-                displayDataURL: "data:image/jpeg;base64,\(uploadData.base64EncodedString())",
+                displayDataURL: FileAttachmentService.imageDataURL(data: uploadData, fileName: fileName),
                 displayImageReference: FileAttachmentService.writeImagePreviewToCache(
                     data: uploadData,
-                    originalName: originalName
+                    originalName: fileName
                 )
             )
         }.value
@@ -7867,14 +7927,17 @@ struct ChatDetailView: View {
         for item in items {
             do {
                 if let data = try await item.loadTransferable(type: Data.self) {
-                    let fileName = "Photo_\(Int(Date.now.timeIntervalSince1970)).jpg"
+                    let fileName = FileAttachmentService.imageFileName(
+                        baseName: "Photo_\(Int(Date.now.timeIntervalSince1970))",
+                        data: data
+                    )
                     let prepared = await Self.prepareImageAttachmentPayload(
                         data: data,
                         originalName: fileName
                     )
                     var attachment = ChatAttachment(
                         type: .image,
-                        name: fileName,
+                        name: prepared.fileName,
                         thumbnail: Self.thumbnailImage(from: prepared.thumbnailData),
                         data: prepared.uploadData
                     )
@@ -7906,7 +7969,7 @@ struct ChatDetailView: View {
                 originalName: url.lastPathComponent
             )
             var attachment = ChatAttachment(
-                type: .image, name: url.lastPathComponent,
+                type: .image, name: prepared.fileName,
                 thumbnail: Self.thumbnailImage(from: prepared.thumbnailData),
                 data: prepared.uploadData
             )
@@ -7935,7 +7998,7 @@ struct ChatDetailView: View {
             guard !prepared.uploadData.isEmpty else { return }
             var attachment = ChatAttachment(
                 type: .image,
-                name: fileName,
+                name: prepared.fileName,
                 thumbnail: Self.thumbnailImage(from: prepared.thumbnailData),
                 data: prepared.uploadData
             )
@@ -7960,7 +8023,7 @@ struct ChatDetailView: View {
 
             var attachment = ChatAttachment(
                 type: .image,
-                name: fileName,
+                name: prepared.fileName,
                 thumbnail: Self.thumbnailImage(from: prepared.thumbnailData),
                 data: prepared.uploadData
             )

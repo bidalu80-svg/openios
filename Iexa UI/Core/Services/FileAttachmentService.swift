@@ -49,9 +49,13 @@ final class FileAttachmentService {
         for item in items {
             do {
                 if let data = try await item.loadTransferable(type: Data.self) {
+                    let initialName = Self.imageFileName(
+                        baseName: "Photo_\(Date.now.timeIntervalSince1970)",
+                        data: data
+                    )
                     let (convertedData, fileName) = await Self.convertToJPEGIfNeeded(
                         data: data,
-                        originalName: "Photo_\(Date.now.timeIntervalSince1970).jpg"
+                        originalName: initialName
                     )
                     let image = UIImage(data: convertedData)
                     let thumbnail = image.map { Image(uiImage: $0) }
@@ -408,7 +412,7 @@ final class FileAttachmentService {
             let fileObject = attachment.uploadedFileObject ?? [:]
             let filename = attachment.name
             let isImage = attachment.type == .image
-            let contentType: String = isImage ? "image/jpeg" : "application/octet-stream"
+            let contentType: String = isImage ? mimeType(for: filename) : "application/octet-stream"
             let payloadType = isImage ? "image" : "file"
             let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
 
@@ -474,24 +478,42 @@ final class FileAttachmentService {
 
     /// File extensions that need conversion to JPEG for vision model compatibility.
     private nonisolated static var convertibleExtensions: Set<String> {
-        ["heic", "heif", "dng", "raw", "arw", "cr2", "cr3", "nef", "orf", "raf", "rw2", "webp"]
+        ["heic", "heif", "dng", "raw", "arw", "cr2", "cr3", "nef", "orf", "raf", "rw2"]
+    }
+
+    /// Prepares image data for model upload while preserving the original file
+    /// format whenever it is already a common web image and within the pixel cap.
+    /// HEIC/RAW/oversized images are converted to JPEG for compatibility.
+    nonisolated static func prepareImageForUpload(
+        data: Data,
+        originalName: String,
+        image: UIImage? = nil,
+        logger: Logger? = nil
+    ) -> (data: Data, fileName: String) {
+        let detectedContentType = imageContentType(for: data, fileName: originalName)
+        let ext = (originalName as NSString).pathExtension.lowercased()
+        let shouldConvert = convertibleExtensions.contains(ext)
+            || ["image/heic", "image/heif", "image/tiff"].contains(detectedContentType)
+            || exceedsUploadPixelCap(data: data)
+
+        if shouldConvert {
+            let converted = downsampleForUpload(data: data, image: image, logger: logger)
+            let baseName = (originalName as NSString).deletingPathExtension
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (converted.isEmpty ? data : converted, (baseName.isEmpty ? "image" : baseName) + ".jpg")
+        }
+
+        return (data, imageFileNamePreservingDetectedExtension(originalName: originalName, data: data))
     }
 
     /// Converts HEIC/HEIF/DNG/RAW image data to JPEG if needed.
-    /// Also enforces the 2 MP pixel cap so uploads always stay under the
-    /// API's 5 MB image limit.
+    /// Also enforces the 2 MP pixel cap. PNG/JPEG/GIF/WebP/AVIF images that
+    /// are already within the pixel cap keep their original bytes and MIME.
     /// Returns the (possibly converted) data and updated filename.
     private nonisolated static func convertToJPEGIfNeeded(data: Data, originalName: String) async -> (Data, String) {
         await Task.detached(priority: .userInitiated) {
-            let ext = (originalName as NSString).pathExtension.lowercased()
-            guard let capped = Self.downsampleJPEGData(from: data) else {
-                return (data, originalName)
-            }
-            if Self.convertibleExtensions.contains(ext) {
-                let baseName = (originalName as NSString).deletingPathExtension
-                return (capped, baseName + ".jpg")
-            }
-            return (capped, originalName)
+            let prepared = Self.prepareImageForUpload(data: data, originalName: originalName)
+            return (prepared.data, prepared.fileName)
         }.value
     }
 
@@ -559,6 +581,66 @@ final class FileAttachmentService {
         return resized.jpegData(compressionQuality: 0.78)
     }
 
+    nonisolated static func imageDataURL(data: Data, fileName: String) -> String {
+        "data:\(imageContentType(for: data, fileName: fileName));base64,\(data.base64EncodedString())"
+    }
+
+    nonisolated static func imageContentType(for data: Data, fileName: String? = nil) -> String {
+        if data.count >= 8,
+           data[0] == 0x89, data[1] == 0x50, data[2] == 0x4E, data[3] == 0x47,
+           data[4] == 0x0D, data[5] == 0x0A, data[6] == 0x1A, data[7] == 0x0A {
+            return "image/png"
+        }
+        if data.count >= 3, data[0] == 0xFF, data[1] == 0xD8, data[2] == 0xFF {
+            return "image/jpeg"
+        }
+        if data.count >= 12,
+           String(data: data.subdata(in: 0..<4), encoding: .ascii) == "RIFF",
+           String(data: data.subdata(in: 8..<12), encoding: .ascii) == "WEBP" {
+            return "image/webp"
+        }
+        if data.count >= 6,
+           let signature = String(data: data.subdata(in: 0..<6), encoding: .ascii),
+           signature == "GIF87a" || signature == "GIF89a" {
+            return "image/gif"
+        }
+        if data.count >= 12,
+           String(data: data.subdata(in: 4..<8), encoding: .ascii) == "ftyp" {
+            let brand = String(data: data.subdata(in: 8..<12), encoding: .ascii)?.lowercased() ?? ""
+            if brand.hasPrefix("avif") || brand.hasPrefix("avis") { return "image/avif" }
+            if brand.hasPrefix("heic") || brand.hasPrefix("heix") || brand.hasPrefix("hevc") || brand.hasPrefix("hevx") {
+                return "image/heic"
+            }
+            if brand.hasPrefix("mif1") || brand.hasPrefix("msf1") { return "image/heif" }
+        }
+        if data.count >= 4 {
+            if data[0] == 0x49, data[1] == 0x49, data[2] == 0x2A, data[3] == 0x00 { return "image/tiff" }
+            if data[0] == 0x4D, data[1] == 0x4D, data[2] == 0x00, data[3] == 0x2A { return "image/tiff" }
+        }
+        if let fileName {
+            return mimeType(for: fileName)
+        }
+        return "image/jpeg"
+    }
+
+    nonisolated static func imageFileNamePreservingDetectedExtension(originalName: String, data: Data) -> String {
+        let contentType = imageContentType(for: data, fileName: originalName)
+        let detectedExtension = fileExtension(forImageContentType: contentType)
+        let currentExtension = (originalName as NSString).pathExtension.lowercased()
+        if currentExtension == detectedExtension || (currentExtension == "jpg" && detectedExtension == "jpeg") {
+            return originalName
+        }
+        let baseName = (originalName as NSString).deletingPathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (baseName.isEmpty ? "image" : baseName) + ".\(detectedExtension == "jpeg" ? "jpg" : detectedExtension)"
+    }
+
+    nonisolated static func imageFileName(baseName: String, data: Data) -> String {
+        let safeBase = baseName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "image" : baseName
+        let ext = fileExtension(forImageContentType: imageContentType(for: data))
+        return safeBase + ".\(ext == "jpeg" ? "jpg" : ext)"
+    }
+
     nonisolated static func writeImagePreviewToCache(
         data: Data,
         originalName: String,
@@ -586,6 +668,31 @@ final class FileAttachmentService {
         } catch {
             return nil
         }
+    }
+
+    private nonisolated static func fileExtension(forImageContentType contentType: String) -> String {
+        switch contentType.lowercased() {
+        case "image/png": return "png"
+        case "image/webp": return "webp"
+        case "image/gif": return "gif"
+        case "image/avif": return "avif"
+        case "image/heic": return "heic"
+        case "image/heif": return "heif"
+        case "image/tiff": return "tiff"
+        default: return "jpeg"
+        }
+    }
+
+    private nonisolated static func exceedsUploadPixelCap(data: Data) -> Bool {
+        let sourceOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = pixelDimension(properties[kCGImagePropertyPixelWidth]),
+              let height = pixelDimension(properties[kCGImagePropertyPixelHeight]),
+              width > 0, height > 0 else {
+            return false
+        }
+        return width * height > maxPixels
     }
 
     private nonisolated static func downsampleJPEGData(from data: Data, logger: Logger? = nil) -> Data? {

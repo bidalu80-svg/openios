@@ -391,7 +391,7 @@ final class ChannelViewModel {
             if let fileId = attachment.uploadedFileId {
                 let fileObject = attachment.uploadedFileObject ?? [:]
                 let isImage = attachment.type == .image
-                let contentType: String = isImage ? "image/jpeg" : "application/octet-stream"
+                let contentType: String = isImage ? mimeType(for: attachment.name) : "application/octet-stream"
                 let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
                 fileRefs.append([
                     "type": "file",
@@ -408,7 +408,7 @@ final class ChannelViewModel {
                 do {
                     let (fileId, fileObject) = try await apiClient.uploadFile(data: data, fileName: attachment.name)
                     let isImage = attachment.type == .image
-                    let contentType: String = isImage ? "image/jpeg" : "application/octet-stream"
+                    let contentType: String = isImage ? mimeType(for: attachment.name) : "application/octet-stream"
                     let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
                     fileRefs.append([
                         "type": "file",
@@ -522,7 +522,7 @@ final class ChannelViewModel {
             if let fileId = attachment.uploadedFileId {
                 let fileObject = attachment.uploadedFileObject ?? [:]
                 let isImage = attachment.type == .image
-                let contentType: String = isImage ? "image/jpeg" : "application/octet-stream"
+                let contentType: String = isImage ? mimeType(for: attachment.name) : "application/octet-stream"
                 let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
                 fileRefs.append([
                     "type": "file",
@@ -539,7 +539,7 @@ final class ChannelViewModel {
                 do {
                     let (fileId, fileObject) = try await apiClient.uploadFile(data: data, fileName: attachment.name)
                     let isImage = attachment.type == .image
-                    let contentType: String = isImage ? "image/jpeg" : "application/octet-stream"
+                    let contentType: String = isImage ? mimeType(for: attachment.name) : "application/octet-stream"
                     let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
                     fileRefs.append([
                         "type": "file",

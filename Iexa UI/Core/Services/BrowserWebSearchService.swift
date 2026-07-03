@@ -832,47 +832,233 @@ final class BrowserWebSearchService: NSObject {
         try? await Task.sleep(nanoseconds: 250_000_000)
 
         let selector = Self.firstString(in: call, keys: ["selector", "css", "element"])
+        let label = Self.firstString(in: call, keys: [
+            "label", "field_label", "fieldLabel", "aria_label", "ariaLabel",
+            "name", "title", "placeholder", "target"
+        ])
+        let x = Self.intValue(call["coordinate_x"] ?? call["x"] ?? call["client_x"])
+        let y = Self.intValue(call["coordinate_y"] ?? call["y"] ?? call["client_y"])
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message"]) ?? ""
         let clear = Self.boolValue(call["clear"] ?? call["replace"] ?? call["overwrite"]) ?? true
         let pressEnter = Self.boolValue(call["press_enter"] ?? call["enter"] ?? call["submit"]) ?? false
-        guard let selector, !selector.isEmpty else {
+        guard selector != nil || label != nil || (x != nil && y != nil) else {
             return [
                 "action": "browser.type",
                 "ok": false,
-                "error": "Missing required field: selector"
+                "error": "Missing selector, label, or coordinates"
             ]
         }
 
         let script = """
         (() => {
-          const selector = \(Self.javascriptString(selector));
+          const selector = \(Self.javascriptString(selector ?? ""));
+          const desiredLabel = \(Self.javascriptString(label ?? ""));
+          const x = \(x.map(String.init) ?? "null");
+          const y = \(y.map(String.init) ?? "null");
           const text = \(Self.javascriptString(text));
           const clear = \(clear ? "true" : "false");
           const pressEnter = \(pressEnter ? "true" : "false");
+          const editableSelector = 'input:not([type="hidden"]), textarea, select, [contenteditable], [role="textbox"], [aria-label], [placeholder], [name]';
+          function norm(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          }
           function textOf(node) {
             return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
           }
+          function attr(node, name) {
+            return node && node.getAttribute ? (node.getAttribute(name) || '') : '';
+          }
+          function accessibleText(node) {
+            if (!node) return '';
+            const parts = [
+              textOf(node),
+              attr(node, 'aria-label'),
+              attr(node, 'title'),
+              attr(node, 'alt'),
+              attr(node, 'name'),
+              attr(node, 'value'),
+              attr(node, 'placeholder'),
+              attr(node, 'data-testid'),
+              node.value || '',
+              node.placeholder || ''
+            ];
+            return parts.filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+          }
+          function allRoots() {
+            const roots = [document];
+            for (let i = 0; i < roots.length; i += 1) {
+              const root = roots[i];
+              const nodes = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+              for (const node of nodes) {
+                if (node.shadowRoot) roots.push(node.shadowRoot);
+              }
+            }
+            return roots;
+          }
+          function deepQuerySelector(raw) {
+            for (const root of allRoots()) {
+              try {
+                const match = root.querySelector(raw);
+                if (match) return match;
+              } catch (_) {
+                return null;
+              }
+            }
+            return null;
+          }
           function findNode(raw) {
+            if (!raw) return null;
             try {
               if (raw.startsWith('/') || raw.startsWith('.//')) {
                 const result = document.evaluate(raw, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
                 return result.singleNodeValue;
               }
-              return document.querySelector(raw);
+              return deepQuerySelector(raw);
             } catch (_) {
               return null;
             }
           }
-          const node = findNode(selector);
+          function visible(node) {
+            if (!node || !node.getBoundingClientRect) return false;
+            if (node.hidden || (node.closest && node.closest('[hidden],[aria-hidden="true"]'))) return false;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
+            const r = node.getBoundingClientRect();
+            return r.width > 1 && r.height > 1;
+          }
+          function isEditable(node) {
+            if (!node) return false;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            return tag === 'input' || tag === 'textarea' || tag === 'select' || !!node.isContentEditable || attr(node, 'role') === 'textbox';
+          }
+          function editableTarget(node) {
+            if (!node) return null;
+            if (isEditable(node)) return node;
+            const closest = node.closest && node.closest(editableSelector);
+            if (closest) return closest;
+            try {
+              const descendant = node.querySelector && node.querySelector(editableSelector);
+              if (descendant) return descendant;
+            } catch (_) {}
+            return null;
+          }
+          function scoreLabel(node, raw) {
+            const wanted = norm(raw);
+            if (!wanted) return -1;
+            const label = norm(accessibleText(node));
+            if (!label) return -1;
+            if (label === wanted) return 100;
+            if (label.startsWith(wanted)) return 80;
+            if (label.includes(wanted)) return 65;
+            if (wanted.includes(label) && label.length >= 2) return 45;
+            const tokens = wanted.split(/[\\s,，、]+/).filter(Boolean);
+            let score = 0;
+            for (const token of tokens) {
+              if (label.includes(token)) score += 12;
+            }
+            return score > 0 ? score : -1;
+          }
+          function findLabelControl(raw) {
+            const wanted = norm(raw);
+            if (!wanted) return null;
+            for (const root of allRoots()) {
+              let labels = [];
+              try { labels = Array.from(root.querySelectorAll('label')); } catch (_) {}
+              for (const labelNode of labels) {
+                const score = scoreLabel(labelNode, raw);
+                if (score < 0) continue;
+                const forID = attr(labelNode, 'for');
+                if (forID) {
+                  const target = document.getElementById(forID);
+                  if (target) return target;
+                }
+                const nested = editableTarget(labelNode);
+                if (nested) return nested;
+              }
+            }
+            return null;
+          }
+          function findByLabel(raw) {
+            const labelTarget = findLabelControl(raw);
+            if (labelTarget) return labelTarget;
+            let best = null;
+            let bestScore = -1;
+            for (const root of allRoots()) {
+              let nodes = [];
+              try { nodes = Array.from(root.querySelectorAll(editableSelector)); } catch (_) {}
+              for (const node of nodes) {
+                if (!visible(node)) continue;
+                const score = scoreLabel(node, raw);
+                if (score > bestScore) {
+                  best = node;
+                  bestScore = score;
+                }
+              }
+            }
+            return best;
+          }
+          function humanVerificationState() {
+            const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
+            const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
+            const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || frame.getAttribute('aria-label') || '').join(' ');
+            const bodyText = norm(document.body && document.body.innerText || '');
+            const textDetected = /prove you are human|verify you are human|checking if the site connection is secure|captcha|turnstile|recaptcha/.test(bodyText);
+            const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
+            const tokenNode = turnstile || recaptcha;
+            const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
+            return {
+              detected: Boolean(provider),
+              provider,
+              token_length: tokenLength,
+              completed: Boolean(tokenLength > 0),
+              reason: provider && tokenLength === 0 ? 'Human verification is present but not completed.' : ''
+            };
+          }
+          const coordinateNode = (Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null;
+          const node = editableTarget(findNode(selector))
+            || editableTarget(findByLabel(desiredLabel))
+            || editableTarget(coordinateNode);
           if (!node) {
             return JSON.stringify({ ok: false, error: 'Element not found' });
           }
           if (node.scrollIntoView) {
             try { node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
           }
+          const verification = humanVerificationState();
+          const disabled = Boolean(
+            node.disabled ||
+            attr(node, 'aria-disabled') === 'true' ||
+            node.closest && node.closest('[disabled],[aria-disabled="true"]')
+          );
+          if (disabled) {
+            return JSON.stringify({
+              ok: false,
+              error: verification.detected && !verification.completed
+                ? 'Element is disabled because human verification is not complete'
+                : 'Element is disabled',
+              disabled: true,
+              requires_user_verification: verification.detected && !verification.completed,
+              human_verification: verification,
+              title: document.title || '',
+              url: location.href,
+              selector: selector || '',
+              label: desiredLabel || '',
+              tag: (node.tagName || node.nodeName || '').toLowerCase(),
+              text: accessibleText(node).slice(0, 160)
+            });
+          }
           try { node.dispatchEvent(new FocusEvent('focusin', { bubbles: true, cancelable: false, composed: true })); } catch (_) {}
           try { node.dispatchEvent(new FocusEvent('focus', { bubbles: false, cancelable: false, composed: true })); } catch (_) {}
-          if (node.isContentEditable) {
+          const tag = (node.tagName || node.nodeName || '').toLowerCase();
+          if (tag === 'select' && node.options) {
+            const wanted = norm(text);
+            const options = Array.from(node.options);
+            const match = options.find(option => option.value === text)
+              || options.find(option => norm(option.textContent) === wanted)
+              || options.find(option => norm(option.textContent).includes(wanted));
+            node.value = match ? match.value : text;
+          } else if (node.isContentEditable || attr(node, 'role') === 'textbox') {
             if (clear) {
               node.innerText = '';
             }
@@ -916,9 +1102,12 @@ final class BrowserWebSearchService: NSObject {
             ok: true,
             title: document.title || '',
             url: location.href,
-            selector,
+            selector: selector || '',
+            label: desiredLabel || '',
             text: textOf(node).slice(0, 160),
-            tag: (node.tagName || node.nodeName || '').toLowerCase()
+            value: node.value || '',
+            tag,
+            human_verification: verification
           });
         })();
         """
@@ -932,7 +1121,15 @@ final class BrowserWebSearchService: NSObject {
         }
         var payload = object
         payload["action"] = "browser.type"
-        payload["summary"] = "已向网页元素输入文本。"
+        let requiresVerification = Self.boolValue(payload["requires_user_verification"]) == true
+        let typed = Self.boolValue(payload["ok"]) ?? false
+        if requiresVerification {
+            payload["summary"] = "网页需要先完成人机验证，目标输入框当前不可用。请在浏览器中完成验证后继续。"
+        } else if typed {
+            payload["summary"] = "已向网页元素输入文本。"
+        } else {
+            payload["summary"] = (payload["error"] as? String) ?? "网页输入未完成。"
+        }
         return payload
     }
 
@@ -949,21 +1146,32 @@ final class BrowserWebSearchService: NSObject {
         try? await Task.sleep(nanoseconds: 250_000_000)
 
         let selector = Self.firstString(in: call, keys: ["selector", "css", "element"])
+        let label = Self.firstString(
+            in: call,
+            keys: [
+                "label", "button_text", "buttonText", "aria_label", "ariaLabel",
+                "field_label", "fieldLabel", "placeholder", "name", "title", "target"
+            ]
+        )
         let x = Self.intValue(call["coordinate_x"] ?? call["x"] ?? call["client_x"])
         let y = Self.intValue(call["coordinate_y"] ?? call["y"] ?? call["client_y"])
-        guard selector != nil || (x != nil && y != nil) else {
+        guard selector != nil || label != nil || (x != nil && y != nil) else {
             return [
                 "action": "browser.hover",
                 "ok": false,
-                "error": "Missing selector or coordinates"
+                "error": "Missing selector, label, or coordinates"
             ]
         }
 
         let script = """
         (() => {
           const selector = \(Self.javascriptString(selector ?? ""));
+          const label = \(Self.javascriptString(label ?? ""));
           const x = \(x.map(String.init) ?? "null");
           const y = \(y.map(String.init) ?? "null");
+          function norm(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          }
           function text(node) {
             return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
           }
@@ -972,6 +1180,14 @@ final class BrowserWebSearchService: NSObject {
             const r = node.getBoundingClientRect();
             return { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) };
           }
+          function allRoots(root = document) {
+            const roots = [root];
+            const nodes = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+            for (const node of nodes) {
+              if (node.shadowRoot) roots.push(...allRoots(node.shadowRoot));
+            }
+            return roots;
+          }
           function findNode(raw) {
             if (!raw) return null;
             try {
@@ -979,12 +1195,65 @@ final class BrowserWebSearchService: NSObject {
                 const result = document.evaluate(raw, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
                 return result.singleNodeValue;
               }
-              return document.querySelector(raw);
+              for (const root of allRoots()) {
+                const found = root.querySelector(raw);
+                if (found) return found;
+              }
             } catch (_) {
               return null;
             }
+            return null;
           }
-          const node = findNode(selector) || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
+          function labelFor(node) {
+            if (!node) return '';
+            const id = node.getAttribute && node.getAttribute('id');
+            const labelledBy = node.getAttribute && node.getAttribute('aria-labelledby');
+            const pieces = [
+              text(node),
+              node.getAttribute && node.getAttribute('aria-label'),
+              node.getAttribute && node.getAttribute('title'),
+              node.getAttribute && node.getAttribute('placeholder'),
+              node.getAttribute && node.getAttribute('name'),
+              node.getAttribute && node.getAttribute('value'),
+              labelledBy ? labelledBy.split(/\\s+/).map(part => text(document.getElementById(part))).join(' ') : '',
+              id ? Array.from(document.querySelectorAll(`label[for="${CSS.escape(id)}"]`)).map(text).join(' ') : '',
+              node.closest && text(node.closest('label'))
+            ];
+            return pieces.filter(Boolean).join(' ');
+          }
+          function visible(node) {
+            if (!node || !node.getBoundingClientRect) return false;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+            const r = node.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          }
+          function findByLabel(rawLabel) {
+            const target = norm(rawLabel);
+            if (!target) return null;
+            const candidates = [];
+            const selectors = 'button, a, input, textarea, select, [role="button"], [role="link"], [role="textbox"], [onclick], [tabindex]';
+            for (const root of allRoots()) {
+              try { candidates.push(...Array.from(root.querySelectorAll(selectors))); } catch (_) {}
+            }
+            let best = null;
+            let bestScore = 0;
+            for (const node of candidates) {
+              if (!visible(node)) continue;
+              const hay = norm(labelFor(node));
+              if (!hay) continue;
+              let score = 0;
+              if (hay === target) score = 100;
+              else if (hay.includes(target)) score = 80;
+              else if (target.includes(hay) && hay.length >= 2) score = 55;
+              if (score > bestScore) {
+                best = node;
+                bestScore = score;
+              }
+            }
+            return best;
+          }
+          const node = findNode(selector) || findByLabel(label) || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
           if (!node) {
             return JSON.stringify({ ok: false, error: 'Element not found' });
           }
@@ -1177,17 +1446,19 @@ final class BrowserWebSearchService: NSObject {
         let defaultSelector = "a, button, input, textarea, select, [role='button'], [role='link'], [onclick], [tabindex], [aria-label]"
         let selector = Self.firstString(in: call, keys: ["selector", "css"]) ?? defaultSelector
         let limit = min(max(Self.intValue(call["limit"] ?? call["max_results"]) ?? 30, 1), 100)
+        let intent = Self.findElementsIntent(in: call)
         let scanPage = Self.boolValue(call["scan_page"] ?? call["scanPage"] ?? call["full_page"] ?? call["fullPage"]) ?? true
         if scanPage {
             let maxScrolls = min(max(Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 16, 1), 20)
             return await executeNativeFindElementsAcrossPage(
                 selector: selector,
                 limit: limit,
-                maxScrolls: maxScrolls
+                maxScrolls: maxScrolls,
+                intent: intent
             )
         }
 
-        let script = Self.elementCollectionScript(selector: selector, limit: limit)
+        let script = Self.elementCollectionScript(selector: selector, limit: limit, intent: intent)
         guard let object = await evaluateJSONObject(script) else {
             return [
                 "action": "browser.find_elements",
@@ -1201,7 +1472,12 @@ final class BrowserWebSearchService: NSObject {
         return payload
     }
 
-    private func executeNativeFindElementsAcrossPage(selector: String, limit: Int, maxScrolls: Int) async -> [String: Any] {
+    private func executeNativeFindElementsAcrossPage(
+        selector: String,
+        limit: Int,
+        maxScrolls: Int,
+        intent: String?
+    ) async -> [String: Any] {
         guard let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) else {
             return [
                 "action": "browser.find_elements",
@@ -1258,7 +1534,11 @@ final class BrowserWebSearchService: NSObject {
             _ = await evaluateJSONObject(Self.scrollToPageYScript(offset))
             try? await Task.sleep(nanoseconds: viewportIndex == 0 ? 180_000_000 : 300_000_000)
 
-            guard let snapshot = await evaluateJSONObject(Self.elementCollectionScript(selector: selector, limit: min(max(perViewportLimit * 2, 24), 100))),
+            guard let snapshot = await evaluateJSONObject(Self.elementCollectionScript(
+                selector: selector,
+                limit: min(max(perViewportLimit * 3, 36), 120),
+                intent: intent
+            )),
                   let items = snapshot["items"] as? [[String: Any]] else {
                 continue
             }
@@ -1297,7 +1577,7 @@ final class BrowserWebSearchService: NSObject {
         }
 
         _ = await evaluateJSONObject(Self.scrollToPageYScript(originalY))
-        let returnedItems = Self.evenlySampleElements(collected, limit: limit)
+        let returnedItems = Self.prioritizedElements(collected, limit: limit)
         let verification = humanVerification ?? ["detected": false]
         let verificationDetected = Self.boolValue(verification["detected"]) == true
         let verificationCompleted = Self.boolValue(verification["completed"]) == true
@@ -1872,10 +2152,26 @@ final class BrowserWebSearchService: NSObject {
             .lowercased() ?? ""
         let hasURL = urlValue(in: call) != nil
         let wantsSave = Self.firstString(in: call, keys: ["save_to", "output", "path"]) != nil
+        let hasScript = Self.firstString(in: call, keys: ["script", "javascript", "js"]) != nil
+        let hasTypedText = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message"]) != nil
+        let hasSelector = Self.firstString(in: call, keys: ["selector", "css", "element"]) != nil
+        let hasLabel = Self.firstString(in: call, keys: [
+            "label", "button_text", "buttonText", "aria_label", "ariaLabel",
+            "name", "title", "placeholder", "target"
+        ]) != nil
+        let hasCoordinates = Self.intValue(call["coordinate_x"] ?? call["x"] ?? call["client_x"]) != nil
+            && Self.intValue(call["coordinate_y"] ?? call["y"] ?? call["client_y"]) != nil
+        let wantsScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"] ?? call["attach_preview"] ?? call["attachPreview"] ?? call["full_page"] ?? call["fullPage"]) == true
 
         switch normalized {
         case "", "browser_use", "browser.use":
             if wantsSave { return "browser.fetch" }
+            if hasScript { return "browser.execute_js" }
+            if hasTypedText && (hasSelector || hasLabel || hasCoordinates) { return "browser.type" }
+            if hasLabel || hasCoordinates { return "browser.click" }
+            if hasSelector && wantsScreenshot { return "browser.screenshot" }
+            if hasSelector { return "browser.find_elements" }
+            if wantsScreenshot { return "browser.screenshot" }
             if hasURL { return "browser.navigate" }
             return "browser.info"
         case "navigate", "open", "goto", "go", "go_to", "go_to_url", "browser.navigate", "browser.open":
@@ -2049,13 +2345,76 @@ final class BrowserWebSearchService: NSObject {
         return sampled
     }
 
-    private static func elementCollectionScript(selector: String, limit: Int) -> String {
+    private static func prioritizedElements(_ items: [[String: Any]], limit: Int) -> [[String: Any]] {
+        guard limit > 0, items.count > limit else { return items }
+        let hasPositiveScore = items.contains { (Self.intValue($0["match_score"]) ?? 0) > 0 }
+        guard hasPositiveScore else { return Self.evenlySampleElements(items, limit: limit) }
+        let ranked = items.enumerated().sorted { lhs, rhs in
+            let lhsScore = Self.intValue(lhs.element["match_score"]) ?? 0
+            let rhsScore = Self.intValue(rhs.element["match_score"]) ?? 0
+            if lhsScore != rhsScore { return lhsScore > rhsScore }
+            let lhsY = Self.elementPageY(lhs.element) ?? Int.max
+            let rhsY = Self.elementPageY(rhs.element) ?? Int.max
+            if lhsY != rhsY { return lhsY < rhsY }
+            return lhs.offset < rhs.offset
+        }
+        return ranked.prefix(limit).enumerated().map { index, rankedItem in
+            var item = rankedItem.element
+            item["index"] = index
+            return item
+        }
+    }
+
+    private static func elementPageY(_ item: [String: Any]) -> Int? {
+        if let direct = Self.intValue(item["page_y"]) {
+            return direct
+        }
+        if let rect = item["rect"] as? [String: Any] {
+            return Self.intValue(rect["page_y"] ?? rect["y"])
+        }
+        return nil
+    }
+
+    private static func findElementsIntent(in call: [String: Any]) -> String? {
+        let keys = [
+            "query", "q", "keywords", "keyword", "label", "button_text", "buttonText",
+            "aria_label", "ariaLabel", "name", "title", "text", "placeholder",
+            "tool_title", "toolTitle", "description", "target"
+        ]
+        let parts = keys.compactMap { key -> String? in
+            guard let value = call[key] else { return nil }
+            if let string = value as? String { return string }
+            if let strings = value as? [String] { return strings.joined(separator: " ") }
+            return nil
+        }
+        let intent = parts
+            .joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return intent.isEmpty ? nil : intent
+    }
+
+    private static func elementCollectionScript(selector: String, limit: Int, intent: String? = nil) -> String {
         """
         (() => {
           const selector = \(Self.javascriptString(selector));
           const limit = \(limit);
+          const intent = \(Self.javascriptString(intent ?? ""));
           function text(node) {
             return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function norm(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          }
+          function tokenize(value) {
+            const normalized = norm(value);
+            const tokens = normalized.split(/[\\s,，、]+/).map(token => token.trim()).filter(Boolean);
+            return tokens.length ? tokens : (normalized ? [normalized] : []);
+          }
+          const intentNorm = norm(intent);
+          const intentTokens = Array.from(new Set(tokenize(intentNorm)));
+          function attr(node, name) {
+            return node && node.getAttribute ? (node.getAttribute(name) || '') : '';
           }
           function href(node) {
             if (!node) return '';
@@ -2161,26 +2520,95 @@ final class BrowserWebSearchService: NSObject {
               completed: Boolean(tokenLength > 0)
             };
           }
+          function scoreElement(node, label, nodeHref) {
+            if (!intentNorm) return 0;
+            const tag = norm(node && (node.tagName || node.nodeName) || '');
+            const role = norm(attr(node, 'role'));
+            const type = norm(attr(node, 'type'));
+            const strong = norm([
+              label,
+              attr(node, 'aria-label'),
+              attr(node, 'title'),
+              attr(node, 'alt'),
+              attr(node, 'name'),
+              attr(node, 'placeholder'),
+              attr(node, 'value'),
+              node && node.value || '',
+              node && node.placeholder || ''
+            ].join(' '));
+            const weak = norm([
+              nodeHref,
+              node && node.id || '',
+              node && typeof node.className === 'string' ? node.className : '',
+              attr(node, 'data-testid'),
+              attr(node, 'data-test'),
+              attr(node, 'data-cy'),
+              tag,
+              role,
+              type
+            ].join(' '));
+            let score = 0;
+            if (strong === intentNorm) score += 1000;
+            else if (strong.startsWith(intentNorm)) score += 650;
+            else if (strong.includes(intentNorm)) score += 450;
+            if (weak === intentNorm) score += 220;
+            else if (weak.includes(intentNorm)) score += 140;
+            for (const token of intentTokens) {
+              if (!token) continue;
+              if (strong === token) score += 240;
+              else if (strong.startsWith(token)) score += 170;
+              else if (strong.includes(token)) score += 110;
+              if (weak === token) score += 80;
+              else if (weak.includes(token)) score += 35;
+              if (tag === token || role === token || type === token) score += 30;
+            }
+            if (score > 0 && (tag === 'button' || tag === 'a' || role === 'button' || role === 'link' || attr(node, 'onclick'))) score += 10;
+            if (score > 0 && disabledState(node)) score -= 10;
+            return Math.max(0, Math.round(score));
+          }
+          function itemY(item) {
+            const value = item && item.rect ? Number(item.rect.page_y) : NaN;
+            return Number.isFinite(value) ? value : 1000000000;
+          }
+          function compareItems(a, b) {
+            if (b.match_score !== a.match_score) return b.match_score - a.match_score;
+            const ay = itemY(a);
+            const by = itemY(b);
+            if (ay !== by) return ay - by;
+            return (a.source_index || 0) - (b.source_index || 0);
+          }
           const humanVerification = humanVerificationState();
-          const elements = findElements(selector).filter(visible).slice(0, limit);
-          const items = elements.map((node, index) => ({
-            index,
-            tag: (node.tagName || node.nodeName || '').toLowerCase(),
-            title: accessibleText(node).slice(0, 120),
-            text: accessibleText(node).slice(0, 240),
-            href: href(node),
-            id: node.id || '',
-            classes: typeof node.className === 'string' ? node.className : '',
-            placeholder: node.placeholder || '',
-            role: node.getAttribute ? (node.getAttribute('role') || '') : '',
-            aria_label: node.getAttribute ? (node.getAttribute('aria-label') || '') : '',
-            name: node.getAttribute ? (node.getAttribute('name') || '') : '',
-            value: node.getAttribute ? (node.getAttribute('value') || node.value || '') : (node.value || ''),
-            type: node.getAttribute ? (node.getAttribute('type') || '') : '',
-            disabled: disabledState(node),
-            blocked_by_human_verification: disabledState(node) && humanVerification.detected && !humanVerification.completed,
-            rect: rect(node)
-          }));
+          const elements = findElements(selector).filter(visible);
+          let items = elements.map((node, sourceIndex) => {
+            const label = accessibleText(node);
+            const nodeHref = href(node);
+            const disabled = disabledState(node);
+            return {
+              index: sourceIndex,
+              source_index: sourceIndex,
+              tag: (node.tagName || node.nodeName || '').toLowerCase(),
+              title: label.slice(0, 120),
+              text: label.slice(0, 240),
+              href: nodeHref,
+              id: node.id || '',
+              classes: typeof node.className === 'string' ? node.className : '',
+              placeholder: node.placeholder || '',
+              role: attr(node, 'role'),
+              aria_label: attr(node, 'aria-label'),
+              name: attr(node, 'name'),
+              value: attr(node, 'value') || node.value || '',
+              type: attr(node, 'type'),
+              disabled,
+              blocked_by_human_verification: disabled && humanVerification.detected && !humanVerification.completed,
+              match_score: scoreElement(node, label, nodeHref),
+              rect: rect(node)
+            };
+          });
+          if (intentNorm) items.sort(compareItems);
+          items = items.slice(0, limit).map((item, index) => {
+            item.index = index;
+            return item;
+          });
           return JSON.stringify({
             ok: true,
             title: document.title || '',

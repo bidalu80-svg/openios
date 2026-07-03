@@ -738,7 +738,14 @@ final class LocalNativeToolService {
 
     private static func browserDocument(from results: [[String: Any]]) -> LocalNativeBrowserDocument? {
         for result in results.reversed() {
-            let action = (result["action"] as? String ?? "")
+            let action = (
+                (result["browser_action"] as? String)
+                ?? (result["browser_use_action"] as? String)
+                ?? (result["operation"] as? String)
+                ?? (result["op"] as? String)
+                ?? (result["action"] as? String)
+                ?? ""
+            )
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
             guard action.contains("browser")
@@ -1726,7 +1733,7 @@ final class LocalNativeToolService {
         )
         repaired = regexReplace(
             in: repaired,
-            pattern: #"("(?:action|name|tool|path|file|file_path|cwd|command|cmd|old|new|old_text|new_text|content|text|url|href|link|query|keywords|selector|browser_use_action|browser_action|operation|op|functionName|function_name|toolName|tool_name)"\s*:\s*)(?!["\{\[])([^,\}\n]+)(\s*[,}])"#,
+            pattern: #"("(?:action|name|tool|path|file|file_path|cwd|command|cmd|old|new|old_text|new_text|content|text|url|href|link|query|keywords|selector|label|field_label|fieldLabel|button_text|buttonText|aria_label|ariaLabel|placeholder|target|browser_use_action|browser_action|operation|op|functionName|function_name|toolName|tool_name)"\s*:\s*)(?!["\{\[])([^,\}\n]+)(\s*[,}])"#,
             replacement: #"$1"$2"$3"#
         )
         return repaired == trimmed ? nil : repaired

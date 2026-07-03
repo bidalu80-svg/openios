@@ -826,13 +826,23 @@ struct ThreadDetailSheet: View {
         for item in items {
             if let data = try? await item.loadTransferable(type: Data.self) {
                 let image = UIImage(data: data)
-                let thumbnail = image.map { Image(uiImage: $0) }
-                let resized = FileAttachmentService.downsampleForUpload(data: data, image: image)
+                let initialName = FileAttachmentService.imageFileName(
+                    baseName: "Photo_\(Int(Date.now.timeIntervalSince1970))",
+                    data: data
+                )
+                let prepared = FileAttachmentService.prepareImageForUpload(
+                    data: data,
+                    originalName: initialName,
+                    image: image
+                )
+                let thumbnail = FileAttachmentService.thumbnailJPEGData(from: prepared.data)
+                    .flatMap(UIImage.init(data:))
+                    .map { Image(uiImage: $0) }
                 let attachment = ChatAttachment(
                     type: .image,
-                    name: "Photo_\(Int(Date.now.timeIntervalSince1970)).jpg",
+                    name: prepared.fileName,
                     thumbnail: thumbnail,
-                    data: resized
+                    data: prepared.data
                 )
                 viewModel.threadAttachments.append(attachment)
                 viewModel.uploadAttachmentImmediately(attachmentId: attachment.id, isThread: true)

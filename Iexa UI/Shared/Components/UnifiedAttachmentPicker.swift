@@ -266,13 +266,20 @@ struct UnifiedAttachmentPicker: View {
         PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
             guard let data else { return }
             let image = UIImage(data: data)
-            let resized = FileAttachmentService.downsampleForUpload(data: data, image: image)
+            let initialName = FileAttachmentService.imageFileName(
+                baseName: "Photo_\(Int(Date.now.timeIntervalSince1970))",
+                data: data
+            )
+            let prepared = FileAttachmentService.prepareImageForUpload(
+                data: data,
+                originalName: initialName,
+                image: image
+            )
             
             DispatchQueue.main.async {
                 // Write to temp file as an image so processFileURL handles it correctly
-                let fileName = "Photo_\(Int(Date.now.timeIntervalSince1970)).jpg"
-                let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-                try? resized.write(to: tempURL)
+                let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(prepared.fileName)
+                try? prepared.data.write(to: tempURL)
                 self.onFileSelected([tempURL])
                 // Dismiss AFTER passing the files — give time for state to propagate
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {

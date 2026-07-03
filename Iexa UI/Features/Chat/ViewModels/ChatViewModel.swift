@@ -2387,8 +2387,8 @@ final class ChatViewModel {
     }
 
     private func inlineImageDataURL(data: Data, fileName: String) -> String {
-        let capped = FileAttachmentService.downsampleForUpload(data: data)
-        return "data:image/jpeg;base64,\(capped.base64EncodedString())"
+        let prepared = FileAttachmentService.prepareImageForUpload(data: data, originalName: fileName)
+        return FileAttachmentService.imageDataURL(data: prepared.data, fileName: prepared.fileName)
     }
 
     private func inlineImageDisplayReference(dataURL: String) -> String {
@@ -2771,12 +2771,15 @@ final class ChatViewModel {
                             ],
                             "url": ["type": "string", "description": "HTTP, HTTPS, or file URL. Required for navigate/fetch or when loading a page before another action."],
                                 "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
-                                "label": ["type": "string", "description": "For click: visible button/control text or accessible label when no selector is known."],
+                                "label": ["type": "string", "description": "Visible control text, field label, accessible label, placeholder, name, or target hint for click/type/hover when no selector is known."],
+                                "field_label": ["type": "string", "description": "For type: visible label or placeholder of the input field."],
                                 "button_text": ["type": "string", "description": "For click: compatibility alias for label."],
-                                "aria_label": ["type": "string", "description": "For click: aria-label text to match."],
+                                "aria_label": ["type": "string", "description": "For click/type: aria-label text to match."],
+                                "placeholder": ["type": "string", "description": "For type/find_elements: input placeholder to match."],
+                                "target": ["type": "string", "description": "Natural-language target hint for the page element to find, click, or type into."],
                                 "text": ["type": "string", "description": "Text to type into the selected element."],
-                                "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click fallback."],
-                                "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click fallback."],
+                                "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click/type/hover fallback."],
+                                "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click/type/hover fallback."],
                                 "direction": ["type": "string", "enum": ["up", "down"], "description": "Scroll direction."],
                                 "amount": ["type": "integer", "description": "Scroll distance in pixels."],
                                 "scan_page": ["type": "boolean", "description": "For find_elements: scroll the full page and merge controls. Defaults to true."],
@@ -6602,19 +6605,22 @@ final class ChatViewModel {
             if isOpenAICompatibleProvider, let data = attachment.data, attachment.type == .image {
                 let dataURL = attachment.displayDataURL ?? inlineImageDataURL(data: data, fileName: attachment.name)
                 let displayURL = attachment.displayImageReference ?? inlineImageDisplayReference(dataURL: dataURL)
+                let contentType = Self.imageContentType(for: dataURL)
                 inlineImageDataURLsForUserMessage.append(dataURL)
                 inlineImageFiles.append(ChatMessageFile(
                     type: "image",
                     url: "local-inline-image:\(attachment.id.uuidString)",
                     name: attachment.name,
-                    contentType: "image/jpeg",
+                    contentType: contentType,
                     displayURL: displayURL
                 ))
             } else if let fileId = attachment.uploadedFileId {
                 // Already uploaded + processed — build rich web-UI-format ref
                 let fileObject = attachment.uploadedFileObject ?? [:]
                 let isImage = attachment.type == .image
-                let contentType: String = isImage ? "image/jpeg" : mimeType(for: attachment.name)
+                let contentType: String = isImage
+                    ? (attachment.displayDataURL.map { Self.imageContentType(for: $0) } ?? mimeType(for: attachment.name))
+                    : mimeType(for: attachment.name)
                 let payloadType = isImage ? "image" : "file"
                 let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
                 fileRefs.append([
@@ -6647,12 +6653,13 @@ final class ChatViewModel {
             } else if let data = attachment.data, attachment.type == .image {
                 let dataURL = inlineImageDataURL(data: data, fileName: attachment.name)
                 let displayURL = attachment.displayImageReference ?? inlineImageDisplayReference(dataURL: dataURL)
+                let contentType = Self.imageContentType(for: dataURL)
                 inlineImageDataURLsForUserMessage.append(dataURL)
                 inlineImageFiles.append(ChatMessageFile(
                     type: "image",
                     url: "local-inline-image:\(attachment.id.uuidString)",
                     name: attachment.name,
-                    contentType: "image/jpeg",
+                    contentType: contentType,
                     displayURL: displayURL
                 ))
             } else if let data = attachment.data, canSendAttachmentInline(attachment) {
@@ -6694,7 +6701,7 @@ final class ChatViewModel {
                     }
                     let (fileId, fileObject) = uploadResult
                     let isImage = attachment.type == .image
-                    let contentType: String = isImage ? "image/jpeg" : mimeType(for: attachment.name)
+                    let contentType: String = isImage ? mimeType(for: attachment.name) : mimeType(for: attachment.name)
                     let payloadType = isImage ? "image" : "file"
                     let size: Int = (fileObject["meta"] as? [String: Any]).flatMap { $0["size"] as? Int } ?? 0
                     fileRefs.append([
@@ -10889,7 +10896,7 @@ final class ChatViewModel {
         )
         repaired = regexReplace(
             in: repaired,
-            pattern: #"("(?:action|name|tool|path|file|file_path|cwd|command|cmd|old|new|old_text|new_text|content|text|url|href|link|query|keywords|selector|browser_use_action|browser_action|operation|op|functionName|function_name|toolName|tool_name)"\s*:\s*)(?!["\{\[])([^,\}\n]+)(\s*[,}])"#,
+            pattern: #"("(?:action|name|tool|path|file|file_path|cwd|command|cmd|old|new|old_text|new_text|content|text|url|href|link|query|keywords|selector|label|field_label|fieldLabel|button_text|buttonText|aria_label|ariaLabel|placeholder|target|browser_use_action|browser_action|operation|op|functionName|function_name|toolName|tool_name)"\s*:\s*)(?!["\{\[])([^,\}\n]+)(\s*[,}])"#,
             replacement: #"$1"$2"$3"#
         )
         return repaired == trimmed ? nil : repaired
@@ -12036,14 +12043,14 @@ final class ChatViewModel {
                     browserToolCount += 1
                     if browserKind == .search {
                         browserSearchCount += 1
-                    } else {
+                    } else if browserKind == .readable {
                         browserReadCount += 1
                     }
                     lastNativeToolFallback = Self.localNativeBrowserFallbackMessage(from: execution.toolContent)
                     if Self.localNativeBrowserToolResultShouldStop(call, toolContent: execution.toolContent)
-                        || browserKind == .readable
                         || browserToolCount >= Self.localNativeBrowserToolSoftLimit
-                        || browserSearchCount >= Self.localNativeBrowserSearchSoftLimit {
+                        || (browserKind == .search && browserSearchCount >= Self.localNativeBrowserSearchSoftLimit)
+                        || (browserKind == .readable && browserReadCount >= Self.localNativeBrowserReadableSoftLimit) {
                         needsFinalAnswerWithoutTools = true
                         finalAnswerFallback = lastNativeToolFallback
                     }
@@ -13258,8 +13265,7 @@ final class ChatViewModel {
         }
         let action = localAlpineBrowserActionName(from: call, result: result)
         let terminalActions: Set<String> = [
-            "browser.readable", "browser.text", "browser.fetch",
-            "browser.wait_for_image", "browser.scroll_and_collect"
+            "browser.fetch", "browser.wait_for_image"
         ]
         if terminalActions.contains(action) {
             return true
@@ -15974,26 +15980,19 @@ final class ChatViewModel {
     private func editableImages(from attachments: [ChatAttachment], limit: Int = 16) -> [ImageEditSource] {
         var images: [ImageEditSource] = []
         for attachment in attachments where attachment.type == .image {
-            let outputFileName = Self.jpegFileName(for: attachment.name)
             if let data = attachment.data {
-                let jpegData = FileAttachmentService.downsampleForUpload(data: data)
-                images.append(ImageEditSource(data: jpegData.isEmpty ? data : jpegData, fileName: outputFileName))
+                let prepared = FileAttachmentService.prepareImageForUpload(data: data, originalName: attachment.name)
+                images.append(ImageEditSource(data: prepared.data, fileName: prepared.fileName))
             } else if let dataURL = attachment.displayDataURL,
                       let data = Self.imageData(fromDataURL: dataURL) {
-                let jpegData = FileAttachmentService.downsampleForUpload(data: data)
-                images.append(ImageEditSource(data: jpegData.isEmpty ? data : jpegData, fileName: outputFileName))
+                let prepared = FileAttachmentService.prepareImageForUpload(data: data, originalName: attachment.name)
+                images.append(ImageEditSource(data: prepared.data, fileName: prepared.fileName))
             }
             if images.count >= limit {
                 break
             }
         }
         return images
-    }
-
-    private static func jpegFileName(for originalName: String) -> String {
-        let base = (originalName as NSString).deletingPathExtension
-        let safeBase = base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "image" : base
-        return safeBase + ".jpg"
     }
 
     private static func imageData(fromDataURL dataURL: String) -> Data? {
@@ -19303,9 +19302,16 @@ final class ChatViewModel {
                             if let apiClient = manager?.apiClient {
                                 do {
                                     let (rawData, contentType) = try await apiClient.getFileContent(id: fileId)
-                                    let data = FileAttachmentService.downsampleForUpload(data: rawData)
+                                    let fallbackName = imgFile.name ?? "image.\(Self.fileExtension(forImageContentType: contentType))"
+                                    let prepared = FileAttachmentService.prepareImageForUpload(
+                                        data: rawData,
+                                        originalName: fallbackName
+                                    )
+                                    let data = prepared.data
                                     let base64 = data.base64EncodedString()
-                                    let mimeType = contentType.hasPrefix("image/") ? contentType : "image/jpeg"
+                                    let mimeType = contentType.hasPrefix("image/")
+                                        ? FileAttachmentService.imageContentType(for: data, fileName: prepared.fileName)
+                                        : FileAttachmentService.imageContentType(for: data, fileName: prepared.fileName)
                                     let dataUrl = "data:\(mimeType);base64,\(base64)"
                                     contentArray.append([
                                         "type": "image_url",
@@ -20377,6 +20383,7 @@ final class ChatViewModel {
             isStreaming: true,
             status: ChatStatusUpdate(
                 action: "browser_web_search",
+                status: Self.localBrowserToolStepKey(for: actionName),
                 description: title,
                 done: false,
                 occurredAt: .now
@@ -20396,6 +20403,7 @@ final class ChatViewModel {
         }
         let status = ChatStatusUpdate(
             action: "browser_web_search",
+            status: Self.localBrowserToolStepKey(for: document.action),
             description: document.ok ? document.summary : (document.error ?? document.summary),
             done: true,
             urls: urls,
@@ -20407,7 +20415,9 @@ final class ChatViewModel {
         )
         updateLocalBrowserToolMessage(
             messageId: messageId,
-            content: document.ok ? "搜索完成：\(document.title)" : "搜索失败：\(document.error ?? document.summary)",
+            content: document.ok
+                ? "\(Self.localBrowserToolCompletedTitle(for: document.action))：\(document.title)"
+                : "\(Self.localBrowserToolFailedTitle(for: document.action))：\(document.error ?? document.summary)",
             isStreaming: keepStreaming,
             status: status
         )
@@ -20426,19 +20436,46 @@ final class ChatViewModel {
 
         conversation?.messages[index].content = content
         conversation?.messages[index].isStreaming = isStreaming
-        conversation?.messages[index].statusHistory = [status]
+        let statusHistory = Self.appendingLocalBrowserStatus(
+            status,
+            to: conversation?.messages[index].statusHistory ?? []
+        )
+        conversation?.messages[index].statusHistory = statusHistory
         conversation?.messages[index].metadata = metadata
         conversation?.history.updateNode(id: messageId) { node in
             node.content = content
             node.done = !isStreaming
-            node.statusHistory = [status]
+            node.statusHistory = statusHistory
             node.metadata = metadata
         }
         if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
             streamingStore.updateContent(content, displayContent: content)
-            streamingStore.setStatusHistory([status])
+            streamingStore.setStatusHistory(statusHistory)
         }
         conversation?.history.currentId = messageId
+    }
+
+    private static func appendingLocalBrowserStatus(
+        _ status: ChatStatusUpdate,
+        to existing: [ChatStatusUpdate]
+    ) -> [ChatStatusUpdate] {
+        var history = existing.filter { item in
+            guard item.hidden != true else { return true }
+            let action = item.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            return isLocalNativeSearchStatusAction(action)
+                || action == "local_office_agent"
+                || action == "local_native_tool"
+        }
+        let incomingKey = status.status?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let lastIndex = history.indices.last,
+           history[lastIndex].done != true,
+           history[lastIndex].action == status.action,
+           history[lastIndex].status?.trimmingCharacters(in: .whitespacesAndNewlines) == incomingKey {
+            history[lastIndex] = status
+        } else {
+            history.append(status)
+        }
+        return Array(history.suffix(12))
     }
 
     private func localNativeContinuationStatusHistory(from messageId: String) -> [ChatStatusUpdate] {
@@ -20479,11 +20516,29 @@ final class ChatViewModel {
 
     private func localBrowserToolRunningTitle(for actionName: String) -> String {
         let action = actionName.lowercased()
-        if action.contains("search") || action.contains("搜索") || action.contains("web.search") {
-            return "正在搜索网络..."
+        if action.contains("web.search") || action == "web_search" || action.contains("browser.search") {
+            return "正在搜索网页..."
         }
+        if action.contains("navigate") || action.contains("open") { return "正在打开网页..." }
+        if action.contains("readable") || action.contains("text") { return "正在查看网页内容..." }
+        if action.contains("find_elements") { return "正在识别网页元素..." }
+        if action.contains("click") { return "正在点击网页控件..." }
+        if action.contains("type") { return "正在输入网页内容..." }
+        if action.contains("hover") { return "正在悬停网页控件..." }
+        if action.contains("scroll_and_collect") { return "正在滚动收集网页内容..." }
+        if action.contains("scroll") { return "正在滚动网页..." }
+        if action.contains("wait_for_image") { return "正在等待网页生成结果..." }
+        if action.contains("wait_for_dom_stable") { return "正在等待网页加载稳定..." }
+        if action.contains("get_backbone") || action.contains("info") { return "正在分析网页结构..." }
+        if action.contains("execute_js") { return "正在执行网页脚本..." }
+        if action.contains("set_viewport") { return "正在调整浏览器视口..." }
+        if action.contains("set_user_agent") { return "正在切换浏览器标识..." }
+        if action.contains("get_cookies") { return "正在读取站点 Cookie..." }
+        if action.contains("new_tab") { return "正在打开新标签页..." }
+        if action.contains("close_tab") { return "正在关闭标签页..." }
+        if action.contains("list_tabs") { return "正在查看标签页..." }
         if action.contains("screenshot") {
-            return "正在生成网页缩略图..."
+            return "正在截取网页画面..."
         }
         if action.contains("fetch") {
             return "正在下载网页资源..."
@@ -20503,6 +20558,52 @@ final class ChatViewModel {
             return "正在操作网页..."
         }
         return "正在读取网页..."
+    }
+
+    private static func localBrowserToolCompletedTitle(for actionName: String) -> String {
+        let action = actionName.lowercased()
+        if action.contains("web.search") || action == "web_search" || action.contains("browser.search") { return "网页搜索完成" }
+        if action.contains("navigate") || action.contains("open") { return "网页已打开" }
+        if action.contains("readable") || action.contains("text") { return "网页内容已查看" }
+        if action.contains("find_elements") { return "网页元素已识别" }
+        if action.contains("click") { return "网页控件已点击" }
+        if action.contains("type") { return "网页内容已输入" }
+        if action.contains("scroll_and_collect") { return "网页内容已收集" }
+        if action.contains("scroll") { return "网页已滚动" }
+        if action.contains("wait_for_image") { return "网页结果已保存" }
+        if action.contains("screenshot") { return "网页画面已截取" }
+        return "网页操作完成"
+    }
+
+    private static func localBrowserToolFailedTitle(for actionName: String) -> String {
+        let action = actionName.lowercased()
+        if action.contains("search") { return "网页搜索失败" }
+        if action.contains("click") { return "网页点击失败" }
+        if action.contains("type") { return "网页输入失败" }
+        return "网页操作失败"
+    }
+
+    private static func localBrowserToolStepKey(for actionName: String) -> String {
+        let action = actionName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: ".")
+            .lowercased()
+        if action.contains("web.search") || action == "web.search" || action.contains("browser.search") { return "browser.search" }
+        if action.contains("navigate") || action.contains("open") { return "browser.open" }
+        if action.contains("readable") { return "browser.readable" }
+        if action.contains("text") { return "browser.text" }
+        if action.contains("find.elements") { return "browser.find_elements" }
+        if action.contains("click") { return "browser.click" }
+        if action.contains("type") { return "browser.type" }
+        if action.contains("hover") { return "browser.hover" }
+        if action.contains("scroll.and.collect") { return "browser.scroll_and_collect" }
+        if action.contains("scroll") { return "browser.scroll" }
+        if action.contains("wait.for.image") { return "browser.wait_for_image" }
+        if action.contains("wait.for.dom.stable") { return "browser.wait_for_dom_stable" }
+        if action.contains("screenshot") { return "browser.screenshot" }
+        if action.contains("fetch") { return "browser.fetch" }
+        if action.contains("execute.js") || action.contains("eval.js") { return "browser.execute_js" }
+        return action.isEmpty ? "browser.info" : action
     }
 
     private func markLocalOfficeGenerationStarted(messageId: String, kind: LocalNativeOfficeKind) {

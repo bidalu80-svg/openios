@@ -525,10 +525,14 @@ final class PasteInterceptingTextView: UITextView {
         // 3. Check for raw image data in specific UTTypes (PNG/JPEG data without UIImage)
         if pastedAttachments.isEmpty {
             for typeId in [UTType.png.identifier, UTType.jpeg.identifier, UTType.gif.identifier, UTType.webP.identifier, UTType.tiff.identifier] {
-                if let data = pb.data(forPasteboardType: typeId), let uiImage = UIImage(data: data) {
+                if let data = pb.data(forPasteboardType: typeId), UIImage(data: data) != nil {
+                    let fileName = FileAttachmentService.imageFileName(
+                        baseName: "Pasted_Image_\(Int(Date.now.timeIntervalSince1970))",
+                        data: data
+                    )
                     if let attachment = imageAttachment(
-                        name: "Pasted_Image_\(Int(Date.now.timeIntervalSince1970)).jpg",
-                        image: uiImage
+                        name: fileName,
+                        data: data
                     ) {
                         pastedAttachments.append(attachment)
                     }
@@ -609,9 +613,8 @@ final class PasteInterceptingTextView: UITextView {
 
     // MARK: - Helpers
 
-    /// Downsamples an image to ≤ 2 MP and encodes as JPEG.
-    /// Delegates to `FileAttachmentService.downsampleForUpload` which
-    /// guarantees the output stays under the API's 5 MB image limit.
+    /// Encodes UIKit-only pasted images as JPEG. Raw image bytes from Files or
+    /// typed pasteboard data keep their source format in `imageAttachment`.
     private func resizedJPEGData(for image: UIImage) -> Data? {
         let data = FileAttachmentService.downsampleForUpload(image: image)
         return data.isEmpty ? nil : data
@@ -623,7 +626,8 @@ final class PasteInterceptingTextView: UITextView {
     }
 
     private func imageAttachment(name: String, data: Data) -> ChatAttachment? {
-        let uploadData = FileAttachmentService.downsampleForUpload(data: data)
+        let prepared = FileAttachmentService.prepareImageForUpload(data: data, originalName: name)
+        let uploadData = prepared.data
         guard !uploadData.isEmpty else { return nil }
         let thumbnail: Image? = {
             guard let thumbnailData = FileAttachmentService.thumbnailJPEGData(from: uploadData),
@@ -634,14 +638,14 @@ final class PasteInterceptingTextView: UITextView {
         }()
         var attachment = ChatAttachment(
             type: .image,
-            name: name,
+            name: prepared.fileName,
             thumbnail: thumbnail,
             data: uploadData
         )
-        attachment.displayDataURL = "data:image/jpeg;base64,\(uploadData.base64EncodedString())"
+        attachment.displayDataURL = FileAttachmentService.imageDataURL(data: uploadData, fileName: prepared.fileName)
         attachment.displayImageReference = FileAttachmentService.writeImagePreviewToCache(
             data: uploadData,
-            originalName: name
+            originalName: prepared.fileName
         )
         return attachment
     }
