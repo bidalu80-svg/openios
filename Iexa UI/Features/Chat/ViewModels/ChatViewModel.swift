@@ -6143,7 +6143,7 @@ final class ChatViewModel {
         // event types, using replace-if-longer to prevent duplication.
         var contentDelta: String?
         var isReplace = false
-        
+
         switch type {
         case "chat:message:delta", "event:message:delta":
             contentDelta = payload?["content"] as? String
@@ -12762,22 +12762,89 @@ final class ChatViewModel {
             ? detailFallback
             : String(query.prefix(96))
         let content = Self.localNativeFunctionToolEnvelopeContent(for: call)
+        let actionName = Self.localAlpineBrowserActionName(from: call)
+        let startingStatus = ChatStatusUpdate(
+            action: "browser_web_search",
+            status: Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .start),
+            description: query.isEmpty ? Self.localBrowserToolRunningTitle(for: actionName) : "正在搜索网页：\(detail)",
+            done: false,
+            occurredAt: .now,
+            query: query.isEmpty ? nil : query,
+            queries: query.isEmpty ? [] : [query]
+        )
+        updateLocalBrowserToolMessage(
+            messageId: assistantMessageId,
+            content: query.isEmpty ? Self.localBrowserToolRunningTitle(for: actionName) : "正在搜索网页：\(detail)",
+            isStreaming: true,
+            status: startingStatus
+        )
         let result = await LocalNativeToolService.shared.executeBlocks(in: content)
-        if !result.requiresBrowserUserVerification {
-            enqueueLocalAlpineOpenRequests(result.openRequests)
-        }
         let browserVerificationCompleted = await waitForBrowserUserVerificationIfNeeded(
             result,
             messageId: assistantMessageId
         )
+        if !result.requiresBrowserUserVerification {
+            enqueueLocalAlpineOpenRequests(result.openRequests)
+        }
         if !result.files.isEmpty {
             attachLocalNativeFiles(result.files, to: assistantMessageId)
         }
+        let browserURLCount = result.browserDocument?.url == nil ? 0 : 1
+        let inProgressStatus = ChatStatusUpdate(
+            action: "browser_web_search",
+            status: browserVerificationCompleted
+                ? Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .verificationCompleted)
+                : (result.requiresBrowserUserVerification
+                    ? Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .waitingVerification)
+                    : Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .readingResults)),
+            description: browserVerificationCompleted
+                ? "人机验证已完成，正在继续读取网页结果..."
+                : (result.requiresBrowserUserVerification ? "等待人机验证完成..." : (result.browserDocument?.summary ?? result.summary)),
+            done: false,
+            urls: result.browserDocument?.url.map { [$0] } ?? [],
+            occurredAt: .now,
+            items: result.browserDocument?.items ?? [],
+            count: max(result.browserDocument?.items.count ?? 0, browserURLCount),
+            query: query.isEmpty ? nil : query,
+            queries: query.isEmpty ? [] : [query]
+        )
+        updateLocalBrowserToolMessage(
+            messageId: assistantMessageId,
+            content: inProgressStatus.description ?? "正在处理网页结果...",
+            isStreaming: true,
+            status: inProgressStatus
+        )
         let browserDocument = browserVerificationCompleted
             ? result.browserDocument.map { Self.localNativeBrowserVerificationCompletedDocument(from: $0) }
             : result.browserDocument
         let failed = result.browserDocument.map { !$0.ok && !$0.requiresUserVerification }
             ?? Self.localAlpineSyntheticToolFailed(result.summary)
+        let finalDone = browserVerificationCompleted || !result.requiresBrowserUserVerification
+        let browserSucceeded = browserVerificationCompleted || browserDocument?.ok == true
+        let finalStatus = ChatStatusUpdate(
+            action: "browser_web_search",
+            status: Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .completed),
+            description: browserVerificationCompleted
+                ? "网页已继续执行完成"
+                : (result.requiresBrowserUserVerification ? "网页正在等待你完成人机验证" : (browserDocument?.summary ?? result.summary)),
+            done: finalDone,
+            urls: browserDocument?.url.map { [$0] } ?? [],
+            occurredAt: .now,
+            items: browserDocument?.items ?? [],
+            count: max(browserDocument?.items.count ?? 0, browserURLCount),
+            query: query.isEmpty ? nil : query,
+            queries: query.isEmpty ? [] : [query]
+        )
+        updateLocalBrowserToolMessage(
+            messageId: assistantMessageId,
+            content: browserSucceeded
+                ? "\(Self.localBrowserToolCompletedTitle(for: actionName))：\(browserDocument?.title ?? detailFallback)"
+                : (result.requiresBrowserUserVerification
+                    ? "网页操作暂停：请先完成人机验证"
+                    : "\(Self.localBrowserToolFailedTitle(for: actionName))：\(browserDocument?.error ?? browserDocument?.summary ?? result.summary)"),
+            isStreaming: result.requiresBrowserUserVerification && !browserVerificationCompleted,
+            status: finalStatus
+        )
         let output = Self.localNativeFunctionToolResultContent(
             result.summary,
             browserVerificationCompleted: browserVerificationCompleted
@@ -13283,7 +13350,7 @@ final class ChatViewModel {
 
     private static func localAlpineBrowserActionName(
         from call: LocalAlpineNativeToolCall,
-        result: LocalAlpineAgentResult
+        result: LocalAlpineAgentResult? = nil
     ) -> String {
         let args = localAlpineNativeToolArguments(for: call)
         let raw = (args["browser_use_action"] as? String)
@@ -13291,8 +13358,8 @@ final class ChatViewModel {
             ?? (args["operation"] as? String)
             ?? (args["op"] as? String)
             ?? (args["action"] as? String)
-            ?? firstJSONStringValue(in: result.summary, key: "browser_action")
-            ?? firstJSONStringValue(in: result.summary, key: "action")
+            ?? result.flatMap { firstJSONStringValue(in: $0.summary, key: "browser_action") }
+            ?? result.flatMap { firstJSONStringValue(in: $0.summary, key: "action") }
             ?? ""
         let normalized = raw
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -20640,6 +20707,33 @@ final class ChatViewModel {
         if action.contains("fetch") { return "browser.fetch" }
         if action.contains("execute.js") || action.contains("eval.js") { return "browser.execute_js" }
         return action.isEmpty ? "browser.info" : action
+    }
+
+    private enum LocalBrowserToolPhase {
+        case start
+        case waitingVerification
+        case verificationCompleted
+        case readingResults
+        case completed
+    }
+
+    private static func localBrowserToolPhaseStatusKey(
+        for actionName: String,
+        phase: LocalBrowserToolPhase
+    ) -> String {
+        let base = localBrowserToolStepKey(for: actionName)
+        switch phase {
+        case .start:
+            return "\(base).start"
+        case .waitingVerification:
+            return "\(base).waiting_verification"
+        case .verificationCompleted:
+            return "\(base).verification_completed"
+        case .readingResults:
+            return "\(base).reading_results"
+        case .completed:
+            return "\(base).completed"
+        }
     }
 
     private func markLocalOfficeGenerationStarted(messageId: String, kind: LocalNativeOfficeKind) {
