@@ -5475,6 +5475,7 @@ struct ChatDetailView: View {
                 contentOverride: assistantContentOverride[message.id]
                     ?? assistantContentOverrideForActivityParent(message, activityItem: activityItem),
                 showEmptyThinkingCapsule: true,
+                keyboardIsVisible: keyboard.isVisible,
                 serverBaseURL: viewModel.serverBaseURL,
                 authToken: viewModel.serverAuthToken,
                 apiClient: dependencies.apiClient
@@ -8956,6 +8957,7 @@ private struct IsolatedAssistantMessage: View {
     var contentOverride: String? = nil
     /// Suppressed once real inline agent/tool steps are visible for the message.
     var showEmptyThinkingCapsule: Bool = true
+    var keyboardIsVisible: Bool = false
     let serverBaseURL: String
     /// Auth token passed down to Rich UI embed webviews for localStorage injection.
     var authToken: String? = nil
@@ -9097,7 +9099,7 @@ private struct IsolatedAssistantMessage: View {
                                 isStreaming: false,
                                 authToken: authToken,
                                 serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
                             )
                             if !liveProsTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 StreamingMarkdownView(
@@ -9105,7 +9107,7 @@ private struct IsolatedAssistantMessage: View {
                                     isStreaming: true,
                                     authToken: authToken,
                                     serverBaseURL: serverBaseURL,
-                                    deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
+                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
                                 )
                             }
                         } else {
@@ -9114,7 +9116,7 @@ private struct IsolatedAssistantMessage: View {
                                 isStreaming: true,
                                 authToken: authToken,
                                 serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
                             )
                         }
                     }
@@ -9162,7 +9164,7 @@ private struct IsolatedAssistantMessage: View {
                                 isStreaming: false,
                                 authToken: authToken,
                                 serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
                             )
                             // Live tail: current paragraph only, changes every tick.
                             if !liveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -9171,7 +9173,7 @@ private struct IsolatedAssistantMessage: View {
                                     isStreaming: true,
                                     authToken: authToken,
                                     serverBaseURL: serverBaseURL,
-                                    deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
+                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
                                 )
                             }
                         } else {
@@ -9180,7 +9182,7 @@ private struct IsolatedAssistantMessage: View {
                                 isStreaming: true,
                                 authToken: authToken,
                                 serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible
                             )
                         }
                     }
