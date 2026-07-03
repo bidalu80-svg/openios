@@ -8758,53 +8758,72 @@ private struct ImageGenerationPlaceholderView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isActive = false
     @State private var hasEntered = false
+    @State private var entranceTaskStarted = false
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        return DynamicImageGenerationGradient(
-            isDark: theme.isDark,
-            isActive: isActive && !reduceMotion
-        )
-        .allowsHitTesting(false)
-        .clipShape(shape)
-        .overlay {
-            shape
-                .strokeBorder(Color.white.opacity(theme.isDark ? 0.08 : 0.16), lineWidth: 0.75)
+        return Group {
+            if hasEntered {
+                DynamicImageGenerationGradient(
+                    isDark: theme.isDark,
+                    isActive: isActive && !reduceMotion
+                )
+                .allowsHitTesting(false)
+                .clipShape(shape)
+                .overlay {
+                    shape
+                        .strokeBorder(Color.white.opacity(theme.isDark ? 0.08 : 0.16), lineWidth: 0.75)
+                }
+                .background {
+                    shape
+                        .fill(Color.black.opacity(theme.isDark ? 0.16 : 0.05))
+                        .offset(y: 6)
+                        .blur(radius: 10)
+                }
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: 340)
+                .padding(.top, 2)
+                .transition(
+                    .asymmetric(
+                        insertion: .opacity
+                            .combined(with: .scale(scale: 0.965, anchor: .topLeading))
+                            .combined(with: .move(edge: .top)),
+                        removal: .opacity
+                    )
+                )
+            } else {
+                Color.clear
+                    .frame(width: 1, height: 1)
+                    .accessibilityHidden(true)
+            }
         }
-        .background {
-            shape
-                .fill(Color.black.opacity(theme.isDark ? 0.16 : 0.05))
-                .offset(y: 6)
-                .blur(radius: 10)
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .frame(maxWidth: 340)
-        .padding(.top, 2)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .opacity(hasEntered ? 1 : 0)
-        .scaleEffect(hasEntered ? 1 : 0.985, anchor: .topLeading)
-        .offset(y: hasEntered ? 0 : 8)
-        .animation(
-            reduceMotion ? nil : .interactiveSpring(response: 0.46, dampingFraction: 0.88, blendDuration: 0.08),
-            value: hasEntered
-        )
         .onAppear {
             isActive = scenePhase == .active
-            beginEntranceIfNeeded()
         }
         .onDisappear { isActive = false }
         .onChange(of: scenePhase) { _, phase in
             isActive = phase == .active
         }
+        .task {
+            await beginEntranceIfNeeded()
+        }
     }
 
-    private func beginEntranceIfNeeded() {
-        guard !hasEntered else { return }
+    @MainActor
+    private func beginEntranceIfNeeded() async {
+        guard !hasEntered, !entranceTaskStarted else { return }
+        entranceTaskStarted = true
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        guard !Task.isCancelled else {
+            entranceTaskStarted = false
+            return
+        }
         if reduceMotion {
             hasEntered = true
             return
         }
-        DispatchQueue.main.async {
+        withAnimation(.interactiveSpring(response: 0.56, dampingFraction: 0.9, blendDuration: 0.08)) {
             hasEntered = true
         }
     }

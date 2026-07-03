@@ -578,6 +578,9 @@ final class BrowserWebSearchService: NSObject {
         ])
         let x = Self.intValue(call["coordinate_x"] ?? call["x"] ?? call["client_x"])
         let y = Self.intValue(call["coordinate_y"] ?? call["y"] ?? call["client_y"])
+        let visualFallback = Self.boolValue(
+            call["visual_fallback"] ?? call["visualFallback"] ?? call["screenshot_fallback"] ?? call["screenshotFallback"]
+        ) ?? true
         guard selector != nil || label != nil || (x != nil && y != nil) else {
             return [
                 "action": "browser.click",
@@ -725,7 +728,16 @@ final class BrowserWebSearchService: NSObject {
             || findByLabel(desiredLabel)
             || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
           if (!node) {
-            return JSON.stringify({ ok: false, error: 'Element not found' });
+            return JSON.stringify({
+              ok: false,
+              error: 'Element not found',
+              title: document.title || '',
+              url: location.href,
+              selector: selector || '',
+              label: desiredLabel || '',
+              needs_visual_coordinates: true,
+              recovery_hint: 'DOM/accessibility text did not expose the target. Inspect the current viewport screenshot and retry with coordinate_x/coordinate_y instead of concluding the button is absent.'
+            });
           }
           if (node.scrollIntoView) {
             node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
@@ -817,6 +829,14 @@ final class BrowserWebSearchService: NSObject {
         } else if clicked {
             payload["summary"] = "已点击网页元素。"
         } else {
+            if visualFallback,
+               Self.boolValue(payload["needs_visual_coordinates"]) == true,
+               let screenshot = await captureViewportScreenshot(prefix: "browser_click_miss") {
+                payload["screenshot_url"] = screenshot.absoluteString
+                payload["preview_images"] = [screenshot.absoluteString]
+                payload["summary"] = "未在 DOM/可访问性文本中找到目标，已截取当前视口；请根据截图使用坐标点击重试，不要断定页面没有按钮。"
+                return payload
+            }
             payload["summary"] = (payload["error"] as? String) ?? "网页点击未完成。"
         }
         return payload
@@ -1538,14 +1558,27 @@ final class BrowserWebSearchService: NSObject {
         }
         var collected: [[String: Any]] = []
         var viewportContexts: [[String: Any]] = []
+        var visualViewports: [[String: Any]] = []
         var seen = Set<String>()
         var humanVerification: [String: Any]?
         let viewportCount = max(scrollOffsets.count, 1)
         let perViewportLimit = max(6, min(24, ((limit + viewportCount - 1) / viewportCount) + 4))
+        let visualStride = max(1, Int(ceil(Double(viewportCount) / 6.0)))
 
         for (viewportIndex, offset) in scrollOffsets.enumerated() {
             _ = await evaluateJSONObject(Self.scrollToPageYScript(offset))
             try? await Task.sleep(nanoseconds: viewportIndex == 0 ? 180_000_000 : 300_000_000)
+
+            if viewportIndex == 0 || viewportIndex == viewportCount - 1 || viewportIndex % visualStride == 0 {
+                if let screenshot = await captureViewportScreenshot(prefix: "browser_scan_\(viewportIndex)", scrollY: offset) {
+                    visualViewports.append([
+                        "viewport_index": viewportIndex,
+                        "scroll_y": offset,
+                        "screenshot_url": screenshot.absoluteString,
+                        "file_url": screenshot.absoluteString
+                    ])
+                }
+            }
 
             if var context = await evaluateJSONObject(Self.viewportContextScript(textLimit: 900, elementLimit: 8)) {
                 context["viewport_index"] = viewportIndex
@@ -1626,8 +1659,10 @@ final class BrowserWebSearchService: NSObject {
             "count": returnedItems.count,
             "total_count": collected.count,
             "viewport_contexts": viewportContexts,
+            "visual_viewports": visualViewports,
+            "preview_images": visualViewports.compactMap { $0["screenshot_url"] as? String },
             "items": returnedItems,
-            "summary": summary
+            "summary": visualViewports.isEmpty ? summary : "\(summary) 已同步截取 \(visualViewports.count) 个滚动视口用于视觉核对。"
         ]
     }
 
@@ -3081,6 +3116,50 @@ final class BrowserWebSearchService: NSObject {
                     continuation.resume(returning: nil)
                 }
             }
+        }
+    }
+
+    private func captureViewportScreenshot(prefix: String, scrollY: Int? = nil) async -> URL? {
+        let wv = webViewReady()
+        let visibleInAutomationBrowser = isAutomationBrowserVisible(wv)
+        let width = visibleInAutomationBrowser ? max(wv.bounds.width, 1) : browserViewportSize.width
+        let height = visibleInAutomationBrowser ? max(wv.bounds.height, 1) : browserViewportSize.height
+        let originalOffset = wv.scrollView.contentOffset
+
+        wv.isHidden = false
+        wv.alpha = 1
+        if !visibleInAutomationBrowser {
+            wv.frame = CGRect(x: -10_000, y: -10_000, width: width, height: height)
+        }
+        if let scrollY {
+            let maxY = max(wv.scrollView.contentSize.height - height, 0)
+            let clampedY = min(max(CGFloat(scrollY), 0), maxY)
+            wv.scrollView.setContentOffset(CGPoint(x: 0, y: clampedY), animated: false)
+        }
+        wv.setNeedsLayout()
+        wv.layoutIfNeeded()
+        wv.scrollView.layoutIfNeeded()
+        try? await Task.sleep(nanoseconds: 120_000_000)
+
+        guard let image = await captureVisibleWebViewImage(width: width, height: height),
+              let data = image.pngData() else {
+            if scrollY != nil {
+                wv.scrollView.setContentOffset(originalOffset, animated: false)
+            }
+            return nil
+        }
+
+        if scrollY != nil {
+            wv.scrollView.setContentOffset(originalOffset, animated: false)
+        }
+        do {
+            let folder = try browserOutputDirectory()
+            let fileURL = folder.appendingPathComponent("\(prefix)_\(Int(Date().timeIntervalSince1970 * 1000)).png")
+            try data.write(to: fileURL, options: [.atomic])
+            return fileURL
+        } catch {
+            logger.debug("Browser viewport snapshot write failed: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
     }
 
