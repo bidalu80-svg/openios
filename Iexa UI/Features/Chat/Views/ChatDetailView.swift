@@ -9096,14 +9096,16 @@ private struct IsolatedAssistantMessage: View {
                                 content: frozenTailProse,
                                 isStreaming: false,
                                 authToken: authToken,
-                                serverBaseURL: serverBaseURL
+                                serverBaseURL: serverBaseURL,
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
                             )
                             if !liveProsTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 StreamingMarkdownView(
                                     content: liveProsTail,
                                     isStreaming: true,
                                     authToken: authToken,
-                                    serverBaseURL: serverBaseURL
+                                    serverBaseURL: serverBaseURL,
+                                    deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
                                 )
                             }
                         } else {
@@ -9111,7 +9113,8 @@ private struct IsolatedAssistantMessage: View {
                                 content: liveTail,
                                 isStreaming: true,
                                 authToken: authToken,
-                                serverBaseURL: serverBaseURL
+                                serverBaseURL: serverBaseURL,
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
                             )
                         }
                     }
@@ -9158,7 +9161,8 @@ private struct IsolatedAssistantMessage: View {
                                 content: frozenProse,
                                 isStreaming: false,
                                 authToken: authToken,
-                                serverBaseURL: serverBaseURL
+                                serverBaseURL: serverBaseURL,
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
                             )
                             // Live tail: current paragraph only, changes every tick.
                             if !liveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -9166,7 +9170,8 @@ private struct IsolatedAssistantMessage: View {
                                     content: liveProse,
                                     isStreaming: true,
                                     authToken: authToken,
-                                    serverBaseURL: serverBaseURL
+                                    serverBaseURL: serverBaseURL,
+                                    deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
                                 )
                             }
                         } else {
@@ -9174,7 +9179,8 @@ private struct IsolatedAssistantMessage: View {
                                 content: displayContent,
                                 isStreaming: true,
                                 authToken: authToken,
-                                serverBaseURL: serverBaseURL
+                                serverBaseURL: serverBaseURL,
+                                deferVisualizationRevealUntilKeyboardDismissed: keyboard.isVisible
                             )
                         }
                     }
