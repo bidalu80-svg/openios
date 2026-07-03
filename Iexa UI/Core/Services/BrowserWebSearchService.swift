@@ -15,6 +15,11 @@ final class BrowserWebSearchService: NSObject {
     private var browserViewportSize = CGSize(width: 390, height: 720)
     private var browserUserAgentProfile = "mobile_safari"
     private var browserVisibleChallengeRefreshURLs: Set<String> = []
+    private var browserHumanVerificationSeenTabs: Set<Int> = []
+    private var browserHumanVerificationCompletedAtByTab: [Int: Date] = [:]
+    private var browserHumanVerificationCompletedURLByTab: [Int: URL] = [:]
+    private var lastBrowserNavigationReusedExistingPage = false
+    private let humanVerificationPageReuseWindow: TimeInterval = 10 * 60
     private var navigationContinuation: CheckedContinuation<Bool, Never>?
     private var timeoutTask: Task<Void, Never>?
     private weak var automationBrowserContainer: UIView?
@@ -268,6 +273,7 @@ final class BrowserWebSearchService: NSObject {
             "count": itemsPayload.count,
             "items": itemsPayload,
             "docs": Array(docsPayload.prefix(4)),
+            "attach_file": false,
             "preview_images": previewImages,
             "summary": itemsPayload.isEmpty ? "未找到可用搜索结果。" : "已搜索 \(itemsPayload.count) 个网页来源。"
         ]
@@ -283,7 +289,8 @@ final class BrowserWebSearchService: NSObject {
         }
 
         let timeout = TimeInterval(Self.intValue(call["timeout"] ?? call["timeout_seconds"]) ?? 14)
-        guard await load(url: url, timeout: min(max(timeout, 3), 30)) else {
+        let forceReload = Self.boolValue(call["force_reload"] ?? call["forceReload"] ?? call["reload"]) ?? false
+        guard await load(url: url, timeout: min(max(timeout, 3), 30), forceReload: forceReload) else {
             return [
                 "action": readable ? "browser.readable" : "browser.open",
                 "ok": false,
@@ -291,6 +298,7 @@ final class BrowserWebSearchService: NSObject {
                 "error": "Failed to load webpage"
             ]
         }
+        let reusedExistingPage = lastBrowserNavigationReusedExistingPage
         try? await Task.sleep(nanoseconds: 650_000_000)
 
         let maxLength = min(max(Self.intValue(call["max_length"] ?? call["limit"]) ?? 8_000, 800), 18_000)
@@ -311,9 +319,13 @@ final class BrowserWebSearchService: NSObject {
             "description": snapshot?.description ?? "",
             "text": String(text.prefix(maxLength)),
             "text_truncated": text.count > maxLength,
-            "summary": text.isEmpty ? "已打开网页：\(title)" : "已打开并读取网页：\(title)"
+            "reused_existing_page": reusedExistingPage,
+            "summary": reusedExistingPage
+                ? (text.isEmpty ? "已复用当前浏览器页面：\(title)" : "已复用当前浏览器页面并读取：\(title)")
+                : (text.isEmpty ? "已打开网页：\(title)" : "已打开并读取网页：\(title)")
         ]
         if let thumbnail {
+            payload["attach_file"] = false
             payload["preview_images"] = [thumbnail.absoluteString]
             payload["items"] = [[
                 "title": title,
@@ -833,6 +845,7 @@ final class BrowserWebSearchService: NSObject {
                Self.boolValue(payload["needs_visual_coordinates"]) == true,
                let screenshot = await captureViewportScreenshot(prefix: "browser_click_miss") {
                 payload["screenshot_url"] = screenshot.absoluteString
+                payload["attach_file"] = false
                 payload["preview_images"] = [screenshot.absoluteString]
                 payload["summary"] = "未在 DOM/可访问性文本中找到目标，已截取当前视口；请根据截图使用坐标点击重试，不要断定页面没有按钮。"
                 return payload
@@ -1660,6 +1673,7 @@ final class BrowserWebSearchService: NSObject {
             "total_count": collected.count,
             "viewport_contexts": viewportContexts,
             "visual_viewports": visualViewports,
+            "attach_file": false,
             "preview_images": visualViewports.compactMap { $0["screenshot_url"] as? String },
             "items": returnedItems,
             "summary": visualViewports.isEmpty ? summary : "\(summary) 已同步截取 \(visualViewports.count) 个滚动视口用于视觉核对。"
@@ -2098,6 +2112,9 @@ final class BrowserWebSearchService: NSObject {
         }
         closing.removeFromSuperview()
         browserTabs.removeValue(forKey: tabID)
+        browserHumanVerificationSeenTabs.remove(tabID)
+        browserHumanVerificationCompletedAtByTab.removeValue(forKey: tabID)
+        browserHumanVerificationCompletedURLByTab.removeValue(forKey: tabID)
 
         if browserTabs.isEmpty {
             let replacement = makeBrowserWebView()
@@ -3885,13 +3902,19 @@ final class BrowserWebSearchService: NSObject {
         }
     }
 
-    private func load(url: URL, timeout: TimeInterval) async -> Bool {
+    private func load(url: URL, timeout: TimeInterval, forceReload: Bool = false) async -> Bool {
         let wv = webViewReady()
+        if !forceReload, shouldReuseCurrentPage(for: url, in: wv) {
+            lastBrowserNavigationReusedExistingPage = true
+            notifyActiveBrowserDidChange()
+            return true
+        }
+        lastBrowserNavigationReusedExistingPage = false
         timeoutTask?.cancel()
         navigationContinuation?.resume(returning: false)
         navigationContinuation = nil
 
-        return await withCheckedContinuation { continuation in
+        let loaded: Bool = await withCheckedContinuation { continuation in
             navigationContinuation = continuation
             timeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
@@ -3904,16 +3927,87 @@ final class BrowserWebSearchService: NSObject {
                 wv.loadFileURL(url, allowingReadAccessTo: readAccessURL)
             } else {
                 var request = URLRequest(url: url, timeoutInterval: timeout)
-                request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+                request.cachePolicy = .useProtocolCachePolicy
                 if let userAgent = Self.browserUserAgentOverride(profile: browserUserAgentProfile) {
                     request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
                 }
                 request.setValue("zh-CN,zh;q=0.9,en;q=0.8", forHTTPHeaderField: "Accept-Language")
-                request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-                request.setValue("no-cache", forHTTPHeaderField: "Pragma")
                 wv.load(request)
             }
         }
+        return loaded
+    }
+
+    private func shouldReuseCurrentPage(for targetURL: URL, in webView: WKWebView) -> Bool {
+        guard !targetURL.isFileURL,
+              let currentURL = webView.url,
+              Self.isHTTPBrowserURL(currentURL),
+              Self.isHTTPBrowserURL(targetURL) else {
+            return false
+        }
+
+        if Self.browserURLsAreEquivalent(currentURL, targetURL) {
+            return true
+        }
+
+        guard let tabID = browserTabID(for: webView),
+              let completedAt = browserHumanVerificationCompletedAtByTab[tabID],
+              Date().timeIntervalSince(completedAt) <= humanVerificationPageReuseWindow,
+              let completedURL = browserHumanVerificationCompletedURLByTab[tabID],
+              Self.browserHostsMatch(completedURL, targetURL),
+              Self.browserHostsMatch(currentURL, targetURL),
+              Self.browserPathsAreCompatibleAfterVerification(currentURL, targetURL) else {
+            return false
+        }
+        return true
+    }
+
+    private func browserTabID(for source: WKWebView?) -> Int? {
+        guard let source else { return nil }
+        return browserTabs.first { $0.value === source }?.key
+    }
+
+    private static func isHTTPBrowserURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
+    }
+
+    private static func browserURLsAreEquivalent(_ lhs: URL, _ rhs: URL) -> Bool {
+        guard browserHostsMatch(lhs, rhs),
+              normalizedBrowserPath(lhs.path) == normalizedBrowserPath(rhs.path) else {
+            return false
+        }
+        let lhsQuery = lhs.query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let rhsQuery = rhs.query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return rhsQuery.isEmpty || lhsQuery == rhsQuery
+    }
+
+    private static func browserHostsMatch(_ lhs: URL, _ rhs: URL) -> Bool {
+        guard let lhsHost = lhs.host?.lowercased(),
+              let rhsHost = rhs.host?.lowercased(),
+              !lhsHost.isEmpty,
+              !rhsHost.isEmpty else {
+            return false
+        }
+        return lhsHost == rhsHost
+            || lhsHost.hasSuffix(".\(rhsHost)")
+            || rhsHost.hasSuffix(".\(lhsHost)")
+    }
+
+    private static func browserPathsAreCompatibleAfterVerification(_ currentURL: URL, _ targetURL: URL) -> Bool {
+        let currentPath = normalizedBrowserPath(currentURL.path)
+        let targetPath = normalizedBrowserPath(targetURL.path)
+        return currentPath == targetPath || targetPath == "/"
+    }
+
+    private static func normalizedBrowserPath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "/" }
+        let withLeadingSlash = trimmed.hasPrefix("/") ? trimmed : "/\(trimmed)"
+        let withoutTrailingSlash = withLeadingSlash.count > 1 && withLeadingSlash.hasSuffix("/")
+            ? String(withLeadingSlash.dropLast())
+            : withLeadingSlash
+        return withoutTrailingSlash.isEmpty ? "/" : withoutTrailingSlash
     }
 
     private func webViewReady() -> WKWebView {
@@ -4002,10 +4096,23 @@ final class BrowserWebSearchService: NSObject {
             let detected = Self.boolValue(probe["detected"]) == true
             let completed = Self.boolValue(probe["completed"]) == true
             let failedState = Self.boolValue(probe["failed_state"]) == true
-            guard detected, failedState || !completed else { return }
+            guard detected, failedState, !completed else { return }
+            if self.hasRecentHumanVerificationCompletion(in: webView, matching: url) {
+                return
+            }
             self.browserVisibleChallengeRefreshURLs.insert(key)
             webView.reload()
         }
+    }
+
+    private func hasRecentHumanVerificationCompletion(in webView: WKWebView, matching url: URL) -> Bool {
+        guard let tabID = browserTabID(for: webView),
+              let completedAt = browserHumanVerificationCompletedAtByTab[tabID],
+              Date().timeIntervalSince(completedAt) <= humanVerificationPageReuseWindow,
+              let completedURL = browserHumanVerificationCompletedURLByTab[tabID] else {
+            return false
+        }
+        return Self.browserHostsMatch(completedURL, url)
     }
 
     private func notifyHumanVerificationStateIfNeeded(from source: WKWebView) {
@@ -4022,13 +4129,31 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func notifyHumanVerificationState(_ probe: [String: Any]) {
+        let detected = Self.boolValue(probe["detected"]) == true
+        let explicitCompleted = Self.boolValue(probe["completed"]) == true
+        let completed = explicitCompleted || !detected
+        if let tabID = browserTabID(for: webView) {
+            if detected {
+                browserHumanVerificationSeenTabs.insert(tabID)
+            }
+            if completed,
+               (explicitCompleted || browserHumanVerificationSeenTabs.contains(tabID)),
+               let currentURL = webView?.url,
+               Self.isHTTPBrowserURL(currentURL) {
+                browserHumanVerificationCompletedAtByTab[tabID] = Date()
+                browserHumanVerificationCompletedURLByTab[tabID] = currentURL
+                browserVisibleChallengeRefreshURLs.insert(currentURL.absoluteString)
+                if !detected {
+                    browserHumanVerificationSeenTabs.remove(tabID)
+                }
+            }
+        }
         NotificationCenter.default.post(
             name: .browserWebSearchServiceHumanVerificationStateDidChange,
             object: webView,
             userInfo: [
-                "detected": Self.boolValue(probe["detected"]) == true,
-                "completed": Self.boolValue(probe["completed"]) == true
-                    || Self.boolValue(probe["detected"]) != true,
+                "detected": detected,
+                "completed": completed,
                 "failed_state": Self.boolValue(probe["failed_state"]) == true,
                 "url": webView?.url?.absoluteString ?? "",
                 "title": webView?.title ?? ""
