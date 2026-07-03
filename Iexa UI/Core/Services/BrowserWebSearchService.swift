@@ -1364,8 +1364,17 @@ final class BrowserWebSearchService: NSObject {
             ]
         }
         var payload = object
+        if let context = await evaluateJSONObject(Self.viewportContextScript(textLimit: 2200, elementLimit: 18)) {
+            payload["viewport_context"] = context
+            payload["visible_text"] = context["visible_text"] as? String ?? ""
+            payload["visible_elements"] = context["interactive_elements"] as? [[String: Any]] ?? []
+        }
         payload["action"] = "browser.scroll"
-        payload["summary"] = "已滚动网页。"
+        if let visibleText = payload["visible_text"] as? String, !visibleText.isEmpty {
+            payload["summary"] = "已滚动网页，并读取当前视口可见内容。"
+        } else {
+            payload["summary"] = "已滚动网页。"
+        }
         return payload
     }
 
@@ -1525,6 +1534,7 @@ final class BrowserWebSearchService: NSObject {
             scrollOffsets = sampled.filter { seenSamples.insert($0).inserted }
         }
         var collected: [[String: Any]] = []
+        var viewportContexts: [[String: Any]] = []
         var seen = Set<String>()
         var humanVerification: [String: Any]?
         let viewportCount = max(scrollOffsets.count, 1)
@@ -1533,6 +1543,12 @@ final class BrowserWebSearchService: NSObject {
         for (viewportIndex, offset) in scrollOffsets.enumerated() {
             _ = await evaluateJSONObject(Self.scrollToPageYScript(offset))
             try? await Task.sleep(nanoseconds: viewportIndex == 0 ? 180_000_000 : 300_000_000)
+
+            if var context = await evaluateJSONObject(Self.viewportContextScript(textLimit: 900, elementLimit: 8)) {
+                context["viewport_index"] = viewportIndex
+                context["scroll_y"] = offset
+                viewportContexts.append(context)
+            }
 
             guard let snapshot = await evaluateJSONObject(Self.elementCollectionScript(
                 selector: selector,
@@ -1606,6 +1622,7 @@ final class BrowserWebSearchService: NSObject {
             "requires_user_verification": verificationDetected && !verificationCompleted,
             "count": returnedItems.count,
             "total_count": collected.count,
+            "viewport_contexts": viewportContexts,
             "items": returnedItems,
             "summary": summary
         ]
@@ -2291,6 +2308,92 @@ final class BrowserWebSearchService: NSObject {
           return JSON.stringify({
             ok: true,
             scroll_y: Math.round(window.scrollY || (doc && doc.scrollTop) || 0)
+          });
+        })();
+        """
+    }
+
+    private static func viewportContextScript(textLimit: Int, elementLimit: Int) -> String {
+        """
+        (() => {
+          const textLimit = \(max(textLimit, 0));
+          const elementLimit = \(max(elementLimit, 0));
+          const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+          const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+          function clean(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim();
+          }
+          function visibleRect(el) {
+            if (!el || !el.getBoundingClientRect) return null;
+            const rect = el.getBoundingClientRect();
+            const width = Math.max(0, Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0));
+            const height = Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0));
+            if (width < 2 || height < 2) return null;
+            return {
+              x: Math.round(rect.left),
+              y: Math.round(rect.top),
+              page_x: Math.round(rect.left + (window.scrollX || 0)),
+              page_y: Math.round(rect.top + (window.scrollY || 0)),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height)
+            };
+          }
+          function isVisible(el) {
+            const rect = visibleRect(el);
+            if (!rect) return false;
+            const style = window.getComputedStyle(el);
+            return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0.01;
+          }
+          const interactiveSelector = [
+            'a[href]', 'button', 'input', 'textarea', 'select', 'summary',
+            '[role="button"]', '[role="link"]', '[role="menuitem"]',
+            '[tabindex]:not([tabindex="-1"])', '[contenteditable="true"]'
+          ].join(',');
+          const elements = Array.from(document.querySelectorAll(interactiveSelector))
+            .filter(isVisible)
+            .slice(0, elementLimit)
+            .map((el, index) => {
+              const rect = visibleRect(el) || {};
+              return {
+                index,
+                tag: (el.tagName || '').toLowerCase(),
+                text: clean(el.innerText || el.textContent).slice(0, 180),
+                aria_label: clean(el.getAttribute('aria-label')).slice(0, 180),
+                title: clean(el.getAttribute('title')).slice(0, 180),
+                placeholder: clean(el.getAttribute('placeholder')).slice(0, 180),
+                href: clean(el.getAttribute('href')).slice(0, 300),
+                role: clean(el.getAttribute('role')),
+                id: clean(el.id),
+                rect
+              };
+            });
+          const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+              const value = clean(node.nodeValue);
+              if (!value) return NodeFilter.FILTER_REJECT;
+              const parent = node.parentElement;
+              if (!parent || !isVisible(parent)) return NodeFilter.FILTER_REJECT;
+              return NodeFilter.FILTER_ACCEPT;
+            }
+          });
+          const chunks = [];
+          let total = 0;
+          while (walker.nextNode() && total < textLimit) {
+            const value = clean(walker.currentNode.nodeValue);
+            if (!value) continue;
+            chunks.push(value);
+            total += value.length + 1;
+          }
+          const visibleText = clean(chunks.join(' ')).slice(0, textLimit);
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            scroll_y: Math.round(window.scrollY || 0),
+            viewport_width: Math.round(viewportWidth),
+            viewport_height: Math.round(viewportHeight),
+            visible_text: visibleText,
+            interactive_elements: elements
           });
         })();
         """

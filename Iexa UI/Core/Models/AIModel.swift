@@ -216,6 +216,11 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
         "生视频", "视频生成"
     ]
 
+    fileprivate static let imageInputHintTokens: [String] = [
+        "vision", "multimodal", "image_input", "input_image", "image input",
+        "images_input", "supports_image_input", "vlm"
+    ]
+
     fileprivate static let videoGenerationHintTokens: [String] = [
         "video", "videos", "text-to-video", "image-to-video", "t2v", "i2v",
         "veo", "sora", "kling", "hailuo", "runway", "luma", "pika", "vidu",
@@ -390,6 +395,9 @@ enum LocalModelCapabilityRegistry {
             capability.outputModalities.insert("image")
             capability.endpointTypes.insert("image_generation")
         }
+        if AIModel.imageInputHintTokens.contains(where: { haystack.contains($0) }) {
+            capability.inputModalities.insert("image")
+        }
         if AIModel.videoGenerationHintTokens.contains(where: { haystack.contains($0) }) {
             capability.outputModalities.insert("video")
             capability.endpointTypes.insert("video_generation")
@@ -507,7 +515,7 @@ enum LocalModelCapabilityRegistry {
                 capability.outputModalities.insert("image")
                 capability.endpointTypes.insert("image_generation")
             }
-        case "vision", "image_input", "imageinput", "input_image", "inputimage", "multimodal":
+        case "vision", "image_input", "imageinput", "input_image", "inputimage", "images_input", "imagesinput", "supports_image_input", "supportsimageinput", "multimodal":
             if truth != false {
                 capability.inputModalities.insert("image")
             }
