@@ -4193,57 +4193,123 @@ final class BrowserWebSearchService: NSObject {
     private static func scrollToHumanVerificationScript() -> String {
         """
         (() => {
-          const visible = el => {
-            if (!el || !el.getBoundingClientRect) return false;
-            const r = el.getBoundingClientRect();
-            const style = getComputedStyle(el);
-            return r.width > 1 && r.height > 1 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-          };
-          const selectors = [
+          const pattern = /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|captcha|turnstile|recaptcha|cf-challenge|cloudflare|验证您是真人|请验证您是真人|正在检查|人机验证|验证失败|故障排除/i;
+          const selectorList = [
             '[name="cf-turnstile-response"]',
             'input[id^="cf-chl-widget"]',
             '.cf-turnstile',
             '[data-sitekey]',
             '[name="g-recaptcha-response"]',
             '.g-recaptcha',
-            'iframe[src*="turnstile"]',
-            'iframe[src*="recaptcha"]',
-            'iframe[src*="challenge"]',
+            '[class*="turnstile" i]',
+            '[class*="captcha" i]',
+            '[id*="turnstile" i]',
+            '[id*="captcha" i]',
+            '[id*="challenge" i]',
+            'iframe[src*="turnstile" i]',
+            'iframe[src*="recaptcha" i]',
+            'iframe[src*="challenge" i]',
             'iframe[title*="challenge" i]',
             'iframe[title*="captcha" i]',
-            'iframe[title*="verification" i]'
+            'iframe[title*="verification" i]',
+            'iframe[title*="cloudflare" i]'
           ];
-          let target = null;
-          for (const selector of selectors) {
-            const node = Array.from(document.querySelectorAll(selector)).find(visible);
-            if (node) {
-              target = node.closest('form, section, main, div') || node;
-              break;
+          const viewportH = Math.max(window.innerHeight || 0, document.documentElement.clientHeight || 0, 1);
+          const viewportW = Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0, 1);
+          const textOf = node => [
+            node.id || '',
+            node.className || '',
+            node.name || '',
+            node.title || '',
+            node.getAttribute && node.getAttribute('aria-label') || '',
+            node.getAttribute && node.getAttribute('data-sitekey') || '',
+            node.src || '',
+            node.innerText || '',
+            node.textContent || ''
+          ].join(' ').replace(/\\s+/g, ' ').trim();
+          const rectOf = node => {
+            const r = node && node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+            return r ? { x: r.x, y: r.y, width: r.width, height: r.height, top: r.top, left: r.left } : null;
+          };
+          const visible = node => {
+            const r = rectOf(node);
+            if (!r) return false;
+            const style = getComputedStyle(node);
+            return r.width > 1 && r.height > 1 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+          };
+          const centerDistancePenalty = node => {
+            const r = rectOf(node);
+            if (!r) return 0;
+            const cx = r.left + r.width / 2;
+            const cy = r.top + r.height / 2;
+            return Math.abs(cx - viewportW / 2) / Math.max(viewportW, 1) + Math.abs(cy - viewportH / 2) / Math.max(viewportH, 1);
+          };
+          const candidates = [];
+          const addCandidate = (node, reason, baseScore) => {
+            if (!node || !visible(node)) return;
+            const text = textOf(node);
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const r = rectOf(node);
+            let score = baseScore || 0;
+            if (pattern.test(text)) score += 35;
+            if (/iframe/.test(tag)) score += 20;
+            if (/cf-|cloudflare|turnstile|captcha|recaptcha|challenge/i.test(text)) score += 30;
+            if (r.width >= 80 && r.height >= 40 && r.width <= viewportW * 1.1 && r.height <= viewportH * 0.9) score += 10;
+            if (r.height > viewportH * 1.2 || r.width > viewportW * 1.4) score -= 30;
+            score -= centerDistancePenalty(node) * 3;
+            candidates.push({ node, reason, score, text, rect: r });
+          };
+          for (const selector of selectorList) {
+            let nodes = [];
+            try { nodes = Array.from(document.querySelectorAll(selector)).slice(0, 30); } catch (_) { nodes = []; }
+            for (const node of nodes) {
+              addCandidate(node, selector, 50);
+              const box = node.closest && node.closest('.cf-turnstile, .g-recaptcha, form, section, main, [role="main"], div');
+              if (box && box !== node) addCandidate(box, selector + ' container', 18);
             }
           }
-          if (!target) {
-            const pattern = /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|captcha|turnstile|验证您是真人|请验证您是真人|正在检查|验证失败|故障排除/i;
-            const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
-            let node;
-            while ((node = walker.nextNode())) {
-              if (!visible(node)) continue;
-              const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
-              if (text && pattern.test(text)) {
-                target = node;
-                break;
-              }
+          const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
+          let walked = 0;
+          let node;
+          while ((node = walker.nextNode()) && walked < 1800) {
+            walked += 1;
+            if (!visible(node)) continue;
+            const text = textOf(node);
+            if (pattern.test(text)) addCandidate(node, 'text', 25);
+          }
+          candidates.sort((a, b) => b.score - a.score);
+          const best = candidates[0];
+          if (!best || best.score < 20) {
+            return JSON.stringify({ scrolled: false, reason: 'verification target not found', url: location.href, candidates: candidates.slice(0, 3).map(c => ({ reason: c.reason, score: Math.round(c.score), text: c.text.slice(0, 120) })) });
+          }
+          const target = best.node;
+          const targetRect = target.getBoundingClientRect();
+          const pageX = targetRect.left + window.scrollX + targetRect.width / 2;
+          const pageY = targetRect.top + window.scrollY + targetRect.height / 2;
+          let parent = target.parentElement;
+          while (parent && parent !== document.body && parent !== document.documentElement) {
+            const style = getComputedStyle(parent);
+            const canScrollY = /(auto|scroll|overlay)/i.test(style.overflowY) && parent.scrollHeight > parent.clientHeight + 8;
+            if (canScrollY) {
+              const pr = parent.getBoundingClientRect();
+              const tr = target.getBoundingClientRect();
+              parent.scrollTop += (tr.top + tr.height / 2) - (pr.top + pr.height / 2);
             }
+            parent = parent.parentElement;
           }
-          if (!target) {
-            return JSON.stringify({ scrolled: false, reason: 'verification target not found', url: location.href });
-          }
-          try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' }); }
-          catch (_) { target.scrollIntoView(true); }
+          const maxY = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0) - viewportH;
+          const nextY = Math.max(0, Math.min(maxY, pageY - viewportH * 0.42));
+          try { window.scrollTo({ top: nextY, left: Math.max(0, pageX - viewportW / 2), behavior: 'smooth' }); }
+          catch (_) { window.scrollTo(Math.max(0, pageX - viewportW / 2), nextY); }
+          try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' }); } catch (_) {}
           const r = target.getBoundingClientRect();
           return JSON.stringify({
             scrolled: true,
             url: location.href,
+            reason: best.reason,
+            score: Math.round(best.score),
             scroll_y: Math.round(window.scrollY || 0),
+            target_text: best.text.slice(0, 180),
             rect: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
           });
         })();
