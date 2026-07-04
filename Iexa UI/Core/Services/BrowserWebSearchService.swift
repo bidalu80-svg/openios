@@ -853,6 +853,12 @@ final class BrowserWebSearchService: NSObject {
         } else if clicked {
             payload["summary"] = "已点击网页元素。"
         } else {
+            if x == nil,
+               y == nil,
+               (selector != nil || label != nil),
+               let recovered = await attemptClickByScanningPage(selector: selector, label: label) {
+                return recovered
+            }
             if visualFallback,
                Self.boolValue(payload["needs_visual_coordinates"]) == true,
                let screenshot = await captureViewportScreenshot(prefix: "browser_click_miss") {
@@ -1180,6 +1186,70 @@ final class BrowserWebSearchService: NSObject {
             payload["summary"] = (payload["error"] as? String) ?? "网页输入未完成。"
         }
         return payload
+    }
+
+    private func attemptClickByScanningPage(selector: String?, label: String?) async -> [String: Any]? {
+        guard let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) else {
+            return nil
+        }
+        let originalY = Self.intValue(metrics["scroll_y"]) ?? 0
+        let viewportHeight = max(Self.intValue(metrics["viewport_height"]) ?? 720, 240)
+        let scrollHeight = max(Self.intValue(metrics["scroll_height"]) ?? viewportHeight, viewportHeight)
+        let maxY = max(scrollHeight - viewportHeight, 0)
+        let step = max(Int(Double(viewportHeight) * 0.72), 220)
+        var offsets = [0]
+        if maxY > 0 {
+            var nextY = 0
+            while nextY < maxY {
+                offsets.append(nextY)
+                nextY += step
+            }
+            offsets.append(maxY)
+        }
+        offsets = Self.sampledUniqueOffsets(offsets, limit: 22)
+
+        for (index, offset) in offsets.enumerated() {
+            _ = await evaluateJSONObject(Self.scrollToPageYScript(offset))
+            try? await Task.sleep(nanoseconds: index == 0 ? 180_000_000 : 320_000_000)
+
+            if let probe = await evaluateJSONObject(Self.visibleChallengeProbeScript()),
+               Self.boolValue(probe["detected"]) == true,
+               Self.boolValue(probe["completed"]) != true {
+                _ = await scrollToVisibleHumanVerification()
+                return [
+                    "action": "browser.click",
+                    "ok": false,
+                    "requires_user_verification": true,
+                    "human_verification": probe,
+                    "auto_scanned_page": true,
+                    "scroll_positions": offsets.count,
+                    "summary": "网页需要先完成人机验证，已滚动到验证区域。"
+                ]
+            }
+
+            guard var object = await evaluateJSONObject(Self.clickVisibleElementScript(selector: selector, label: label)) else {
+                continue
+            }
+            if Self.boolValue(object["requires_user_verification"]) == true {
+                _ = await scrollToVisibleHumanVerification()
+                object["action"] = "browser.click"
+                object["auto_scanned_page"] = true
+                object["scroll_positions"] = offsets.count
+                object["summary"] = "网页需要先完成人机验证，已滚动到验证区域。"
+                return object
+            }
+            if Self.boolValue(object["ok"]) == true {
+                object["action"] = "browser.click"
+                object["auto_scanned_page"] = true
+                object["scroll_positions"] = offsets.count
+                object["scroll_y"] = offset
+                object["summary"] = "已自动滚动整页并点击匹配的网页元素。"
+                return object
+            }
+        }
+
+        _ = await evaluateJSONObject(Self.scrollToPageYScript(originalY))
+        return nil
     }
 
     private func executeNativeHover(_ call: [String: Any]) async -> [String: Any] {
@@ -2564,6 +2634,152 @@ final class BrowserWebSearchService: NSObject {
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return intent.isEmpty ? nil : intent
+    }
+
+    private static func clickVisibleElementScript(selector: String?, label: String?) -> String {
+        """
+        (() => {
+          const selector = \(Self.javascriptString(selector ?? ""));
+          const desiredLabel = \(Self.javascriptString(label ?? ""));
+          const clickableSelector = [
+            'button', 'a[href]', 'input', 'textarea', 'select', 'summary',
+            '[role="button"]', '[role="link"]', '[onclick]', '[tabindex]',
+            '[aria-label]', '[data-testid]', '[data-test]', '[data-cy]'
+          ].join(',');
+          function norm(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          }
+          function text(node) {
+            return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function accessibleText(node) {
+            if (!node) return '';
+            const parts = [
+              text(node),
+              node.getAttribute ? node.getAttribute('aria-label') : '',
+              node.getAttribute ? node.getAttribute('title') : '',
+              node.getAttribute ? node.getAttribute('alt') : '',
+              node.getAttribute ? node.getAttribute('name') : '',
+              node.getAttribute ? node.getAttribute('value') : '',
+              node.getAttribute ? node.getAttribute('placeholder') : '',
+              node.getAttribute ? node.getAttribute('data-testid') : '',
+              node.value || '',
+              node.placeholder || ''
+            ];
+            return parts.filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+          }
+          function visible(node) {
+            if (!node || !node.getBoundingClientRect) return false;
+            if (node.hidden || (node.closest && node.closest('[hidden],[aria-hidden="true"]'))) return false;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
+            const r = node.getBoundingClientRect();
+            return r.width > 1 && r.height > 1 && r.bottom >= 0 && r.right >= 0 && r.top <= innerHeight && r.left <= innerWidth;
+          }
+          function allRoots() {
+            const roots = [document];
+            for (let i = 0; i < roots.length; i += 1) {
+              const root = roots[i];
+              const nodes = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+              for (const node of nodes) {
+                if (node.shadowRoot) roots.push(node.shadowRoot);
+              }
+            }
+            return roots;
+          }
+          function deepQuerySelector(raw) {
+            if (!raw) return null;
+            for (const root of allRoots()) {
+              try {
+                const match = root.querySelector(raw);
+                if (match && visible(match)) return match;
+              } catch (_) {
+                return null;
+              }
+            }
+            return null;
+          }
+          function findByLabel(raw) {
+            const wanted = norm(raw);
+            if (!wanted) return null;
+            const candidates = [];
+            for (const root of allRoots()) {
+              try { candidates.push(...Array.from(root.querySelectorAll(clickableSelector))); } catch (_) {}
+            }
+            let best = null;
+            let bestScore = -1;
+            for (const node of candidates) {
+              if (!visible(node)) continue;
+              const label = norm(accessibleText(node));
+              if (!label) continue;
+              let score = -1;
+              if (label === wanted) score = 100;
+              else if (label.startsWith(wanted)) score = 80;
+              else if (label.includes(wanted)) score = 60;
+              else if (wanted.includes(label) && label.length >= 2) score = 40;
+              if (score > bestScore) {
+                best = node;
+                bestScore = score;
+              }
+            }
+            return best;
+          }
+          function humanVerificationState() {
+            const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
+            const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
+            const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || frame.getAttribute('aria-label') || '').join(' ');
+            const bodyText = norm(document.body && document.body.innerText || '');
+            const textDetected = /prove you are human|verify you are human|checking if the site connection is secure|captcha|turnstile|recaptcha|人机验证|验证您是真人|请验证您是真人|正在检查/.test(bodyText);
+            const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
+            const tokenNode = turnstile || recaptcha;
+            const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
+            return { detected: Boolean(provider), provider, token_length: tokenLength, completed: Boolean(tokenLength > 0) };
+          }
+          const verification = humanVerificationState();
+          if (verification.detected && !verification.completed) {
+            return JSON.stringify({ ok: false, requires_user_verification: true, human_verification: verification, title: document.title || '', url: location.href });
+          }
+          const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
+          if (!node) {
+            return JSON.stringify({ ok: false, error: 'Element not found in current viewport', title: document.title || '', url: location.href });
+          }
+          try { node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
+          const target = node.closest && node.closest('button, a, input, textarea, select, [contenteditable], [role="button"], [onclick]') || node;
+          const r = target.getBoundingClientRect ? target.getBoundingClientRect() : null;
+          const cx = r ? Math.round(r.left + r.width / 2) : 0;
+          const cy = r ? Math.round(r.top + r.height / 2) : 0;
+          const disabled = Boolean(target.disabled || target.getAttribute && target.getAttribute('aria-disabled') === 'true');
+          if (disabled) {
+            return JSON.stringify({ ok: false, disabled: true, title: document.title || '', url: location.href, text: accessibleText(target).slice(0, 160) });
+          }
+          const events = [
+            ['pointerdown', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, pointerType: 'touch', isPrimary: true }],
+            ['mousedown', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy }],
+            ['pointerup', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy, pointerType: 'touch', isPrimary: true }],
+            ['mouseup', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy }],
+            ['click', { bubbles: true, cancelable: true, composed: true, clientX: cx, clientY: cy }]
+          ];
+          for (const [name, init] of events) {
+            try {
+              const event = name.startsWith('pointer') && window.PointerEvent ? new PointerEvent(name, init) : new MouseEvent(name, init);
+              target.dispatchEvent(event);
+            } catch (_) {}
+          }
+          if (typeof target.click === 'function') {
+            try { target.click(); } catch (_) {}
+          }
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            tag: (target.tagName || target.nodeName || '').toLowerCase(),
+            text: accessibleText(target).slice(0, 160),
+            coordinate_x: cx,
+            coordinate_y: cy
+          });
+        })();
+        """
     }
 
     private static func elementCollectionScript(selector: String, limit: Int, intent: String? = nil) -> String {
