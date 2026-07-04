@@ -2181,18 +2181,18 @@ final class BrowserWebSearchService: NSObject {
         let limit = min(max(Self.intValue(call["limit"] ?? call["max_results"]) ?? 30, 1), 100)
         let intent = Self.findElementsIntent(in: call)
         let scanPage = Self.boolValue(call["scan_page"] ?? call["scanPage"] ?? call["full_page"] ?? call["fullPage"]) ?? true
-        let captureVisuals = Self.boolValue(
-            call["capture_visuals"]
-                ?? call["captureVisuals"]
-                ?? call["with_screenshots"]
-                ?? call["withScreenshots"]
-                ?? call["screenshots"]
-                ?? call["visual"]
-                ?? call["visual_observation"]
-                ?? call["include_visuals"]
-                ?? call["includeVisuals"]
-                ?? call["screenshot"]
-        ) ?? false
+        var captureVisuals = false
+        for key in [
+            "capture_visuals", "captureVisuals",
+            "with_screenshots", "withScreenshots",
+            "screenshots", "visual", "visual_observation",
+            "include_visuals", "includeVisuals", "screenshot"
+        ] {
+            if let value = Self.boolValue(call[key]) {
+                captureVisuals = value
+                break
+            }
+        }
         if scanPage {
             let maxScrolls = min(max(Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 16, 1), 20)
             return await executeNativeFindElementsAcrossPage(

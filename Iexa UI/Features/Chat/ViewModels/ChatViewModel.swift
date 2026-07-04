@@ -11882,7 +11882,19 @@ final class ChatViewModel {
         let toolContent: String
         let completedAssistantTurn: Bool
         let visibleContent: String?
-        let modelVisualContextMessage: [String: Any]? = nil
+        let modelVisualContextMessage: [String: Any]?
+
+        init(
+            toolContent: String,
+            completedAssistantTurn: Bool,
+            visibleContent: String?,
+            modelVisualContextMessage: [String: Any]? = nil
+        ) {
+            self.toolContent = toolContent
+            self.completedAssistantTurn = completedAssistantTurn
+            self.visibleContent = visibleContent
+            self.modelVisualContextMessage = modelVisualContextMessage
+        }
     }
 
     private func streamOpenAICompatibleLocalNativeFunctionLoop(
