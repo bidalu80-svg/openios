@@ -1320,9 +1320,80 @@ final class BrowserWebSearchService: NSObject {
         var steps: [[String: Any]] = []
         let continuationCall = Self.browserContinuationCall(from: call)
         let maxLoops = min(max(Self.intValue(call["max_loops"] ?? call["maxLoops"] ?? call["retries"]) ?? 2, 1), 4)
+        let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
+        let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? (text != nil)
+        var imageBaselineSources: [String] = []
 
         func appendStep(_ name: String, _ payload: [String: Any]) {
             steps.append(Self.workflowStep(name, payload))
+        }
+
+        func imageSources(from payload: [String: Any]) -> [String] {
+            var sources = Self.stringArray(in: payload, keys: ["image_sources", "imageSources", "candidate_sources", "candidateSources"])
+            if let candidates = payload["candidates"] as? [[String: Any]] {
+                sources.append(contentsOf: candidates.compactMap { candidate in
+                    (candidate["source_key"] as? String) ?? (candidate["src"] as? String)
+                })
+            }
+            return Self.unique(sources)
+        }
+
+        func recordImageBaseline(from payload: [String: Any]) {
+            imageBaselineSources = Self.unique(imageBaselineSources + imageSources(from: payload))
+        }
+
+        func probeWorkflowState(name: String) async -> [String: Any] {
+            let state = await evaluateJSONObject(Self.generationWorkflowStateScript(
+                expectedPrompt: text,
+                excludeSources: imageBaselineSources
+            )) ?? [
+                "action": "browser.workflow_state",
+                "ok": false,
+                "error": "Unable to inspect workflow state"
+            ]
+            appendStep(name, state)
+            return state
+        }
+
+        func generationFailedStopIfNeeded(_ payload: [String: Any]) -> [String: Any]? {
+            let state = (payload["generation_state"] as? String ?? "").lowercased()
+            guard ["failed", "retry"].contains(state) else { return nil }
+            let failure = payload["failure_text"] as? String
+            let failureText = failure ?? ""
+            let summary = !failureText.isEmpty
+                ? "网页返回生成失败状态：\(failureText)"
+                : "网页返回生成失败/重试状态，自动流程已停止。"
+            return Self.workflowPayload(
+                ok: false,
+                steps: steps,
+                summary: summary
+            )
+        }
+
+        func promptVerified(_ payload: [String: Any], fallback: [String: Any]? = nil) -> Bool {
+            if Self.boolValue(payload["prompt_value_verified"]) == true {
+                return true
+            }
+            guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return Self.boolValue(fallback.flatMap { $0["ok"] }) == true
+            }
+            let expected = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let values = [
+                payload["prompt_value"] as? String,
+                fallback.flatMap { $0["value"] as? String },
+                fallback.flatMap { $0["text"] as? String }
+            ].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            return values.contains { value in
+                !value.isEmpty && (value.contains(expected) || expected.contains(value))
+            }
+        }
+
+        func afterClickLooksStarted(_ payload: [String: Any]) -> Bool {
+            let state = (payload["generation_state"] as? String ?? "").lowercased()
+            if ["generating", "waiting", "success"].contains(state) {
+                return true
+            }
+            return (Self.intValue(payload["new_candidate_count"] ?? payload["candidate_count"]) ?? 0) > 0
         }
 
         func verificationStopIfNeeded(
@@ -1397,7 +1468,12 @@ final class BrowserWebSearchService: NSObject {
             }
         }
 
-        let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
+        let initialState = await probeWorkflowState(name: "browser.workflow_state.initial")
+        if let stop = verificationStopIfNeeded(initialState) {
+            return stop
+        }
+        recordImageBaseline(from: initialState)
+
         var inputScan: [String: Any]?
         if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let inputIntent = Self.firstString(in: call, keys: ["field_hint", "fieldHint", "input_hint", "inputHint", "target", "field_label", "fieldLabel"])
@@ -1422,6 +1498,11 @@ final class BrowserWebSearchService: NSObject {
                 typeCall["target"] = Self.firstString(in: call, keys: ["field_hint", "fieldHint", "input_hint", "inputHint"])
                     ?? "prompt description text input"
             }
+            if let rect = initialState["prompt_rect"] as? [String: Any],
+               let coordinateCall = await browserCoordinateCall(from: ["rect": rect], baseCall: typeCall) {
+                typeCall = coordinateCall
+                typeCall["text"] = text
+            }
             var typedOK = false
             var lastTyped: [String: Any]?
             for attempt in 0..<maxLoops {
@@ -1436,7 +1517,12 @@ final class BrowserWebSearchService: NSObject {
                 if let stop = verificationStopIfNeeded(afterType) {
                     return stop
                 }
-                if Self.boolValue(typed["ok"]) == true {
+                let stateAfterType = await probeWorkflowState(name: attempt == 0 ? "browser.workflow_state.after_type" : "browser.workflow_state.after_type_retry_\(attempt)")
+                if let stop = verificationStopIfNeeded(stateAfterType) {
+                    return stop
+                }
+                recordImageBaseline(from: stateAfterType)
+                if promptVerified(stateAfterType, fallback: typed) {
                     typedOK = true
                     break
                 }
@@ -1471,6 +1557,18 @@ final class BrowserWebSearchService: NSObject {
             if let stop = verificationStopIfNeeded(clickScan) {
                 return stop
             }
+            let beforeClickState = await probeWorkflowState(name: "browser.workflow_state.before_click")
+            if let stop = verificationStopIfNeeded(beforeClickState) {
+                return stop
+            }
+            recordImageBaseline(from: beforeClickState)
+            if text != nil && !promptVerified(beforeClickState) {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    summary: "自动流程没有验证到提示词已进入网页输入框，已停止，避免误点生成。"
+                )
+            }
             let beforeClick = await executeNativeObserve(continuationCall)
             appendStep("browser.observe.before_click", beforeClick)
             if let stop = verificationStopIfNeeded(beforeClick) {
@@ -1480,6 +1578,10 @@ final class BrowserWebSearchService: NSObject {
             clickCall["label"] = buttonLabel
             clickCall["button_text"] = buttonLabel
             clickCall["visual_fallback"] = false
+            if let rect = beforeClickState["generate_button_rect"] as? [String: Any],
+               let coordinateCall = await browserCoordinateCall(from: ["rect": rect], baseCall: clickCall) {
+                clickCall = coordinateCall
+            }
             var clickedOK = false
             var lastClicked: [String: Any]?
             for attempt in 0..<maxLoops {
@@ -1494,7 +1596,20 @@ final class BrowserWebSearchService: NSObject {
                 if let stop = verificationStopIfNeeded(afterClick) {
                     return stop
                 }
-                if Self.boolValue(clicked["ok"]) == true {
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                let stateAfterClick = await probeWorkflowState(name: attempt == 0 ? "browser.workflow_state.after_click" : "browser.workflow_state.after_click_retry_\(attempt)")
+                if let stop = verificationStopIfNeeded(stateAfterClick) {
+                    return stop
+                }
+                if let stop = generationFailedStopIfNeeded(stateAfterClick) {
+                    return stop
+                }
+                if shouldWaitForImage {
+                    if afterClickLooksStarted(stateAfterClick) {
+                        clickedOK = true
+                        break
+                    }
+                } else if Self.boolValue(clicked["ok"]) == true {
                     clickedOK = true
                     break
                 }
@@ -1513,16 +1628,24 @@ final class BrowserWebSearchService: NSObject {
                 return Self.workflowPayload(
                     ok: false,
                     steps: steps,
-                    summary: lastClicked?["error"] as? String ?? lastClicked?["summary"] as? String ?? "自动流程未能点击目标按钮。"
+                    summary: shouldWaitForImage
+                        ? "点击后没有验证到生成已开始或出现新结果，自动流程已停止。"
+                        : (lastClicked?["error"] as? String ?? lastClicked?["summary"] as? String ?? "自动流程未能点击目标按钮。")
                 )
             }
         }
 
-        let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? (text != nil && buttonLabel != nil)
         if shouldWaitForImage {
             var waitCall = continuationCall
             if waitCall["timeout"] == nil {
                 waitCall["timeout"] = 60
+            }
+            if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                waitCall["query"] = text
+                waitCall["expected_prompt"] = text
+            }
+            if !imageBaselineSources.isEmpty {
+                waitCall["exclude_sources"] = imageBaselineSources
             }
             let image = await executeNativeWaitForImage(waitCall)
             appendStep("browser.wait_for_image", image)
@@ -1708,6 +1831,24 @@ final class BrowserWebSearchService: NSObject {
         }
         if let canScrollDown = Self.boolValue(payload["can_scroll_down"]) {
             step["can_scroll_down"] = canScrollDown
+        }
+        if let generationState = payload["generation_state"] as? String, !generationState.isEmpty {
+            step["generation_state"] = generationState
+        }
+        if let promptVerified = Self.boolValue(payload["prompt_value_verified"]) {
+            step["prompt_value_verified"] = promptVerified
+        }
+        if let generateEnabled = Self.boolValue(payload["generate_button_enabled"]) {
+            step["generate_button_enabled"] = generateEnabled
+        }
+        if let newCandidateCount = Self.intValue(payload["new_candidate_count"]) {
+            step["new_candidate_count"] = newCandidateCount
+        }
+        if let candidateCount = Self.intValue(payload["candidate_count"]) {
+            step["candidate_count"] = candidateCount
+        }
+        if let failureText = payload["failure_text"] as? String, !failureText.isEmpty {
+            step["failure_text"] = String(failureText.prefix(180))
         }
         if let screenshotURL = payload["screenshot_url"] as? String, !screenshotURL.isEmpty {
             step["screenshot_url"] = screenshotURL
@@ -2654,8 +2795,11 @@ final class BrowserWebSearchService: NSObject {
         let minWidth = max(Self.intValue(call["min_width"]) ?? 160, 32)
         let minHeight = max(Self.intValue(call["min_height"]) ?? 160, 32)
         let attachPreview = Self.boolValue(call["attach_preview"] ?? call["attachPreview"] ?? call["show_in_chat"] ?? call["showInChat"]) ?? false
-        let query = Self.firstString(in: call, keys: ["query", "keywords", "hint"])
+        let query = Self.firstString(in: call, keys: ["query", "keywords", "hint", "expected_prompt", "expectedPrompt"])
+        let excludeSources = Self.stringArray(in: call, keys: ["exclude_sources", "excludeSources", "baseline_sources", "baselineSources"])
         var lastCandidates: [[String: Any]] = []
+        var lastState = ""
+        var lastFailureText = ""
 
         while Date() < deadline {
             if let verification = await currentBlockingHumanVerification() {
@@ -2668,8 +2812,26 @@ final class BrowserWebSearchService: NSObject {
             if let object = await evaluateJSONObject(Self.generatedImageCandidateScript(
                 minWidth: minWidth,
                 minHeight: minHeight,
-                query: query
+                query: query,
+                excludeSources: excludeSources
             )) {
+                lastState = object["generation_state"] as? String ?? lastState
+                lastFailureText = object["failure_text"] as? String ?? lastFailureText
+                if ["failed", "retry"].contains(lastState) {
+                    return [
+                        "action": "browser.wait_for_image",
+                        "ok": false,
+                        "title": object["title"] as? String ?? "",
+                        "url": object["url"] as? String ?? "",
+                        "generation_state": lastState,
+                        "failure_text": lastFailureText,
+                        "candidate_count": (object["candidate_count"] as? Int) ?? 0,
+                        "error": lastFailureText.isEmpty ? "Page reported image generation failure" : lastFailureText,
+                        "summary": lastFailureText.isEmpty
+                            ? "网页返回生成失败状态，未保存旧图片。"
+                            : "网页返回生成失败状态：\(lastFailureText)"
+                    ]
+                }
                 let candidates = object["candidates"] as? [[String: Any]] ?? []
                 lastCandidates = candidates
                 if let candidate = candidates.first,
@@ -2687,6 +2849,8 @@ final class BrowserWebSearchService: NSObject {
                         "image_width": candidate["width"] as? Int ?? 0,
                         "image_height": candidate["height"] as? Int ?? 0,
                         "source_url": candidate["src"] as? String ?? "",
+                        "source_key": candidate["source_key"] as? String ?? "",
+                        "generation_state": object["generation_state"] as? String ?? "",
                         "preview_images": [saved.url.absoluteString],
                         "items": [[
                             "title": "生成图片",
@@ -2708,6 +2872,9 @@ final class BrowserWebSearchService: NSObject {
             "attach_file": attachPreview,
             "candidate_count": lastCandidates.count,
             "candidates": Array(lastCandidates.prefix(5)),
+            "generation_state": lastState,
+            "failure_text": lastFailureText,
+            "excluded_source_count": excludeSources.count,
             "error": "Timed out waiting for a generated image"
         ]
         if let thumbnail {
@@ -3824,7 +3991,269 @@ final class BrowserWebSearchService: NSObject {
         """
     }
 
-    private static func generatedImageCandidateScript(minWidth: Int, minHeight: Int, query: String?) -> String {
+    private static func generationWorkflowStateScript(expectedPrompt: String?, excludeSources: [String]) -> String {
+        let excludedJSON = (try? JSONSerialization.data(withJSONObject: excludeSources))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        return """
+        (() => {
+          const expectedPrompt = \(Self.javascriptString(expectedPrompt ?? ""));
+          const excludedRaw = \(excludedJSON);
+          function norm(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          }
+          function text(node) {
+            return ((node && (node.innerText || node.textContent)) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function attr(node, name) {
+            return node && node.getAttribute ? (node.getAttribute(name) || '') : '';
+          }
+          function visible(node) {
+            if (!node || !node.getBoundingClientRect) return false;
+            if (node.hidden || (node.closest && node.closest('[hidden],[aria-hidden="true"]'))) return false;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
+            const r = node.getBoundingClientRect();
+            return r.width > 1 && r.height > 1;
+          }
+          function allRoots() {
+            const roots = [document];
+            for (let i = 0; i < roots.length; i += 1) {
+              const root = roots[i];
+              const nodes = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+              for (const node of nodes) {
+                if (node.shadowRoot) roots.push(node.shadowRoot);
+              }
+            }
+            return roots;
+          }
+          function findElements(selector) {
+            const seen = new Set();
+            const results = [];
+            for (const root of allRoots()) {
+              try {
+                for (const node of Array.from(root.querySelectorAll(selector))) {
+                  if (seen.has(node)) continue;
+                  seen.add(node);
+                  results.push(node);
+                }
+              } catch (_) {}
+            }
+            return results;
+          }
+          function absoluteURL(value) {
+            if (!value) return '';
+            const raw = String(value);
+            if (raw.startsWith('data:image/')) return raw;
+            if (raw.startsWith('blob:')) return raw;
+            try { return new URL(raw, location.href).href; } catch (_) { return raw; }
+          }
+          function sourceKey(value) {
+            const raw = absoluteURL(value);
+            if (!raw) return '';
+            const lower = raw.toLowerCase();
+            if (lower.startsWith('data:image/')) return lower.slice(0, 260);
+            if (lower.startsWith('blob:')) return lower;
+            try {
+              const url = new URL(raw, location.href);
+              url.hash = '';
+              return url.href.replace(/\\/+$/, '').toLowerCase();
+            } catch (_) {
+              return lower.replace(/#.*$/, '').replace(/\\/+$/, '');
+            }
+          }
+          const excluded = new Set((Array.isArray(excludedRaw) ? excludedRaw : []).map(sourceKey).filter(Boolean));
+          function imageLike(value) {
+            const lower = String(value || '').toLowerCase();
+            return lower.startsWith('data:image/') || lower.startsWith('blob:') || /\\.(png|jpe?g|webp|gif|bmp|avif|heic)(\\?|#|$)/.test(lower);
+          }
+          function accessibleText(node) {
+            if (!node) return '';
+            return [
+              text(node),
+              attr(node, 'aria-label'),
+              attr(node, 'title'),
+              attr(node, 'alt'),
+              attr(node, 'name'),
+              attr(node, 'value'),
+              attr(node, 'placeholder'),
+              attr(node, 'data-testid'),
+              node.value || '',
+              node.placeholder || ''
+            ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+          }
+          function editableValue(node) {
+            if (!node) return '';
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            if (tag === 'select' && node.selectedOptions && node.selectedOptions.length) {
+              return Array.from(node.selectedOptions).map(option => option.textContent || option.value || '').join(' ');
+            }
+            if ('value' in node) return String(node.value || '');
+            return text(node);
+          }
+          function disabledState(node) {
+            return Boolean(
+              node &&
+              (node.disabled ||
+                attr(node, 'aria-disabled') === 'true' ||
+                (node.closest && node.closest('[disabled],[aria-disabled="true"]')))
+            );
+          }
+          function isEditable(node) {
+            if (!node) return false;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            return tag === 'textarea' ||
+              tag === 'select' ||
+              tag === 'input' ||
+              node.isContentEditable ||
+              attr(node, 'role') === 'textbox';
+          }
+          function rectPayload(node) {
+            const r = node && node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+            if (!r) return null;
+            return {
+              x: Math.round(r.x),
+              y: Math.round(r.y),
+              width: Math.round(r.width),
+              height: Math.round(r.height),
+              page_center_x: Math.round(r.left + window.scrollX + r.width / 2),
+              page_center_y: Math.round(r.top + window.scrollY + r.height / 2)
+            };
+          }
+          function promptScore(node) {
+            if (!isEditable(node)) return -1;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const type = norm(attr(node, 'type'));
+            if (tag === 'input' && ['button', 'submit', 'reset', 'checkbox', 'radio', 'hidden', 'file'].includes(type)) return -1;
+            let score = 0;
+            if (tag === 'textarea') score += 80;
+            if (tag === 'input') score += 35;
+            if (node.isContentEditable || attr(node, 'role') === 'textbox') score += 55;
+            const label = norm(accessibleText(node));
+            if (/prompt|describe|description|textarea|message|输入|提示词|描述|关键词|内容/.test(label)) score += 90;
+            const value = norm(editableValue(node));
+            const expected = norm(expectedPrompt);
+            if (expected && value.includes(expected)) score += 1000;
+            if (value.length > 0) score += Math.min(80, value.length);
+            const r = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+            if (r && r.width > 180 && r.height > 36) score += 20;
+            if (disabledState(node)) score -= 200;
+            return score;
+          }
+          const editables = findElements('textarea, input:not([type="hidden"]), select, [contenteditable], [role="textbox"]')
+            .filter(visible)
+            .map(node => ({ node, score: promptScore(node) }))
+            .filter(item => item.score >= 0)
+            .sort((a, b) => b.score - a.score);
+          const promptNode = editables.length ? editables[0].node : null;
+          const promptValue = editableValue(promptNode);
+          const expectedNorm = norm(expectedPrompt);
+          const promptNorm = norm(promptValue);
+          const promptVerified = Boolean(expectedNorm && promptNorm && (promptNorm.includes(expectedNorm) || expectedNorm.includes(promptNorm)));
+          const actionPattern = /generate|create|submit|start|run|continue|next|send|free image|生成|开始|提交|继续|下一步|立即生成|生成图片|免费生成|发送/i;
+          const clickables = findElements('button, a[href], input[type="submit"], input[type="button"], [role="button"], [onclick], [tabindex], summary')
+            .filter(visible)
+            .map(node => {
+              const label = accessibleText(node);
+              let score = actionPattern.test(label) ? 100 : 0;
+              const tag = (node.tagName || node.nodeName || '').toLowerCase();
+              if (tag === 'button' || attr(node, 'role') === 'button') score += 20;
+              if (disabledState(node)) score -= 80;
+              return { node, label, score };
+            })
+            .filter(item => item.score > 0)
+            .sort((a, b) => b.score - a.score);
+          const generateItem = clickables.length ? clickables[0] : null;
+          const generateNode = generateItem && generateItem.node;
+          const generateDisabled = disabledState(generateNode);
+          const imageSources = [];
+          const seenImages = new Set();
+          function pushSource(value) {
+            const src = absoluteURL(value);
+            const key = sourceKey(src);
+            if (!key || seenImages.has(key) || !imageLike(src)) return;
+            seenImages.add(key);
+            imageSources.push(key);
+          }
+          for (const img of Array.from(document.images || [])) {
+            if (!visible(img)) continue;
+            pushSource(img.currentSrc || img.src || attr(img, 'data-src') || attr(img, 'data-original') || '');
+          }
+          for (const a of Array.from(document.querySelectorAll('a[href]'))) {
+            const href = a.href || attr(a, 'href');
+            if (imageLike(href)) pushSource(href);
+          }
+          const canvasNodes = Array.from(document.querySelectorAll('canvas')).filter(visible).slice(0, 3);
+          for (const canvas of canvasNodes) {
+            const r = canvas.getBoundingClientRect();
+            if (r.width >= 80 && r.height >= 80) {
+              try { pushSource(canvas.toDataURL('image/png')); } catch (_) {}
+            }
+          }
+          const newImageSources = imageSources.filter(src => !excluded.has(src));
+          const bodyText = norm(document.body && document.body.innerText || '');
+          const visibleFailureNodes = findElements('button, [role="button"], a, div, section, article, p, span')
+            .filter(visible)
+            .map(node => text(node))
+            .filter(value => value.length > 0 && value.length <= 320 && /点击重试|重试|try again|retry|生成失败|失败|failed|failure|error|出错|无法生成|出了点问题|审核未通过|违规/.test(value))
+            .slice(0, 4);
+          const failureText = visibleFailureNodes.join(' | ').slice(0, 240);
+          const retryVisible = visibleFailureNodes.some(value => /点击重试|重试|try again|retry/i.test(value));
+          const loadingVisible = Boolean(
+            /生成中|正在生成|处理中|排队|请稍候|loading|generating|processing|queued|in progress/.test(bodyText) ||
+            findElements('[aria-busy="true"], [role="progressbar"], progress, .loading, .spinner, [class*="loading" i], [class*="spinner" i]')
+              .some(visible)
+          );
+          const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || attr(frame, 'aria-label') || '').join(' ').toLowerCase();
+          const challengeDetected = /turnstile|captcha|recaptcha|challenge/.test(frames) ||
+            /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|验证您是真人|请验证您是真人|正在检查|人机验证/.test(bodyText);
+          const challengeBlocking = challengeDetected && newImageSources.length === 0 && !loadingVisible && !(generateNode && !generateDisabled);
+          let generationState = 'unknown';
+          if (challengeBlocking) generationState = 'blocked_verification';
+          else if (newImageSources.length > 0 && excluded.size > 0) generationState = 'success';
+          else if (loadingVisible || (promptVerified && generateNode && generateDisabled)) generationState = 'generating';
+          else if (retryVisible) generationState = 'retry';
+          else if (failureText) generationState = 'failed';
+          else if (promptVerified && generateNode && !generateDisabled) generationState = 'ready';
+          else if (promptNode) generationState = 'idle';
+          return JSON.stringify({
+            action: 'browser.workflow_state',
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            prompt_field_found: Boolean(promptNode),
+            prompt_value: promptValue,
+            prompt_value_verified: promptVerified,
+            prompt_rect: rectPayload(promptNode),
+            generate_button_found: Boolean(generateNode),
+            generate_button_enabled: Boolean(generateNode && !generateDisabled),
+            generate_button_text: generateItem ? generateItem.label.slice(0, 160) : '',
+            generate_button_rect: rectPayload(generateNode),
+            generation_state: generationState,
+            retry_visible: retryVisible,
+            failure_text: failureText,
+            loading_visible: loadingVisible,
+            image_sources: imageSources.slice(0, 16),
+            candidate_count: imageSources.length,
+            new_candidate_count: newImageSources.length,
+            new_image_sources: newImageSources.slice(0, 8),
+            requires_user_verification: challengeBlocking,
+            summary: generationState === 'ready'
+              ? '页面已准备好生成。'
+              : generationState === 'generating'
+                ? '页面正在生成或等待结果。'
+                : generationState === 'success'
+                  ? '页面出现了新的结果图片。'
+                  : generationState === 'failed' || generationState === 'retry'
+                    ? (failureText || '页面显示生成失败/重试状态。')
+                    : generationState === 'blocked_verification'
+                      ? '页面需要人机验证。'
+                      : '已读取当前网页流程状态。'
+          });
+        })();
+        """
+    }
+
+    private static func generatedImageCandidateScript(minWidth: Int, minHeight: Int, query: String?, excludeSources: [String]) -> String {
         let queryWords = (query ?? "")
             .lowercased()
             .split(whereSeparator: { $0.isWhitespace || $0 == "," || $0 == "，" })
@@ -3832,12 +4261,33 @@ final class BrowserWebSearchService: NSObject {
             .filter { !$0.isEmpty }
         let queryJSON = (try? JSONSerialization.data(withJSONObject: queryWords))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        let excludedJSON = (try? JSONSerialization.data(withJSONObject: excludeSources))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         return """
         (() => {
           const minWidth = \(minWidth);
           const minHeight = \(minHeight);
           const queryWords = \(queryJSON);
+          const excludedRaw = \(excludedJSON);
           const seen = new Set();
+          function sourceKey(value) {
+            const raw = absoluteURL(value);
+            if (!raw) return '';
+            const lower = raw.toLowerCase();
+            if (lower.startsWith('data:image/')) return lower.slice(0, 260);
+            if (lower.startsWith('blob:')) return lower;
+            try {
+              const url = new URL(raw, location.href);
+              url.hash = '';
+              return url.href.replace(/\\/+$/, '').toLowerCase();
+            } catch (_) {
+              return lower.replace(/#.*$/, '').replace(/\\/+$/, '');
+            }
+          }
+          const excluded = new Set((Array.isArray(excludedRaw) ? excludedRaw : []).map(sourceKey).filter(Boolean));
+          function norm(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          }
           function visible(node) {
             if (!node) return false;
             const style = getComputedStyle(node);
@@ -3857,6 +4307,27 @@ final class BrowserWebSearchService: NSObject {
           }
           function text(node) {
             return ((node && (node.innerText || node.textContent)) || '').replace(/\\s+/g, ' ').trim();
+          }
+          function failureState() {
+            const bodyText = norm(document.body && document.body.innerText || '');
+            const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || frame.getAttribute('aria-label') || '').join(' ').toLowerCase();
+            const challengeDetected = /turnstile|captcha|recaptcha|challenge/.test(frames) ||
+              /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|验证您是真人|请验证您是真人|正在检查|人机验证/.test(bodyText);
+            const failureNodes = Array.from(document.querySelectorAll('button, [role="button"], a, div, section, article, p, span'))
+              .filter(visible)
+              .map(node => text(node))
+              .filter(value => value.length > 0 && value.length <= 320 && /点击重试|重试|try again|retry|生成失败|失败|failed|failure|error|出错|无法生成|出了点问题|审核未通过|违规/.test(value))
+              .slice(0, 4);
+            const failureText = failureNodes.join(' | ').slice(0, 240);
+            const retryVisible = failureNodes.some(value => /点击重试|重试|try again|retry/i.test(value));
+            const loadingVisible = /生成中|正在生成|处理中|排队|请稍候|loading|generating|processing|queued|in progress/.test(bodyText) ||
+              Array.from(document.querySelectorAll('[aria-busy="true"], [role="progressbar"], progress, .loading, .spinner, [class*="loading" i], [class*="spinner" i]')).some(visible);
+            return {
+              challengeDetected,
+              retryVisible,
+              failureText,
+              loadingVisible
+            };
           }
           function dataURLFromImage(img) {
             try {
@@ -3885,10 +4356,12 @@ final class BrowserWebSearchService: NSObject {
           }
           function push(items, raw) {
             const src = absoluteURL(raw.src || raw.href || raw.data_url || '');
-            if (!src || !imageLike(src) || seen.has(src)) return;
-            seen.add(src);
+            const key = sourceKey(src);
+            if (!src || !key || !imageLike(src) || seen.has(key) || excluded.has(key)) return;
+            seen.add(key);
             const item = {
               src,
+              source_key: key,
               href: raw.href ? absoluteURL(raw.href) : '',
               data_url: raw.data_url || '',
               width: Math.round(raw.width || 0),
@@ -3953,10 +4426,22 @@ final class BrowserWebSearchService: NSObject {
             } catch (_) {}
           }
           items.sort((a, b) => b.score - a.score);
+          const failure = failureState();
+          let generationState = 'unknown';
+          if (items.length > 0) generationState = 'success';
+          else if (failure.loadingVisible) generationState = 'generating';
+          else if (failure.challengeDetected) generationState = 'blocked_verification';
+          else if (failure.retryVisible) generationState = 'retry';
+          else if (failure.failureText) generationState = 'failed';
           return JSON.stringify({
             ok: items.length > 0,
             title: document.title || '',
             url: location.href,
+            generation_state: generationState,
+            retry_visible: failure.retryVisible,
+            failure_text: failure.failureText,
+            excluded_source_count: excluded.size,
+            candidate_count: items.length,
             candidates: items.slice(0, 8)
           });
         })();
