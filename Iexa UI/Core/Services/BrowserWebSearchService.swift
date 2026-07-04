@@ -7,13 +7,6 @@ import OSLog
 final class BrowserWebSearchService: NSObject {
     static let shared = BrowserWebSearchService()
 
-    private struct BrowserAutoWorkflowState {
-        var signature: String
-        var typed: Bool
-        var clicked: Bool
-        var lastUpdated: Date
-    }
-
     private let logger = Logger(subsystem: "com.openui", category: "BrowserWebSearch")
     private var webView: WKWebView?
     private var browserTabs: [Int: WKWebView] = [:]
@@ -25,7 +18,6 @@ final class BrowserWebSearchService: NSObject {
     private var browserHumanVerificationSeenTabs: Set<Int> = []
     private var browserHumanVerificationCompletedAtByTab: [Int: Date] = [:]
     private var browserHumanVerificationCompletedURLByTab: [Int: URL] = [:]
-    private var browserAutoWorkflowStateByTab: [Int: BrowserAutoWorkflowState] = [:]
     private var lastBrowserNavigationReusedExistingPage = false
     private let humanVerificationPageReuseWindow: TimeInterval = 10 * 60
     private var navigationContinuation: CheckedContinuation<Bool, Never>?
@@ -1235,43 +1227,7 @@ final class BrowserWebSearchService: NSObject {
 
         let continuationCall = Self.browserContinuationCall(from: call)
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
-        let buttonLabel = Self.firstString(in: call, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"])
-            ?? (text == nil
-                ? Self.firstString(in: call, keys: ["target", "label"])
-                : "generate create submit send search start run continue next 免费生成 生成图片")
-        var workflowState = autoWorkflowState(for: call, text: text, buttonLabel: buttonLabel)
-
-        if let verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()),
-           Self.boolValue(verification["detected"]) == true,
-           Self.boolValue(verification["completed"]) != true {
-            _ = await scrollToVisibleHumanVerification()
-            return Self.workflowPayload(
-                ok: false,
-                steps: steps + [Self.workflowStep("observe_verification", [
-                    "ok": false,
-                    "requires_user_verification": true,
-                    "summary": "网页当前需要人机验证，已定位到验证区域。"
-                ])],
-                requiresVerification: true,
-                summary: "网页当前需要人机验证，已定位到验证区域。"
-            )
-        }
-
-        if let text,
-           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           workflowState.typed,
-           let inputStillContainsText = await autoWorkflowInputStillContainsText(text: text, call: continuationCall),
-           !inputStillContainsText {
-            workflowState.typed = false
-            workflowState.clicked = false
-            saveAutoWorkflowState(workflowState)
-            steps.append(Self.workflowStep("observe_input", [
-                "ok": true,
-                "summary": "当前页面输入框未保留上次输入，已重置自动流程状态。"
-            ]))
-        }
-
-        if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !workflowState.typed {
+        if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             var typeCall = continuationCall
             typeCall["text"] = text
             if typeCall["label"] == nil,
@@ -1283,10 +1239,6 @@ final class BrowserWebSearchService: NSObject {
             }
             let typed = await executeNativeType(typeCall)
             steps.append(Self.workflowStep("type", typed))
-            if Self.boolValue(typed["ok"]) == true {
-                workflowState.typed = true
-                saveAutoWorkflowState(workflowState)
-            }
             if Self.boolValue(typed["requires_user_verification"]) == true {
                 return Self.workflowPayload(
                     ok: false,
@@ -1304,16 +1256,16 @@ final class BrowserWebSearchService: NSObject {
             }
         }
 
-        if let buttonLabel, !workflowState.clicked {
+        let buttonLabel = Self.firstString(in: call, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"])
+            ?? (text == nil
+                ? Self.firstString(in: call, keys: ["target", "label"])
+                : "generate create submit send search start run continue next 免费生成 生成图片")
+        if let buttonLabel {
             var clickCall = continuationCall
             clickCall["label"] = buttonLabel
             clickCall["button_text"] = buttonLabel
             let clicked = await executeNativeClick(clickCall)
             steps.append(Self.workflowStep("click", clicked))
-            if Self.boolValue(clicked["ok"]) == true {
-                workflowState.clicked = true
-                saveAutoWorkflowState(workflowState)
-            }
             if Self.boolValue(clicked["requires_user_verification"]) == true {
                 return Self.workflowPayload(
                     ok: false,
@@ -1331,7 +1283,7 @@ final class BrowserWebSearchService: NSObject {
             }
         }
 
-        let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? (workflowState.clicked || (text != nil && buttonLabel != nil))
+        let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? (text != nil && buttonLabel != nil)
         if shouldWaitForImage {
             var waitCall = continuationCall
             if waitCall["timeout"] == nil {
@@ -1339,14 +1291,6 @@ final class BrowserWebSearchService: NSObject {
             }
             let image = await executeNativeWaitForImage(waitCall)
             steps.append(Self.workflowStep("wait_for_image", image))
-            if Self.boolValue(image["requires_user_verification"]) == true {
-                return Self.workflowPayload(
-                    ok: false,
-                    steps: steps,
-                    requiresVerification: true,
-                    summary: image["summary"] as? String ?? "网页等待结果时需要先完成人机验证，已定位到验证区域。"
-                )
-            }
             return Self.workflowPayload(
                 ok: Self.boolValue(image["ok"]) == true,
                 steps: steps,
@@ -1362,68 +1306,6 @@ final class BrowserWebSearchService: NSObject {
             steps: steps,
             summary: "自动浏览器流程已完成。"
         )
-    }
-
-    private func autoWorkflowState(
-        for call: [String: Any],
-        text: String?,
-        buttonLabel: String?
-    ) -> BrowserAutoWorkflowState {
-        let signature = autoWorkflowSignature(call: call, text: text, buttonLabel: buttonLabel)
-        let tabID = browserTabID(for: webView) ?? activeBrowserTabID
-        if let existing = browserAutoWorkflowStateByTab[tabID],
-           existing.signature == signature,
-           Date().timeIntervalSince(existing.lastUpdated) <= 10 * 60 {
-            return existing
-        }
-        return BrowserAutoWorkflowState(
-            signature: signature,
-            typed: false,
-            clicked: false,
-            lastUpdated: Date()
-        )
-    }
-
-    private func saveAutoWorkflowState(_ state: BrowserAutoWorkflowState) {
-        let tabID = browserTabID(for: webView) ?? activeBrowserTabID
-        var next = state
-        next.lastUpdated = Date()
-        browserAutoWorkflowStateByTab[tabID] = next
-    }
-
-    private func autoWorkflowSignature(call: [String: Any], text: String?, buttonLabel: String?) -> String {
-        let currentURL = webView?.url?.absoluteString ?? Self.urlValue(in: call)?.absoluteString ?? ""
-        let target = Self.firstString(in: call, keys: ["target", "label", "selector", "field_label", "fieldLabel", "placeholder"]) ?? ""
-        return [
-            Self.normalizedBrowserURLString(currentURL),
-            text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
-            buttonLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
-            target.trimmingCharacters(in: .whitespacesAndNewlines)
-        ]
-            .joined(separator: "|")
-            .lowercased()
-    }
-
-    private func autoWorkflowInputStillContainsText(text: String, call: [String: Any]) async -> Bool? {
-        let selector = Self.firstString(in: call, keys: ["selector", "css", "element"])
-        let label = Self.firstString(in: call, keys: [
-            "label", "field_label", "fieldLabel", "aria_label", "ariaLabel",
-            "name", "title", "placeholder", "target"
-        ])
-        guard let object = await evaluateJSONObject(Self.autoWorkflowInputStateScript(
-            selector: selector,
-            label: label,
-            text: text
-        )) else {
-            return nil
-        }
-        if Self.boolValue(object["requires_user_verification"]) == true {
-            return nil
-        }
-        if Self.boolValue(object["found"]) != true {
-            return false
-        }
-        return Self.boolValue(object["has_text"])
     }
 
     private static func browserContinuationCall(from call: [String: Any]) -> [String: Any] {
@@ -2094,7 +1976,7 @@ final class BrowserWebSearchService: NSObject {
             "viewport_contexts": viewportContexts,
             "visual_viewports": visualViewports,
             "attach_file": false,
-            "preview_images": visualViewports.compactMap { $0["screenshot_url"] as? String },
+            "preview_images": [],
             "items": returnedItems,
             "summary": visualViewports.isEmpty ? summary : "\(summary) 已同步截取 \(visualViewports.count) 个滚动视口用于视觉核对。"
         ]
@@ -2301,6 +2183,13 @@ final class BrowserWebSearchService: NSObject {
         var stableCount = 0
 
         while Date() < deadline {
+            if let verification = await currentBlockingHumanVerification() {
+                return await browserHumanVerificationPayload(
+                    action: "browser.wait_for_dom_stable",
+                    verification: verification,
+                    summary: "网页需要先完成人机验证，已定位到验证区域。"
+                )
+            }
             let script = """
             (() => JSON.stringify({
               title: document.title || '',
@@ -2368,19 +2257,12 @@ final class BrowserWebSearchService: NSObject {
         var lastCandidates: [[String: Any]] = []
 
         while Date() < deadline {
-            if let verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()),
-               Self.boolValue(verification["detected"]) == true,
-               Self.boolValue(verification["completed"]) != true {
-                _ = await scrollToVisibleHumanVerification()
-                return [
-                    "action": "browser.wait_for_image",
-                    "ok": false,
-                    "human_verification": verification,
-                    "requires_user_verification": true,
-                    "candidate_count": lastCandidates.count,
-                    "candidates": Array(lastCandidates.prefix(5)),
-                    "summary": "网页在等待结果时再次要求人机验证，已定位到验证区域。"
-                ]
+            if let verification = await currentBlockingHumanVerification() {
+                return await browserHumanVerificationPayload(
+                    action: "browser.wait_for_image",
+                    verification: verification,
+                    summary: "网页需要先完成人机验证，已定位到验证区域。"
+                )
             }
             if let object = await evaluateJSONObject(Self.generatedImageCandidateScript(
                 minWidth: minWidth,
@@ -2549,7 +2431,6 @@ final class BrowserWebSearchService: NSObject {
         browserHumanVerificationSeenTabs.remove(tabID)
         browserHumanVerificationCompletedAtByTab.removeValue(forKey: tabID)
         browserHumanVerificationCompletedURLByTab.removeValue(forKey: tabID)
-        browserAutoWorkflowStateByTab.removeValue(forKey: tabID)
 
         if browserTabs.isEmpty {
             let replacement = makeBrowserWebView()
@@ -3304,116 +3185,6 @@ final class BrowserWebSearchService: NSObject {
         """
     }
 
-    private static func autoWorkflowInputStateScript(
-        selector: String?,
-        label: String?,
-        text: String
-    ) -> String {
-        """
-        (() => {
-          const selector = \(Self.javascriptString(selector ?? ""));
-          const desiredLabel = \(Self.javascriptString(label ?? ""));
-          const expectedText = \(Self.javascriptString(text));
-          const editableSelector = 'input:not([type="hidden"]), textarea, select, [contenteditable], [role="textbox"], [aria-label], [placeholder], [name]';
-          function norm(value) { return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase(); }
-          function textOf(node) { return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim(); }
-          function attr(node, name) { return node && node.getAttribute ? (node.getAttribute(name) || '') : ''; }
-          function accessibleText(node) {
-            if (!node) return '';
-            return [
-              textOf(node), attr(node, 'aria-label'), attr(node, 'title'), attr(node, 'name'),
-              attr(node, 'value'), attr(node, 'placeholder'), node.value || '', node.placeholder || ''
-            ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
-          }
-          function visible(node) {
-            if (!node || !node.getBoundingClientRect) return false;
-            const style = getComputedStyle(node);
-            const r = node.getBoundingClientRect();
-            return r.width > 1 && r.height > 1 && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
-          }
-          function allRoots() {
-            const roots = [document];
-            for (let i = 0; i < roots.length; i += 1) {
-              const root = roots[i];
-              const nodes = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
-              for (const node of nodes) {
-                if (node.shadowRoot) roots.push(node.shadowRoot);
-              }
-            }
-            return roots;
-          }
-          function editableTarget(node) {
-            if (!node) return null;
-            const tag = (node.tagName || node.nodeName || '').toLowerCase();
-            if (tag === 'input' || tag === 'textarea' || tag === 'select' || node.isContentEditable || attr(node, 'role') === 'textbox') return node;
-            const closest = node.closest && node.closest(editableSelector);
-            if (closest) return closest;
-            try { return node.querySelector && node.querySelector(editableSelector); } catch (_) { return null; }
-          }
-          function deepQuerySelector(raw) {
-            if (!raw) return null;
-            for (const root of allRoots()) {
-              try {
-                const target = editableTarget(root.querySelector(raw));
-                if (target && visible(target)) return target;
-              } catch (_) { return null; }
-            }
-            return null;
-          }
-          function findByLabel(raw) {
-            const wanted = norm(raw);
-            if (!wanted) return null;
-            let best = null;
-            let bestScore = -1;
-            for (const root of allRoots()) {
-              let nodes = [];
-              try { nodes = Array.from(root.querySelectorAll(editableSelector)); } catch (_) {}
-              for (const node of nodes) {
-                if (!visible(node)) continue;
-                const label = norm(accessibleText(node));
-                let score = -1;
-                if (label === wanted) score = 100;
-                else if (label.startsWith(wanted)) score = 80;
-                else if (label.includes(wanted)) score = 65;
-                else if (wanted.includes(label) && label.length >= 2) score = 45;
-                if (score > bestScore) {
-                  best = node;
-                  bestScore = score;
-                }
-              }
-            }
-            return best;
-          }
-          function humanVerificationState() {
-            const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
-            const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
-            const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || frame.getAttribute('aria-label') || '').join(' ').toLowerCase();
-            const bodyText = norm(document.body && document.body.innerText || '');
-            const detected = Boolean(turnstile || recaptcha || /turnstile|captcha|recaptcha|challenge/.test(frames) || /人机验证|验证您是真人|请验证您是真人|正在检查|captcha|turnstile|recaptcha/.test(bodyText));
-            const tokenNode = turnstile || recaptcha;
-            const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
-            return { detected, completed: tokenLength > 0 };
-          }
-          const verification = humanVerificationState();
-          if (verification.detected && !verification.completed) {
-            return JSON.stringify({ found: false, has_text: false, requires_user_verification: true, human_verification: verification });
-          }
-          const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
-          if (!node) return JSON.stringify({ found: false, has_text: false, title: document.title || '', url: location.href });
-          const value = ('value' in node ? node.value : textOf(node)) || '';
-          const expected = norm(expectedText);
-          const actual = norm(value);
-          return JSON.stringify({
-            found: true,
-            has_text: expected.length > 0 && actual.includes(expected),
-            value: String(value).slice(0, 240),
-            title: document.title || '',
-            url: location.href
-          });
-        })();
-        """
-    }
-
     private static func elementCollectionScript(selector: String, limit: Int, intent: String? = nil) -> String {
         """
         (() => {
@@ -3900,18 +3671,53 @@ final class BrowserWebSearchService: NSObject {
         webView?.url ?? URL(string: "about:blank")!
     }
 
-    func waitForVisibleHumanVerificationCompletion(timeout: TimeInterval = 120) async -> Bool {
+    func waitForVisibleHumanVerificationCompletion(timeout: TimeInterval = 300) async -> Bool {
+        var sawChallenge = false
+        var completedSamples = 0
+        var clearSamples = 0
+        var lastScrollAt = Date.distantPast
         _ = await scrollToVisibleHumanVerification()
+        lastScrollAt = Date()
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if let probe = await evaluateJSONObject(Self.visibleChallengeProbeScript()) {
+                let detected = Self.boolValue(probe["detected"]) == true
                 let completed = Self.boolValue(probe["completed"]) == true
-                if completed {
+                let failed = Self.boolValue(probe["failed_state"]) == true
+                if detected {
+                    sawChallenge = true
+                    clearSamples = 0
+                    if !completed && Date().timeIntervalSince(lastScrollAt) >= 4 {
+                        _ = await scrollToVisibleHumanVerification()
+                        lastScrollAt = Date()
+                    }
+                }
+
+                if sawChallenge && completed && !failed {
+                    completedSamples += 1
+                } else {
+                    completedSamples = 0
+                }
+                if completedSamples >= 2 {
                     var completedProbe = probe
                     completedProbe["completed"] = true
                     notifyHumanVerificationState(completedProbe)
                     return true
                 }
+
+                if sawChallenge && !detected {
+                    clearSamples += 1
+                } else if detected {
+                    clearSamples = 0
+                }
+                if clearSamples >= 2 {
+                    var completedProbe = probe
+                    completedProbe["detected"] = false
+                    completedProbe["completed"] = true
+                    notifyHumanVerificationState(completedProbe)
+                    return true
+                }
+
                 notifyHumanVerificationState(probe)
             }
             try? await Task.sleep(nanoseconds: 900_000_000)
@@ -4826,21 +4632,6 @@ final class BrowserWebSearchService: NSObject {
         return scheme == "http" || scheme == "https"
     }
 
-    private static func normalizedBrowserURLString(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              var components = URLComponents(string: trimmed) else {
-            return trimmed
-        }
-        components.fragment = nil
-        if components.path.isEmpty {
-            components.path = "/"
-        }
-        return (components.string ?? trimmed)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            .lowercased()
-    }
-
     private static func browserURLsAreEquivalent(_ lhs: URL, _ rhs: URL) -> Bool {
         guard browserHostsMatch(lhs, rhs),
               normalizedBrowserPath(lhs.path) == normalizedBrowserPath(rhs.path) else {
@@ -4989,6 +4780,34 @@ final class BrowserWebSearchService: NSObject {
             return false
         }
         return Self.boolValue(object["scrolled"]) == true
+    }
+
+    private func currentBlockingHumanVerification() async -> [String: Any]? {
+        guard var probe = await evaluateJSONObject(Self.visibleChallengeProbeScript()) else {
+            return nil
+        }
+        let detected = Self.boolValue(probe["detected"]) == true
+        let completed = Self.boolValue(probe["completed"]) == true
+        guard detected && !completed else { return nil }
+        _ = await scrollToVisibleHumanVerification()
+        probe["requires_user_verification"] = true
+        return probe
+    }
+
+    private func browserHumanVerificationPayload(
+        action: String,
+        verification: [String: Any],
+        summary: String
+    ) async -> [String: Any] {
+        [
+            "action": action,
+            "ok": false,
+            "title": await currentPageTitle() ?? webView?.title ?? "",
+            "url": await currentPageURL()?.absoluteString ?? webView?.url?.absoluteString ?? "",
+            "requires_user_verification": true,
+            "human_verification": verification,
+            "summary": summary
+        ]
     }
 
     private func notifyHumanVerificationStateIfNeeded(from source: WKWebView) {
@@ -5153,9 +4972,9 @@ final class BrowserWebSearchService: NSObject {
           }
           const maxY = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0) - viewportH;
           const nextY = Math.max(0, Math.min(maxY, pageY - viewportH * 0.42));
-          try { window.scrollTo({ top: nextY, left: Math.max(0, pageX - viewportW / 2), behavior: 'smooth' }); }
+          try { window.scrollTo({ top: nextY, left: Math.max(0, pageX - viewportW / 2), behavior: 'instant' }); }
           catch (_) { window.scrollTo(Math.max(0, pageX - viewportW / 2), nextY); }
-          try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' }); } catch (_) {}
+          try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
           const r = target.getBoundingClientRect();
           return JSON.stringify({
             scrolled: true,

@@ -3027,7 +3027,7 @@ struct ChatDetailView: View {
             previewWebURL = WebPreviewURL(
                 url: BrowserWebSearchService.shared.currentAutomationBrowserURL(),
                 usesAutomationBrowser: true,
-                dismissWhenHumanVerificationCompletes: true
+                dismissWhenHumanVerificationCompletes: false
             )
             return
         }
