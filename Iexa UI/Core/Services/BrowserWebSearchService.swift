@@ -610,16 +610,7 @@ final class BrowserWebSearchService: NSObject {
 
         let context = await evaluateJSONObject(Self.viewportContextScript(textLimit: 2600, elementLimit: 32)) ?? [:]
         let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) ?? [:]
-        let includeScreenshot = Self.boolValue(
-            call["screenshot"]
-                ?? call["with_screenshot"]
-                ?? call["capture_screenshot"]
-                ?? call["captureScreenshot"]
-                ?? call["visual"]
-                ?? call["visual_observation"]
-                ?? call["include_visual"]
-                ?? call["includeVisual"]
-        ) ?? false
+        let includeScreenshot = Self.browserVisualObservationEnabled(in: call)
         let screenshot = includeScreenshot ? await captureViewportScreenshot(prefix: "browser_observe") : nil
         let title = (context["title"] as? String)
             ?? (metrics["title"] as? String)
@@ -1086,7 +1077,12 @@ final class BrowserWebSearchService: NSObject {
             }
             payload["summary"] = (payload["error"] as? String) ?? "网页点击未完成。"
         }
-        return payload
+        return await addingViewportVisualObservation(
+            to: payload,
+            call: call,
+            prefix: "browser_click_after",
+            note: "Tool-only current viewport after click. Use it as the primary visual state for the next browser action."
+        )
     }
 
     private func executeNativeType(_ call: [String: Any]) async -> [String: Any] {
@@ -1415,12 +1411,24 @@ final class BrowserWebSearchService: NSObject {
             }
             payload["summary"] = (payload["error"] as? String) ?? "网页输入未完成。"
         }
-        return payload
+        return await addingViewportVisualObservation(
+            to: payload,
+            call: call,
+            prefix: "browser_type_after",
+            note: "Tool-only current viewport after typing. Use it as the primary visual state for the next browser action."
+        )
     }
 
     private func executeNativeAutoWorkflow(_ call: [String: Any]) async -> [String: Any] {
         var steps: [[String: Any]] = []
-        let continuationCall = Self.browserContinuationCall(from: call)
+        var continuationCall = Self.browserContinuationCall(from: call)
+        if continuationCall["screenshot"] == nil,
+           continuationCall["visual_observation"] == nil,
+           continuationCall["visual"] == nil,
+           continuationCall["include_visual"] == nil,
+           continuationCall["includeVisual"] == nil {
+            continuationCall["visual_observation"] = true
+        }
         let maxLoops = min(max(Self.intValue(call["max_loops"] ?? call["maxLoops"] ?? call["retries"]) ?? 2, 1), 4)
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
         let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? (text != nil)
@@ -1517,7 +1525,7 @@ final class BrowserWebSearchService: NSObject {
             scanCall["full_page"] = true
             scanCall["limit"] = limit
             scanCall["max_scrolls"] = Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 18
-            scanCall["capture_visuals"] = false
+            scanCall["capture_visuals"] = Self.browserMultiViewportVisualSamplingEnabled(in: call)
             scanCall["screenshot"] = false
             if let intent, !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 scanCall["target"] = intent
@@ -1958,6 +1966,12 @@ final class BrowserWebSearchService: NSObject {
         if let screenshotPath = payload["screenshot_path"] as? String, !screenshotPath.isEmpty {
             step["screenshot_path"] = screenshotPath
         }
+        if let visualObservation = payload["visual_observation"] as? [String: Any] {
+            step["visual_observation"] = visualObservation
+        }
+        if let visualViewports = payload["visual_viewports"] as? [[String: Any]], !visualViewports.isEmpty {
+            step["visual_viewports"] = visualViewports
+        }
         return step
     }
 
@@ -1987,7 +2001,98 @@ final class BrowserWebSearchService: NSObject {
                 "thumbnail_url": fileURL
             ]]
         }
+        if let visual = Self.latestWorkflowVisualReference(in: steps) {
+            payload["visual_observation"] = visual
+        }
         return payload
+    }
+
+    private static func browserVisualObservationEnabled(in call: [String: Any]) -> Bool {
+        for key in [
+            "screenshot",
+            "with_screenshot",
+            "capture_screenshot",
+            "captureScreenshot",
+            "visual",
+            "visual_observation",
+            "include_visual",
+            "includeVisual",
+            "live_visual",
+            "liveVisual",
+            "vision"
+        ] {
+            if let value = Self.boolValue(call[key]) {
+                return value
+            }
+        }
+        return true
+    }
+
+    private static func browserMultiViewportVisualSamplingEnabled(in call: [String: Any]) -> Bool {
+        for key in [
+            "capture_visuals",
+            "captureVisuals",
+            "with_screenshots",
+            "withScreenshots",
+            "visual_viewports",
+            "visualViewports",
+            "full_page_visual",
+            "fullPageVisual"
+        ] {
+            if let value = Self.boolValue(call[key]) {
+                return value
+            }
+        }
+        return false
+    }
+
+    private static func latestWorkflowVisualReference(in steps: [[String: Any]]) -> [String: Any]? {
+        for step in steps.reversed() {
+            if let visual = step["visual_observation"] as? [String: Any] {
+                return visual
+            }
+            if let viewports = step["visual_viewports"] as? [[String: Any]],
+               let visual = viewports.last {
+                return visual
+            }
+            if let screenshotPath = step["screenshot_path"] as? String, !screenshotPath.isEmpty {
+                var visual: [String: Any] = [
+                    "file_path": screenshotPath,
+                    "tool_only": true,
+                    "note": "Tool-only browser screenshot for visual decision making."
+                ]
+                if let screenshotURL = step["screenshot_url"] as? String, !screenshotURL.isEmpty {
+                    visual["screenshot_url"] = screenshotURL
+                }
+                return visual
+            }
+        }
+        return nil
+    }
+
+    private func addingViewportVisualObservation(
+        to payload: [String: Any],
+        call: [String: Any],
+        prefix: String,
+        note: String
+    ) async -> [String: Any] {
+        guard Self.browserVisualObservationEnabled(in: call),
+              payload["visual_observation"] == nil,
+              let screenshot = await captureViewportScreenshot(prefix: prefix) else {
+            return payload
+        }
+        var updated = payload
+        updated["screenshot_url"] = screenshot.absoluteString
+        updated["screenshot_path"] = screenshot.path
+        updated["attach_file"] = false
+        updated["preview_images"] = []
+        updated["visual_observation"] = [
+            "screenshot_url": screenshot.absoluteString,
+            "file_path": screenshot.path,
+            "tool_only": true,
+            "note": note
+        ]
+        return updated
     }
 
     private func attemptTypeByScanningPage(
@@ -2342,7 +2447,12 @@ final class BrowserWebSearchService: NSObject {
         } else {
             payload["summary"] = "已滚动网页。"
         }
-        return payload
+        return await addingViewportVisualObservation(
+            to: payload,
+            call: call,
+            prefix: "browser_scroll_after",
+            note: "Tool-only current viewport after scroll. Use it as the primary visual state for the next browser action."
+        )
     }
 
     private func executeNativeScrollAndCollect(_ call: [String: Any]) async -> [String: Any] {
@@ -4819,7 +4929,7 @@ final class BrowserWebSearchService: NSObject {
         try? await Task.sleep(nanoseconds: 120_000_000)
 
         guard let image = await captureVisibleWebViewImage(width: width, height: height),
-              let data = image.pngData() else {
+              let data = Self.lightweightBrowserViewportImageData(from: image) else {
             if scrollY != nil {
                 wv.scrollView.setContentOffset(originalOffset, animated: false)
             }
@@ -4831,13 +4941,33 @@ final class BrowserWebSearchService: NSObject {
         }
         do {
             let folder = try browserOutputDirectory()
-            let fileURL = folder.appendingPathComponent("\(prefix)_\(Int(Date().timeIntervalSince1970 * 1000)).png")
+            let fileURL = folder.appendingPathComponent("\(prefix)_\(Int(Date().timeIntervalSince1970 * 1000)).jpg")
             try data.write(to: fileURL, options: [.atomic])
             return fileURL
         } catch {
             logger.debug("Browser viewport snapshot write failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
+    }
+
+    private static func lightweightBrowserViewportImageData(from image: UIImage) -> Data? {
+        let maxSide: CGFloat = 900
+        let longestSide = max(image.size.width, image.size.height)
+        let scale = min(1, maxSide / max(longestSide, 1))
+        let targetSize = CGSize(
+            width: max(1, floor(image.size.width * scale)),
+            height: max(1, floor(image.size.height * scale))
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        let rendered = renderer.image { context in
+            context.cgContext.setFillColor(UIColor.white.cgColor)
+            context.cgContext.fill(CGRect(origin: .zero, size: targetSize))
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return rendered.jpegData(compressionQuality: 0.66)
     }
 
     private func captureFullPageScreenshot(prefix: String) async -> URL? {
@@ -4963,6 +5093,7 @@ final class BrowserWebSearchService: NSObject {
             "browser_image_timeout_",
             "search_"
         ]
+        let maxTemporaryFiles = 80
         let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
         guard let enumerator = fileManager.enumerator(
             at: root,
@@ -4970,6 +5101,7 @@ final class BrowserWebSearchService: NSObject {
             options: [.skipsHiddenFiles]
         ) else { return }
         var directories: [URL] = []
+        var temporaryFiles: [(url: URL, modified: Date)] = []
         for case let url as URL in enumerator {
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey, .isRegularFileKey])
             if values?.isDirectory == true {
@@ -4980,11 +5112,21 @@ final class BrowserWebSearchService: NSObject {
                 continue
             }
             guard values?.isRegularFile == true,
-                  let modified = values?.contentModificationDate,
-                  modified < cutoff else {
+                  let modified = values?.contentModificationDate else {
                 continue
             }
-            try? fileManager.removeItem(at: url)
+            temporaryFiles.append((url, modified))
+            if modified < cutoff {
+                try? fileManager.removeItem(at: url)
+            }
+        }
+        let retained = temporaryFiles
+            .filter { $0.modified >= cutoff }
+            .sorted { $0.modified > $1.modified }
+        if retained.count > maxTemporaryFiles {
+            for item in retained.dropFirst(maxTemporaryFiles) {
+                try? fileManager.removeItem(at: item.url)
+            }
         }
         for directory in directories.sorted(by: { $0.pathComponents.count > $1.pathComponents.count }) {
             guard (try? fileManager.contentsOfDirectory(atPath: directory.path).isEmpty) == true else {
