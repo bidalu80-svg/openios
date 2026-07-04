@@ -2599,7 +2599,7 @@ final class ChatViewModel {
         LocalAlpineToolCapability(
             name: "browser_use",
             description: "Operate the shared iOS browser session: navigate, inspect, screenshot, click, type, scroll, run JS, fetch/download, wait for generated images, and continue from verified browser workflow state.",
-            arguments: ["action auto/observe/navigate/screenshot/click/type/get_text/get_readable/scroll/find_elements/fetch/wait_for_image/execute_js", "url?", "selector?", "label/button_text?", "text?", "coordinate_x/y?", "scan_page?", "max_scrolls?", "full_page?", "attach_preview?", "save_to?", "screenshot?", "aliases: web_fetch/fetch_url/open_url"]
+            arguments: ["action inspect/auto/observe/navigate/screenshot/click/type/get_text/get_readable/scroll/find_elements/fetch/wait_for_image/execute_js", "url?", "selector?", "label/button_text?", "text?", "coordinate_x/y?", "scan_page?", "max_scrolls?", "full_page?", "attach_preview?", "save_to?", "screenshot?", "aliases: web_fetch/fetch_url/open_url"]
         ),
         LocalAlpineToolCapability(
             name: "web_search",
@@ -2755,7 +2755,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "browser_use",
-                    "description": "Interactive browser automation backed by the shared iOS WKWebView session. Use action auto for open/type/click/wait workflows, observe for current viewport/page state, and other actions to navigate websites, inspect page text/DOM, click/type/scroll, screenshot, fetch/download resources, and continue from the visible shared browser.",
+                    "description": "Interactive browser automation backed by the shared iOS WKWebView session. Use inspect first to understand a page's full text, DOM backbone, viewport state, and controls; then use explicit click/type/scroll/wait actions. Use auto only for clearly bounded open/type/click/wait workflows such as image generation.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2763,7 +2763,7 @@ final class ChatViewModel {
                             "action": [
                                 "type": "string",
                                 "enum": [
-                                    "auto", "observe", "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
+                                    "inspect", "auto", "observe", "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
                                     "scroll", "scroll_and_collect", "find_elements", "get_page_info",
                                     "get_backbone", "fetch", "wait_for_image", "new_tab", "close_tab", "list_tabs",
                                     "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "execute_js"
@@ -2856,7 +2856,8 @@ final class ChatViewModel {
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
-        - Browser interaction: use `browser_use` action `auto` for website tasks that involve opening a page, filling text, clicking a submit/generate button, and waiting for a result; it runs an observe/action/observe loop inside the shared browser and returns workflow-state steps such as `prompt_value_verified`, `generate_button_enabled`, `generation_state`, `new_candidate_count`, and saved `file_url`. Treat click/type/scroll/find success as intermediate only. For generated-image workflows, do not claim completion unless `wait_for_image` saved a file or `generation_state` is `success`; if `generation_state` is `failed`, `retry`, `blocked_verification`, or no-progress, report that blocking state instead of inventing success. Use `observe` before choosing the next browser step and after important click/type/wait actions when you need the real current viewport state. Use `find_elements` to scan the page for inputs/buttons when selectors are unknown. It scrolls the page by default and returns sampled visual viewports; use `scan_page:true`/`max_scrolls` when a target may be below the first viewport. A missing DOM/accessibility match does not prove a visible button is absent. Inspect the observation/full-page scan and retry with `coordinate_x`/`coordinate_y` when the button is visible but text matching failed. Use `screenshot` with `full_page:true` when visual layout matters; observation screenshots are tool-only by default and should not be presented as the final user-facing result. Do not set `attach_preview`, `show_in_chat`, or `attach_file` for browser observation screenshots unless the user explicitly asks to save, download, or show the screenshot. Before summarizing a webpage or saying what a page contains, use a full-page text/readable result (`browser.readable`, `browser.text`, or `browser.open` after it reports `full_page:true`); do not conclude from only `browser.info`, `observe`, `screenshot`, or the first viewport. For clicks/type, the browser tool will automatically scan the full page when the first viewport misses; do not stop and ask the user to scroll for normal offscreen controls. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, or `aria_label` from `find_elements`; use screenshot coordinates after the target is in the current viewport or when the result says `needs_visual_coordinates:true`. For website workflows, keep using `browser_use` for bounded micro-actions in the same turn until the requested page task is actually complete; a successful observe/scroll/find/click/type step is only intermediate progress, not the final answer. If a result says `requires_user_verification:true`, the app will surface the shared browser on the same page and `observe` will scroll to the verification area; wait for the app's follow-up observation after verification, then continue from the current page once that observation says verification completed. Do not call `browser.open`, `browser.readable`, or navigate to the same URL again after verification unless a forced reload is explicitly required. Do not retry the same failed selector.
+        - Browser override: for unfamiliar or multi-step websites, call `browser_use` with `action:"inspect"` first. Inspect returns full-page text, page info, DOM backbone, current viewport, verification state, and full-page scanned controls. Use explicit `click`/`type`/`scroll`/`wait_for_dom_stable` after that. Use `auto` only for clearly bounded generated-image or simple submit workflows.
+        - Browser interaction: use `browser_use` action `auto` for website tasks that involve opening a page, filling text, clicking a submit/generate button, and waiting for a result; `auto` first inspects the real page logic (visible state, prompt field, action button, verification, loading/failure/result signals), then runs an observe/action/observe loop inside the shared browser and returns workflow-state steps such as `prompt_value_verified`, `generate_button_enabled`, `generation_state`, `new_candidate_count`, and saved `file_url`. Treat click/type/scroll/find success as intermediate only. For generated-image workflows, do not claim completion unless `wait_for_image` saved a file or `generation_state` is `success`; if `generation_state` is `failed`, `retry`, `blocked_verification`, or no-progress, report that blocking state instead of inventing success. Use `observe` before choosing the next browser step and after important click/type/wait actions when you need the real current viewport state. Use `find_elements` to scan the page for inputs/buttons when selectors are unknown. It scrolls the page by default and returns text/DOM/control samples; set `capture_visuals:true` only when visual layout is needed or DOM matching misses a visible target. Use `scan_page:true`/`max_scrolls` when a target may be below the first viewport. A missing DOM/accessibility match does not prove a visible button is absent. Inspect the observation/full-page scan and retry with `coordinate_x`/`coordinate_y` when the button is visible but text matching failed. Use `screenshot` with `full_page:true` when visual layout matters; observation screenshots are tool-only by default and should not be presented as the final user-facing result. Do not set `attach_preview`, `show_in_chat`, or `attach_file` for browser observation screenshots unless the user explicitly asks to save, download, or show the screenshot. Before summarizing a webpage or saying what a page contains, use a full-page text/readable result (`browser.readable`, `browser.text`, or `browser.open` after it reports `full_page:true`); do not conclude from only `browser.info`, `observe`, `screenshot`, or the first viewport. For clicks/type, the browser tool will automatically scan the full page when the first viewport misses; do not stop and ask the user to scroll for normal offscreen controls. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, or `aria_label` from `find_elements`; use screenshot coordinates after the target is in the current viewport or when the result says `needs_visual_coordinates:true`. For website workflows, keep using `browser_use` for bounded micro-actions in the same turn until the requested page task is actually complete; a successful observe/scroll/find/click/type step is only intermediate progress, not the final answer. If a result says `requires_user_verification:true`, the app will surface the shared browser on the same page and `observe` will scroll to the verification area; wait for the app's follow-up observation after verification, then continue from the current page once that observation says verification completed. Do not call `browser.open`, `browser.readable`, or navigate to the same URL again after verification unless a forced reload is explicitly required. Do not retry the same failed selector.
         - For image-generation websites, after entering the prompt and clicking generate/download, use `browser_use` action `wait_for_image` to poll for the generated image and save it as an attachment. Do not repeatedly call generic screenshot/read actions once `wait_for_image` returns a saved file.
         - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
@@ -2971,14 +2972,14 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": "browser_use",
-                        "description": "Interactive browser tool backed by the iOS WKWebView. Supports up to 3 tabs and actions: auto, observe, navigate, screenshot, click, type, hover, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, wait_for_image, new_tab, close_tab, list_tabs, set_user_agent, set_viewport, get_cookies, wait_for_dom_stable, execute_js. Use auto for open/type/click/wait page workflows; auto verifies workflow state before advancing and reports prompt_value_verified, generation_state, new_candidate_count, and saved file_url when available. Treat click/type/scroll/find success as intermediate, not as page-task completion.",
+                        "description": "Interactive browser tool backed by the iOS WKWebView. Supports up to 3 tabs and actions: inspect, auto, observe, navigate, screenshot, click, type, hover, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, wait_for_image, new_tab, close_tab, list_tabs, set_user_agent, set_viewport, get_cookies, wait_for_dom_stable, execute_js. Use inspect first to understand a page's full text, DOM backbone, viewport state, and controls; then use explicit click/type/scroll/wait actions. Use auto only for clearly bounded open/type/click/wait workflows such as image generation. Treat click/type/scroll/find success as intermediate, not as page-task completion.",
                         "parameters": [
                             "type": "object",
                             "properties": [
                                 "action": [
                                     "type": "string",
                                     "enum": [
-                                        "auto", "observe", "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
+                                        "inspect", "auto", "observe", "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
                                         "scroll", "scroll_and_collect", "find_elements", "get_page_info",
                                         "get_backbone", "fetch", "wait_for_image", "new_tab", "close_tab", "list_tabs",
                                         "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "execute_js"
@@ -11679,6 +11680,8 @@ final class ChatViewModel {
         var executedAnyTool = false
         var browserToolCount = 0
         var browserSearchCount = 0
+        var pendingBrowserContinuationCall: LocalAlpineNativeToolCall?
+        var forcedBrowserContinuationCount = 0
 
         func streamFinalWithoutLocalAlpineTools(reason: String, fallback: String?) async throws -> [String: Any]? {
             apiMessages.append([
@@ -11731,7 +11734,20 @@ final class ChatViewModel {
             }
             if Task.isCancelled { return exactUsage }
 
-            let calls = toolAccumulator.completedCalls()
+            var calls = toolAccumulator.completedCalls()
+            if calls.isEmpty,
+               let continuationCall = pendingBrowserContinuationCall,
+               forcedBrowserContinuationCount < 3 {
+                forcedBrowserContinuationCount += 1
+                pendingBrowserContinuationCall = nil
+                if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    acc.replace("")
+                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
+                }
+                calls = [continuationCall]
+            } else if !calls.isEmpty {
+                pendingBrowserContinuationCall = nil
+            }
             guard !calls.isEmpty else {
                 if !executedAnyTool,
                    acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -11784,6 +11800,11 @@ final class ChatViewModel {
                     if call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "web_search" {
                         browserSearchCount += 1
                     }
+                    pendingBrowserContinuationCall = Self.localNativeBrowserContinuationToolCallIfNeeded(
+                        after: call,
+                        toolContent: Self.localAlpineNativeToolResultContent(result),
+                        latestUserPrompt: latestUserBrowserAutomationPrompt()
+                    )
                 }
                 var content = Self.localAlpineNativeToolResultContent(result)
                 if let message = Self.localAlpineNativeLoopGuardModelMessage(preExecutionWarning) {
@@ -11807,6 +11828,7 @@ final class ChatViewModel {
                     browserToolCount: browserToolCount,
                     browserSearchCount: browserSearchCount
                 ) {
+                    pendingBrowserContinuationCall = nil
                     needsFinalAnswerWithoutTools = true
                     finalAnswerFallback = Self.localAlpineNativeToolFallbackMessage(call, result: result)
                     skipRemainingToolMessage = "浏览器工具已经返回足够结果。请直接根据已有浏览器结果回答用户，不要继续调用工具。"
@@ -11912,6 +11934,8 @@ final class ChatViewModel {
         var browserToolCount = 0
         var lastNativeToolFallback: String?
         var executedAnyTool = false
+        var pendingBrowserContinuationCall: LocalAlpineNativeToolCall?
+        var forcedBrowserContinuationCount = 0
 
         func streamFinalWithoutTools(reason: String, fallback: String?) async throws -> [String: Any]? {
             let resolvedFallback = fallback ?? lastNativeToolFallback
@@ -11965,8 +11989,21 @@ final class ChatViewModel {
             }
             if Task.isCancelled { return exactUsage }
 
-            let calls = toolAccumulator.completedCalls()
+            var calls = toolAccumulator.completedCalls()
                 .filter(Self.isLocalNativeFunctionToolCall)
+            if calls.isEmpty,
+               let continuationCall = pendingBrowserContinuationCall,
+               forcedBrowserContinuationCount < 3 {
+                forcedBrowserContinuationCount += 1
+                pendingBrowserContinuationCall = nil
+                if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    acc.replace("")
+                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
+                }
+                calls = [continuationCall]
+            } else if !calls.isEmpty {
+                pendingBrowserContinuationCall = nil
+            }
             guard !calls.isEmpty else {
                 if !executedAnyTool,
                    acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -12065,10 +12102,16 @@ final class ChatViewModel {
                         browserReadCount += 1
                     }
                     lastNativeToolFallback = Self.localNativeBrowserFallbackMessage(from: execution.toolContent)
+                    pendingBrowserContinuationCall = Self.localNativeBrowserContinuationToolCallIfNeeded(
+                        after: call,
+                        toolContent: execution.toolContent,
+                        latestUserPrompt: latestUserBrowserAutomationPrompt()
+                    )
                     if Self.localNativeBrowserToolResultShouldStop(call, toolContent: execution.toolContent)
                         || browserToolCount >= Self.localNativeBrowserToolSoftLimit
                         || (browserKind == .search && browserSearchCount >= Self.localNativeBrowserSearchSoftLimit)
                         || (browserKind == .readable && browserReadCount >= Self.localNativeBrowserReadableSoftLimit) {
+                        pendingBrowserContinuationCall = nil
                         needsFinalAnswerWithoutTools = true
                         finalAnswerFallback = lastNativeToolFallback
                     }
@@ -12129,7 +12172,11 @@ final class ChatViewModel {
                 assistantMessageId: assistantMessageId
             )
         }
-        let content = Self.localNativeFunctionToolEnvelopeContent(for: call)
+        let effectiveCall = Self.normalizeBrowserAutomationToolCallIfNeeded(
+            call,
+            latestUserPrompt: latestUserBrowserAutomationPrompt()
+        )
+        let content = Self.localNativeFunctionToolEnvelopeContent(for: effectiveCall)
         let officeAction = LocalNativeToolService.officeActionName(in: content)
         let officeKind = LocalNativeToolService.officeActionKind(in: content)
         let browserAction = LocalNativeToolService.browserActionName(in: content)
@@ -12163,7 +12210,7 @@ final class ChatViewModel {
             markLocalBrowserToolStarted(messageId: assistantMessageId, actionName: browserAction)
         }
 
-        let result = await LocalNativeToolService.shared.executeBlocks(
+        var result = await LocalNativeToolService.shared.executeBlocks(
             in: content,
             officeProgress: { [weak self] phase in
                 guard let self, let officeKind else { return }
@@ -12174,13 +12221,26 @@ final class ChatViewModel {
                 )
             }
         )
+        var browserVerificationCompleted = false
+        if browserAction != nil {
+            var verificationContinuationCount = 0
+            var continuationCall = effectiveCall
+            while result.requiresBrowserUserVerification && verificationContinuationCount < 4 {
+                let completed = await waitForBrowserUserVerificationIfNeeded(
+                    result,
+                    messageId: assistantMessageId
+                )
+                guard completed else { break }
+                browserVerificationCompleted = true
+                verificationContinuationCount += 1
+                continuationCall = Self.browserContinuationToolCallAfterVerification(continuationCall)
+                let continuedContent = Self.localNativeFunctionToolEnvelopeContent(for: continuationCall)
+                result = await LocalNativeToolService.shared.executeBlocks(in: continuedContent)
+            }
+        }
         if !result.requiresBrowserUserVerification {
             enqueueLocalAlpineOpenRequests(result.openRequests)
         }
-        let browserVerificationCompleted = await waitForBrowserUserVerificationIfNeeded(
-            result,
-            messageId: assistantMessageId
-        )
 
         guard result.didExecute else {
             let toolContent = "Local native tool did not execute. The tool call could not be parsed."
@@ -12275,6 +12335,9 @@ final class ChatViewModel {
         }
 
         if let browserDocument = result.browserDocument {
+            if !result.files.isEmpty {
+                attachLocalNativeFiles(result.files, to: assistantMessageId)
+            }
             finishLocalBrowserTool(
                 messageId: assistantMessageId,
                 document: browserVerificationCompleted && browserDocument.requiresUserVerification
@@ -12992,6 +13055,7 @@ final class ChatViewModel {
             .replacingOccurrences(of: "_", with: ".")
         switch action {
         case "navigate", "browser.navigate",
+            "inspect", "browser.inspect", "page.inspect", "inspect.page", "page.state", "browser.page.state",
             "observe", "browser.observe", "get.state", "browser.get.state",
             "scroll", "browser.scroll",
             "click", "browser.click",
@@ -13623,6 +13687,8 @@ final class ChatViewModel {
             return "browser.wait_for_image"
         case "get.page.info", "info", "browser.get.page.info":
             return "browser.get_page_info"
+        case "inspect", "page.inspect", "inspect.page", "page.state", "browser.inspect", "browser.page.state":
+            return "browser.inspect"
         case "observe", "get.state", "browser.observe", "browser.get.state":
             return "browser.observe"
         case "get.backbone", "backbone", "browser.get.backbone":
@@ -13910,7 +13976,151 @@ final class ChatViewModel {
             || toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
             return true
         }
+        if (action == "auto" || action == "browser.auto" || action == "complete.task" || action == "browser.complete.task")
+            && toolContent.localizedCaseInsensitiveContains("browser.wait_for_image") {
+            return true
+        }
+        if let generationState = firstJSONStringValue(in: toolContent, key: "generation_state")?.lowercased(),
+           ["failed", "retry", "blocked_verification"].contains(generationState) {
+            return true
+        }
         return false
+    }
+
+    private static func localNativeBrowserContinuationToolCallIfNeeded(
+        after call: LocalAlpineNativeToolCall,
+        toolContent: String,
+        latestUserPrompt: String?
+    ) -> LocalAlpineNativeToolCall? {
+        let effectiveCall = normalizeBrowserAutomationToolCallIfNeeded(
+            call,
+            latestUserPrompt: latestUserPrompt
+        )
+        guard effectiveCall.name.trimmingCharacters(in: .whitespacesAndNewlines) == "browser_use" else {
+            return nil
+        }
+        guard browserToolResultLooksLikeImageWorkflow(
+            call: effectiveCall,
+            toolContent: toolContent,
+            latestUserPrompt: latestUserPrompt
+        ) else {
+            return nil
+        }
+        guard !localNativeBrowserToolResultShouldStop(effectiveCall, toolContent: toolContent) else {
+            return nil
+        }
+        if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
+            return nil
+        }
+
+        let lowerContent = toolContent.lowercased()
+        if lowerContent.contains("timed out waiting for a generated image")
+            || lowerContent.contains("网页返回生成失败")
+            || lowerContent.contains("自动流程未能输入文本")
+            || lowerContent.contains("自动流程未能点击目标按钮") {
+            return nil
+        }
+
+        var arguments = localAlpineNativeToolArguments(for: effectiveCall)
+        for key in ["url", "link", "href", "page_url", "source", "input_url"] {
+            arguments.removeValue(forKey: key)
+        }
+        arguments["force_reload"] = false
+        arguments["forceReload"] = false
+        arguments["reload"] = false
+
+        let prompt = browserContinuationPrompt(
+            from: arguments,
+            latestUserPrompt: latestUserPrompt
+        )
+        let action = localAlpineBrowserActionName(from: effectiveCall)
+        let generationState = firstJSONStringValue(in: toolContent, key: "generation_state")?.lowercased() ?? ""
+        let clicked = action == "browser.click"
+            && (lowerContent.contains("\"ok\" : true") || lowerContent.contains("\"ok\":true"))
+        let shouldWaitForImage = clicked
+            || ["generating", "waiting", "success"].contains(generationState)
+            || ((firstJSONIntValue(in: toolContent, key: "new_candidate_count") ?? 0) > 0)
+
+        if shouldWaitForImage {
+            arguments["action"] = "wait_for_image"
+            arguments["wait_for_image"] = true
+            if let prompt, !prompt.isEmpty {
+                arguments["query"] = prompt
+                arguments["expected_prompt"] = prompt
+            }
+            if arguments["timeout"] == nil {
+                arguments["timeout"] = 60
+            }
+        } else {
+            arguments["action"] = "auto"
+            arguments["wait_for_image"] = true
+            if let prompt, !prompt.isEmpty {
+                arguments["text"] = prompt
+            }
+            arguments["max_loops"] = max(nativeToolIntValue(arguments["max_loops"] ?? arguments["maxLoops"]) ?? 3, 3)
+            if arguments["button_text"] == nil && arguments["buttonText"] == nil {
+                arguments["button_text"] = "generate create submit send start run continue next 免费生成 生成图片 立即生成 开始生成"
+            }
+        }
+
+        let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
+        return LocalAlpineNativeToolCall(
+            id: "browser_continue_\(UUID().uuidString)",
+            name: "browser_use",
+            arguments: String(data: data, encoding: .utf8) ?? "{}"
+        )
+    }
+
+    private static func browserToolResultLooksLikeImageWorkflow(
+        call: LocalAlpineNativeToolCall,
+        toolContent: String,
+        latestUserPrompt: String?
+    ) -> Bool {
+        let arguments = localAlpineNativeToolArguments(for: call)
+        if nativeToolBoolValue(arguments["wait_for_image"] ?? arguments["waitForImage"] ?? arguments["image_result"] ?? arguments["imageResult"]) == true {
+            return true
+        }
+        let action = localAlpineBrowserActionName(from: call)
+        if action == "browser.auto" || action == "browser.wait_for_image" {
+            return true
+        }
+        if userPromptLooksLikeImageGeneration(latestUserPrompt ?? ""),
+           action == "browser.auto" {
+            return true
+        }
+        let lowerArguments = arguments
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: " ")
+            .lowercased()
+        if action == "browser.click",
+           lowerArguments.contains("generate") || lowerArguments.contains("生成") || lowerArguments.contains("image") {
+            return true
+        }
+        let lowerContent = toolContent.lowercased()
+        return lowerContent.contains("\"generation_state\"")
+            || lowerContent.contains("\"generate_button_found\"")
+            || lowerContent.contains("\"generate_button_enabled\"")
+            || lowerContent.contains("browser.wait_for_image")
+            || lowerContent.contains("generated image")
+            || lowerContent.contains("generate free image")
+            || lowerContent.contains("生成图片")
+            || lowerContent.contains("结果区")
+    }
+
+    private static func browserContinuationPrompt(
+        from arguments: [String: Any],
+        latestUserPrompt: String?
+    ) -> String? {
+        if let prompt = firstNonEmptyString(
+            in: arguments,
+            keys: ["text", "value", "input", "content", "message", "prompt", "expected_prompt", "query"]
+        ) {
+            return prompt
+        }
+        let latest = latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !latest.isEmpty else { return nil }
+        let urlString = normalizedBrowserAutomationURLString(firstBrowserURLCandidate(in: arguments)) ?? ""
+        return browserAutomationPrompt(from: latest, removing: urlString)
     }
 
     private static func localNativeBrowserFallbackMessage(from toolContent: String) -> String {
@@ -13974,6 +14184,59 @@ final class ChatViewModel {
             }
         }
         return nil
+    }
+
+    private static func firstJSONIntValue(in text: String, key: String) -> Int? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            return nil
+        }
+        return firstJSONIntValue(in: object, key: key)
+    }
+
+    private static func firstJSONIntValue(in value: Any, key: String) -> Int? {
+        if let dictionary = value as? [String: Any] {
+            if let int = nativeToolIntValue(dictionary[key]) {
+                return int
+            }
+            for rawValue in dictionary.values {
+                if let match = firstJSONIntValue(in: rawValue, key: key) {
+                    return match
+                }
+            }
+        } else if let array = value as? [Any] {
+            for item in array {
+                if let match = firstJSONIntValue(in: item, key: key) {
+                    return match
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func anyJSONBoolValue(in text: String, key: String, equals expected: Bool) -> Bool {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            return false
+        }
+        return anyJSONBoolValue(in: object, key: key, equals: expected)
+    }
+
+    private static func anyJSONBoolValue(in value: Any, key: String, equals expected: Bool) -> Bool {
+        if let dictionary = value as? [String: Any] {
+            if let bool = nativeToolBoolValue(dictionary[key]), bool == expected {
+                return true
+            }
+            return dictionary.values.contains {
+                anyJSONBoolValue(in: $0, key: key, equals: expected)
+            }
+        }
+        if let array = value as? [Any] {
+            return array.contains {
+                anyJSONBoolValue(in: $0, key: key, equals: expected)
+            }
+        }
+        return false
     }
 
     private static func localNativeBrowserVisualContextMessage(from toolContent: String) -> [String: Any]? {
@@ -18096,7 +18359,7 @@ final class ChatViewModel {
             ? "- Shortcuts: `shortcuts.run` with `name` and optional `input`; `shortcuts.open` with `name`; `shortcuts.create` only opens the system creation screen.\n"
             : ""
         let browserActionExamples = includeBrowserTools
-            ? "- Browser fallback actions: `web.search`, `browser.readable`, `browser.screenshot`, `browser.fetch`, `browser.wait_for_image`, and `browser_use` with `browser_use_action` plus fields such as `url`, `selector`, `text`, `script`, `tab_id`, `timeout`, `screenshot`, `full_page`, `attach_preview`, `max_length`, `min_width`, `min_height`.\n"
+            ? "- Browser fallback actions: `web.search`, `browser.readable`, `browser.inspect`, `browser.screenshot`, `browser.fetch`, `browser.wait_for_image`, and `browser_use` with `browser_use_action` plus fields such as `url`, `selector`, `text`, `script`, `tab_id`, `timeout`, `screenshot`, `full_page`, `attach_preview`, `max_length`, `min_width`, `min_height`.\n"
             : ""
         let officeActionExamples = includeOfficeTools
             ? "- Office/PDF fallback actions: `office.create_excel`, `office.create_ppt`, `office.create_word`, `office.create_pdf`, `office.delete`. Include `title`, `file_name`, structured content (`sheets`, `slides`, or `sections`), optional `theme`, and for deletion `file_url` or `latest:true`.\n"
@@ -18106,7 +18369,9 @@ final class ChatViewModel {
             : ""
         let browserInstructions = includeBrowserTools ? """
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for interactive page work. Prefer `browser_use` with `action:"auto"` for form/generator/check-out style tasks that require opening a site, filling text, clicking a submit/generate button, and waiting for a result; it runs an internal observe/action/observe loop. Use `browser_use` with `action:"observe"` to inspect the real current viewport/page state before choosing the next browser action and after important click/type/wait actions. When selectors are unknown, call `browser_use` with `action:"find_elements"` to scan controls across the page; use `scan_page:true`/`max_scrolls` if the target may be below the first viewport. Treat DOM/accessibility scanning as incomplete evidence: if a button is visible in observation/full-page screenshot, click by `coordinate_x`/`coordinate_y` instead of saying the page has no button. Use `screenshot` with `full_page:true` when visual layout is needed; browser observation screenshots are not chat attachments unless `attach_preview:true`. Do not set `attach_preview`, `show_in_chat`, or `attach_file` for browser observation screenshots unless the user explicitly asks to save, download, or show the screenshot. Before summarizing a webpage or saying what a page contains, use a full-page text/readable result (`browser_readable`, `browser.readable`, `browser.text`, or `browser.open` after it reports `full_page:true`); do not conclude from only `browser.info`, `observe`, `screenshot`, or the first viewport. The browser tool auto-scans the full page for missed click/type targets, so do not stop and ask the user to scroll for normal offscreen controls. Then click by stable selector, `label`/`button_text`/`aria_label`, or coordinates when the result says `needs_visual_coordinates:true` or the target is only visually exposed. For multi-step website tasks, continue issuing bounded `browser_use` micro-actions in the same turn until the requested browser workflow is complete or a real blocker appears; do not stop after a single successful intermediate observe/click/scroll/read. If a browser result says `requires_user_verification:true`, the shared browser stays on the same page and `observe` scrolls to the verification area; wait for the app's follow-up observation after the user completes visible shared-browser verification, then continue from the same page without asking the user to send "continue"; do not call `browser.open`, `browser_readable`, or navigate to the same URL again after verification unless a forced reload is explicitly required. For image-generation websites, after entering the prompt and clicking generate/download, call `browser_use` with `action:"wait_for_image"` or use `action:"auto"` with `wait_for_image:true` to poll the visible page and save the generated image as an attachment, then answer from that result instead of repeating screenshots. In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
+        Browser override: for unfamiliar or multi-step websites, call `browser_use` with `action:"inspect"` first. Inspect returns full-page text, page info, DOM backbone, current viewport, verification state, and full-page scanned controls. Use explicit `click`/`type`/`scroll`/`wait_for_dom_stable` after that. Use `auto` only for clearly bounded generated-image or simple submit workflows.
+
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for interactive page work. Prefer `browser_use` with `action:"auto"` for form/generator/check-out style tasks that require opening a site, filling text, clicking a submit/generate button, and waiting for a result; it first inspects the real page logic (fields, action controls, verification, loading, failure, and result signals), then runs an internal observe/action/observe loop. Use `browser_use` with `action:"observe"` to inspect the real current viewport/page state before choosing the next browser action and after important click/type/wait actions. When selectors are unknown, call `browser_use` with `action:"find_elements"` to scan controls across the page; use `scan_page:true`/`max_scrolls` if the target may be below the first viewport, and set `capture_visuals:true` only when visual layout is needed or DOM matching misses a visible target. Treat DOM/accessibility scanning as incomplete evidence: if a button is visible in observation/full-page screenshot, click by `coordinate_x`/`coordinate_y` instead of saying the page has no button. Use `screenshot` with `full_page:true` when visual layout is needed; browser observation screenshots are not chat attachments unless `attach_preview:true`. Do not set `attach_preview`, `show_in_chat`, or `attach_file` for browser observation screenshots unless the user explicitly asks to save, download, or show the screenshot. Before summarizing a webpage or saying what a page contains, use a full-page text/readable result (`browser_readable`, `browser.readable`, `browser.text`, or `browser.open` after it reports `full_page:true`); do not conclude from only `browser.info`, `observe`, `screenshot`, or the first viewport. The browser tool auto-scans the full page for missed click/type targets, so do not stop and ask the user to scroll for normal offscreen controls. Then click by stable selector, `label`/`button_text`/`aria_label`, or coordinates when the result says `needs_visual_coordinates:true` or the target is only visually exposed. For multi-step website tasks, continue issuing bounded `browser_use` micro-actions in the same turn until the requested browser workflow is complete or a real blocker appears; do not stop after a single successful intermediate observe/click/scroll/read. If a browser result says `requires_user_verification:true`, the shared browser stays on the same page and `observe` scrolls to the verification area; wait for the app's follow-up observation after the user completes visible shared-browser verification, then continue from the same page without asking the user to send "continue"; do not call `browser.open`, `browser_readable`, or navigate to the same URL again after verification unless a forced reload is explicitly required. For image-generation websites, after entering the prompt and clicking generate/download, call `browser_use` with `action:"wait_for_image"` or use `action:"auto"` with `wait_for_image:true` to poll the visible page and save the generated image as an attachment, then answer from that result instead of repeating screenshots. In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` when visual evidence helps. Answer from the returned browser result and cite title/URL plainly.
         """ : ""
         let officeInstructions = includeOfficeTools ? """
 
@@ -20667,10 +20932,21 @@ final class ChatViewModel {
             return
         }
 
-        let officeAction = LocalNativeToolService.officeActionName(in: content)
-        let officeKind = LocalNativeToolService.officeActionKind(in: content)
-        let browserAction = LocalNativeToolService.browserActionName(in: content)
-        let shortcutsAction = LocalNativeToolService.shortcutsActionName(in: content)
+        var executableContent = content
+        if let directBrowserCall = directCalls.first(where: { Self.localNativeBrowserToolKind($0) != nil }) {
+            let effectiveCall = Self.normalizeBrowserAutomationToolCallIfNeeded(
+                directBrowserCall,
+                latestUserPrompt: latestUserBrowserAutomationPrompt()
+            )
+            if effectiveCall != directBrowserCall {
+                executableContent = Self.localNativeFunctionToolEnvelopeContent(for: effectiveCall)
+            }
+        }
+
+        let officeAction = LocalNativeToolService.officeActionName(in: executableContent)
+        let officeKind = LocalNativeToolService.officeActionKind(in: executableContent)
+        let browserAction = LocalNativeToolService.browserActionName(in: executableContent)
+        let shortcutsAction = LocalNativeToolService.shortcutsActionName(in: executableContent)
         if browserAction != nil, !isLocalBrowserNativeToolsEnabled {
             return
         }
@@ -20685,8 +20961,8 @@ final class ChatViewModel {
         } else if let browserAction {
             markLocalBrowserToolStarted(messageId: messageId, actionName: browserAction)
         }
-        let result = await LocalNativeToolService.shared.executeBlocks(
-            in: content,
+        var result = await LocalNativeToolService.shared.executeBlocks(
+            in: executableContent,
             officeProgress: { [weak self] phase in
                 guard let self = self, let officeKind = officeKind else { return }
                 await self.updateLocalOfficeGenerationProgress(
@@ -20696,13 +20972,34 @@ final class ChatViewModel {
                 )
             }
         )
+        var browserVerificationCompleted = false
+        if browserAction != nil {
+            var verificationContinuationCount = 0
+            if let directCall = Self.localNativeMarkdownFunctionToolCalls(from: executableContent)
+                .first(where: { Self.localNativeBrowserToolKind($0) == .interactive }) {
+                var continuationCall = directCall
+                while result.requiresBrowserUserVerification && verificationContinuationCount < 4 {
+                    let completed = await waitForBrowserUserVerificationIfNeeded(
+                        result,
+                        messageId: messageId
+                    )
+                    guard completed else { break }
+                    browserVerificationCompleted = true
+                    verificationContinuationCount += 1
+                    continuationCall = Self.browserContinuationToolCallAfterVerification(continuationCall)
+                    let continuedContent = Self.localNativeFunctionToolEnvelopeContent(for: continuationCall)
+                    result = await LocalNativeToolService.shared.executeBlocks(in: continuedContent)
+                }
+            } else {
+                browserVerificationCompleted = await waitForBrowserUserVerificationIfNeeded(
+                    result,
+                    messageId: messageId
+                )
+            }
+        }
         if !result.requiresBrowserUserVerification {
             enqueueLocalAlpineOpenRequests(result.openRequests)
         }
-        let browserVerificationCompleted = await waitForBrowserUserVerificationIfNeeded(
-            result,
-            messageId: messageId
-        )
         guard result.didExecute else {
             if let officeKind {
                 await finishLocalOfficeGeneration(
@@ -20770,6 +21067,9 @@ final class ChatViewModel {
         }
         var inheritedStatusHistory: [ChatStatusUpdate] = []
         if let browserDocument = result.browserDocument {
+            if !result.files.isEmpty {
+                attachLocalNativeFiles(result.files, to: messageId)
+            }
             finishLocalBrowserTool(
                 messageId: messageId,
                 document: browserVerificationCompleted && browserDocument.requiresUserVerification
@@ -21083,6 +21383,7 @@ final class ChatViewModel {
         if action.contains("web.search") || action == "web_search" || action.contains("browser.search") {
             return "正在搜索网页..."
         }
+        if action.contains("inspect") || action.contains("page_state") || action.contains("page.state") { return "正在理解网页结构..." }
         if action.contains("auto") { return "正在自动操作网页..." }
         if action.contains("observe") || action.contains("get_state") { return "正在观察网页状态..." }
         if action.contains("navigate") || action.contains("open") { return "正在打开网页..." }
@@ -21129,6 +21430,7 @@ final class ChatViewModel {
     private static func localBrowserToolCompletedTitle(for actionName: String) -> String {
         let action = actionName.lowercased()
         if action.contains("web.search") || action == "web_search" || action.contains("browser.search") { return "网页搜索完成" }
+        if action.contains("inspect") || action.contains("page_state") || action.contains("page.state") { return "网页结构已理解" }
         if action.contains("auto") { return "网页自动操作完成" }
         if action.contains("observe") || action.contains("get_state") { return "网页状态已观察" }
         if action.contains("navigate") || action.contains("open") { return "网页已打开" }
@@ -21157,6 +21459,7 @@ final class ChatViewModel {
             .replacingOccurrences(of: "_", with: ".")
             .lowercased()
         if action.contains("web.search") || action == "web.search" || action.contains("browser.search") { return "browser.search" }
+        if action.contains("inspect") || action.contains("page.state") { return "browser.inspect" }
         if action.contains("observe") || action.contains("get.state") { return "browser.observe" }
         if action.contains("navigate") || action.contains("open") { return "browser.open" }
         if action.contains("readable") { return "browser.readable" }

@@ -225,6 +225,8 @@ final class LocalNativeToolService {
             "browser.readable", "browser_readable", "browser.get_readable", "get_readable",
             "browser.text", "browser_text", "browser.get_text", "get_text",
             "browser.info", "browser_info", "browser.get_page_info", "get_page_info",
+            "browser.inspect", "browser_inspect", "inspect", "page_inspect", "inspect_page", "browser.page_state", "browser_page_state",
+            "browser.auto", "browser_auto", "auto", "complete_task", "browser.complete_task",
             "browser.observe", "browser_observe", "browser.get_state", "browser_get_state", "observe", "get_state",
             "browser.screenshot", "browser_screenshot",
             "browser.fetch", "browser_fetch",
@@ -302,6 +304,8 @@ final class LocalNativeToolService {
              "browser.readable", "browser_readable", "browser.get_readable", "get_readable", "read_webpage",
              "browser.text", "browser_text", "browser.get_text", "get_text",
              "browser.info", "browser_info", "browser.get_page_info", "get_page_info",
+             "browser.inspect", "browser_inspect", "inspect", "page_inspect", "inspect_page", "browser.page_state", "browser_page_state",
+             "browser.auto", "browser_auto", "auto", "complete_task", "browser.complete_task",
              "browser.observe", "browser_observe", "browser.get_state", "browser_get_state", "observe", "get_state",
              "browser.screenshot", "browser_screenshot", "screenshot",
              "browser.fetch", "browser_fetch", "fetch",
@@ -756,6 +760,11 @@ final class LocalNativeToolService {
                     || action.contains("search_web")
                     || action.contains("get_readable")
                     || action == "browser_use"
+                    || action == "inspect"
+                    || action == "page_inspect"
+                    || action == "inspect_page"
+                    || action == "auto"
+                    || action == "complete_task"
                     || action == "navigate"
                     || action == "fetch"
                     || action == "click"
@@ -772,6 +781,9 @@ final class LocalNativeToolService {
                     || action == "set_user_agent"
                     || action == "get_cookies"
                     || action == "wait_for_dom_stable"
+                    || action == "wait_for_image"
+                    || action == "wait_image"
+                    || action == "image_result"
                     || action == "new_tab"
                     || action == "close_tab"
                     || action == "list_tabs"

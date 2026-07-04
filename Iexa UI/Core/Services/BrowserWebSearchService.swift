@@ -144,6 +144,8 @@ final class BrowserWebSearchService: NSObject {
             return await executeNativeText(call)
         case "browser.info", "browser.get_page_info", "browser_info", "get_page_info":
             return await executeNativePageInfo(call)
+        case "browser.inspect", "browser_inspect", "inspect", "page_inspect", "inspect_page", "browser.page_state", "browser_page_state":
+            return await executeNativeInspect(call)
         case "browser.observe", "browser_observe", "observe", "browser.get_state", "browser_get_state", "get_state":
             return await executeNativeObserve(call)
         case "browser.screenshot", "browser_screenshot", "screenshot":
@@ -483,6 +485,106 @@ final class BrowserWebSearchService: NSObject {
         payload["ok"] = true
         payload["summary"] = "已读取网页结构。"
         return payload
+    }
+
+    private func executeNativeInspect(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(
+               url: url,
+               timeout: 14,
+               forceReload: Self.boolValue(call["force_reload"] ?? call["forceReload"] ?? call["reload"]) ?? false
+           )) {
+            return [
+                "action": "browser.inspect",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 350_000_000)
+
+        let maxScrolls = min(max(Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 14, 1), 24)
+        let maxTextLength = min(max(Self.intValue(call["max_length"] ?? call["limit"]) ?? 10_000, 1_000), 24_000)
+        let maxDepth = min(max(Self.intValue(call["max_depth"] ?? call["depth"]) ?? 4, 1), 8)
+        let elementLimit = min(max(Self.intValue(call["element_limit"] ?? call["elements"] ?? call["limit"]) ?? 48, 12), 100)
+
+        let originalMetrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) ?? [:]
+        let originalY = Self.intValue(originalMetrics["scroll_y"]) ?? 0
+        var verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()) ?? ["detected": false]
+        let verificationDetected = Self.boolValue(verification["detected"]) == true
+        let verificationCompleted = Self.boolValue(verification["completed"]) == true
+        var verificationVisible = false
+        if verificationDetected && !verificationCompleted {
+            verificationVisible = await scrollToVisibleHumanVerification()
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()) ?? verification
+        }
+
+        let pageInfo = await executeNativePageInfo(Self.browserContinuationCall(from: call))
+        let viewportContext = await evaluateJSONObject(Self.viewportContextScript(textLimit: 2_600, elementLimit: 32)) ?? [:]
+        let backbone = await evaluateJSONObject(Self.backboneScript(maxDepth: maxDepth)) ?? [:]
+        let snapshot = await evaluateFullPageSnapshot(maxScrolls: maxScrolls)
+
+        var findCall = Self.browserContinuationCall(from: call)
+        findCall["scan_page"] = true
+        findCall["full_page"] = true
+        findCall["limit"] = elementLimit
+        findCall["max_scrolls"] = maxScrolls
+        findCall["capture_visuals"] = false
+        findCall["screenshot"] = false
+        let elements = await executeNativeFindElements(findCall)
+        _ = await evaluateJSONObject(Self.scrollToPageYScript(originalY))
+
+        let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) ?? originalMetrics
+        let title = (snapshot?.title.isEmpty == false ? snapshot?.title : nil)
+            ?? (metrics["title"] as? String)
+            ?? webView?.title
+            ?? ""
+        let finalURL = (snapshot?.url.isEmpty == false ? snapshot?.url : nil)
+            ?? (metrics["url"] as? String)
+            ?? webView?.url?.absoluteString
+            ?? ""
+        let text = snapshot?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let scrollY = Self.intValue(metrics["scroll_y"] ?? viewportContext["scroll_y"]) ?? 0
+        let scrollHeight = Self.intValue(metrics["scroll_height"]) ?? 0
+        let viewportHeight = Self.intValue(metrics["viewport_height"] ?? viewportContext["viewport_height"]) ?? 0
+        let nearBottom = scrollHeight > 0 && viewportHeight > 0 && scrollY + viewportHeight >= scrollHeight - 24
+        let canScrollDown = scrollHeight > 0 && viewportHeight > 0 && !nearBottom
+        let requiresVerification = Self.boolValue(verification["detected"]) == true
+            && Self.boolValue(verification["completed"]) != true
+
+        return [
+            "action": "browser.inspect",
+            "ok": true,
+            "title": title,
+            "url": finalURL,
+            "description": snapshot?.description ?? "",
+            "published": snapshot?.published ?? "",
+            "full_page": true,
+            "max_scrolls": maxScrolls,
+            "text": String(text.prefix(maxTextLength)),
+            "text_length": text.count,
+            "text_truncated": text.count > maxTextLength,
+            "page_info": pageInfo,
+            "viewport_context": viewportContext,
+            "backbone": backbone["backbone"] ?? NSNull(),
+            "elements": elements["items"] as? [[String: Any]] ?? [],
+            "element_count": Self.intValue(elements["count"]) ?? 0,
+            "total_element_count": Self.intValue(elements["total_count"] ?? elements["count"]) ?? 0,
+            "scroll_y": scrollY,
+            "scroll_height": scrollHeight,
+            "viewport_height": viewportHeight,
+            "can_scroll_down": canScrollDown,
+            "near_bottom": nearBottom,
+            "human_verification": verification,
+            "requires_user_verification": requiresVerification,
+            "verification_scrolled_into_view": verificationVisible,
+            "attach_file": false,
+            "preview_images": [],
+            "summary": requiresVerification
+                ? "已检查网页整页结构并定位到人机验证区域；请先在同一浏览器页面完成验证。"
+                : "已按 Minis 风格检查网页：读取整页文本、结构骨架、当前视口和可交互元素。"
+        ]
     }
 
     private func executeNativeObserve(_ call: [String: Any]) async -> [String: Any] {
@@ -1605,7 +1707,7 @@ final class BrowserWebSearchService: NSObject {
                     return stop
                 }
                 if shouldWaitForImage {
-                    if afterClickLooksStarted(stateAfterClick) {
+                    if afterClickLooksStarted(stateAfterClick) || Self.boolValue(clicked["ok"]) == true {
                         clickedOK = true
                         break
                     }
@@ -3123,13 +3225,13 @@ final class BrowserWebSearchService: NSObject {
         case "", "browser_use", "browser.use":
             if wantsSave { return "browser.fetch" }
             if hasScript { return "browser.execute_js" }
-            if hasURL && hasTypedText { return "browser.auto" }
+            if hasURL && hasTypedText { return "browser.inspect" }
             if hasTypedText && (hasSelector || hasLabel || hasCoordinates) { return "browser.type" }
             if hasLabel || hasCoordinates { return "browser.click" }
             if hasSelector && wantsScreenshot { return "browser.screenshot" }
             if hasSelector { return "browser.find_elements" }
             if wantsScreenshot { return "browser.screenshot" }
-            if hasURL { return "browser.navigate" }
+            if hasURL { return "browser.inspect" }
             return "browser.observe"
         case "observe", "get_state", "state", "browser.observe", "browser.get_state":
             return "browser.observe"
@@ -3141,6 +3243,8 @@ final class BrowserWebSearchService: NSObject {
             return "browser.text"
         case "info", "get_page_info", "browser.info":
             return "browser.info"
+        case "inspect", "page_inspect", "inspect_page", "page_state", "browser.inspect", "browser.page_state":
+            return "browser.inspect"
         case "screenshot", "browser.screenshot":
             return "browser.screenshot"
         case "fetch", "download", "browser.fetch":
@@ -3879,7 +3983,7 @@ final class BrowserWebSearchService: NSObject {
               .slice(0, 240)
               .some(node => visible(node) && !disabledState(node) && actionPattern.test(accessibleText(node)));
             const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
-            const completed = Boolean(tokenLength > 0 || successState || actionReady);
+            const completed = Boolean(tokenLength > 0 || successState);
             return {
               detected: Boolean(provider),
               provider,
@@ -5973,7 +6077,7 @@ final class BrowserWebSearchService: NSObject {
           const failedState = /故障排除|验证失败|troubleshooting|verification failed/.test(bodyText);
           const successState = /verified|验证成功|已验证/.test(bodyText)
             || (/成功|success/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText));
-          const completedState = tokenLength > 0 || successState || actionReady;
+          const completedState = tokenLength > 0 || successState;
           return JSON.stringify({
             detected: challengeDetected,
             completed: completedState,
