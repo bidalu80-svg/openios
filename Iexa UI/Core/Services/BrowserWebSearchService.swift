@@ -1305,20 +1305,48 @@ final class BrowserWebSearchService: NSObject {
     private func executeNativeAutoWorkflow(_ call: [String: Any]) async -> [String: Any] {
         var steps: [[String: Any]] = []
         let continuationCall = Self.browserContinuationCall(from: call)
+        let maxLoops = min(max(Self.intValue(call["max_loops"] ?? call["maxLoops"] ?? call["retries"]) ?? 2, 1), 4)
+
+        func appendStep(_ name: String, _ payload: [String: Any]) {
+            steps.append(Self.workflowStep(name, payload))
+        }
+
+        func verificationStopIfNeeded(
+            _ payload: [String: Any],
+            summary: String = "网页需要先完成人机验证，已定位到验证区域。"
+        ) -> [String: Any]? {
+            guard Self.boolValue(payload["requires_user_verification"]) == true else { return nil }
+            return Self.workflowPayload(
+                ok: false,
+                steps: steps,
+                requiresVerification: true,
+                summary: summary
+            )
+        }
+
+        func scanPage(intent: String?, name: String, limit: Int = 48) async -> [String: Any] {
+            var scanCall = continuationCall
+            scanCall["scan_page"] = true
+            scanCall["full_page"] = true
+            scanCall["limit"] = limit
+            scanCall["max_scrolls"] = Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 18
+            if let intent, !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                scanCall["target"] = intent
+                scanCall["query"] = intent
+            }
+            let scan = await executeNativeFindElements(scanCall)
+            appendStep(name, scan)
+            return scan
+        }
 
         if let url = Self.urlValue(in: call) {
             let opened = await executeNativeOpen(call, readable: false)
-            steps.append(Self.workflowStep("browser.open", opened))
-            let observed = await executeNativeObserve(continuationCall)
-            steps.append(Self.workflowStep("browser.observe.after_open", observed))
-            if Self.boolValue(opened["requires_user_verification"]) == true
-                || Self.boolValue(observed["requires_user_verification"]) == true {
-                return Self.workflowPayload(
-                    ok: false,
-                    steps: steps,
-                    requiresVerification: true,
-                    summary: "网页需要先完成人机验证，已打开浏览器并定位验证区域。"
-                )
+            appendStep("browser.open", opened)
+            if let stop = verificationStopIfNeeded(
+                opened,
+                summary: "网页需要先完成人机验证，已打开浏览器并定位验证区域。"
+            ) {
+                return stop
             }
             if Self.boolValue(opened["ok"]) != true {
                 return Self.workflowPayload(
@@ -1327,30 +1355,47 @@ final class BrowserWebSearchService: NSObject {
                     summary: opened["error"] as? String ?? "自动浏览器流程未能打开网页。"
                 )
             }
+            var stableCall = continuationCall
+            stableCall["timeout"] = min(Self.intValue(call["dom_timeout"] ?? call["domTimeout"] ?? call["timeout"]) ?? 8, 12)
+            let stable = await executeNativeWaitForDOMStable(stableCall)
+            appendStep("browser.wait_for_dom_stable.after_open", stable)
+            if let stop = verificationStopIfNeeded(
+                stable,
+                summary: "网页需要先完成人机验证，已打开浏览器并定位验证区域。"
+            ) {
+                return stop
+            }
+            let observed = await executeNativeObserve(continuationCall)
+            appendStep("browser.observe.after_open", observed)
+            if let stop = verificationStopIfNeeded(
+                observed,
+                summary: "网页需要先完成人机验证，已打开浏览器并定位验证区域。"
+            ) {
+                return stop
+            }
         } else {
             let observed = await executeNativeObserve(continuationCall)
-            steps.append(Self.workflowStep("browser.observe.initial", observed))
-            if Self.boolValue(observed["requires_user_verification"]) == true {
-                return Self.workflowPayload(
-                    ok: false,
-                    steps: steps,
-                    requiresVerification: true,
-                    summary: "网页需要先完成人机验证，已定位到验证区域。"
-                )
+            appendStep("browser.observe.initial", observed)
+            if let stop = verificationStopIfNeeded(observed) {
+                return stop
             }
         }
 
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
+        var inputScan: [String: Any]?
         if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let inputIntent = Self.firstString(in: call, keys: ["field_hint", "fieldHint", "input_hint", "inputHint", "target", "field_label", "fieldLabel"])
+                ?? "prompt description text input textarea"
+            inputScan = await scanPage(intent: inputIntent, name: "browser.find_elements.before_type")
+            if let scan = inputScan,
+               let stop = verificationStopIfNeeded(scan) {
+                return stop
+            }
+
             let beforeType = await executeNativeObserve(continuationCall)
-            steps.append(Self.workflowStep("browser.observe.before_type", beforeType))
-            if Self.boolValue(beforeType["requires_user_verification"]) == true {
-                return Self.workflowPayload(
-                    ok: false,
-                    steps: steps,
-                    requiresVerification: true,
-                    summary: "网页需要先完成人机验证，已定位到验证区域。"
-                )
+            appendStep("browser.observe.before_type", beforeType)
+            if let stop = verificationStopIfNeeded(beforeType) {
+                return stop
             }
             var typeCall = continuationCall
             typeCall["text"] = text
@@ -1361,24 +1406,42 @@ final class BrowserWebSearchService: NSObject {
                 typeCall["target"] = Self.firstString(in: call, keys: ["field_hint", "fieldHint", "input_hint", "inputHint"])
                     ?? "prompt description text input"
             }
-            let typed = await executeNativeType(typeCall)
-            steps.append(Self.workflowStep("browser.type", typed))
-            let afterType = await executeNativeObserve(continuationCall)
-            steps.append(Self.workflowStep("browser.observe.after_type", afterType))
-            if Self.boolValue(typed["requires_user_verification"]) == true
-                || Self.boolValue(afterType["requires_user_verification"]) == true {
-                return Self.workflowPayload(
-                    ok: false,
-                    steps: steps,
-                    requiresVerification: true,
-                    summary: "网页需要先完成人机验证，已定位到验证区域。"
-                )
+            var typedOK = false
+            var lastTyped: [String: Any]?
+            for attempt in 0..<maxLoops {
+                let typed = await executeNativeType(typeCall)
+                appendStep(attempt == 0 ? "browser.type" : "browser.type.retry_\(attempt)", typed)
+                lastTyped = typed
+                if let stop = verificationStopIfNeeded(typed) {
+                    return stop
+                }
+                let afterType = await executeNativeObserve(continuationCall)
+                appendStep(attempt == 0 ? "browser.observe.after_type" : "browser.observe.after_type_retry_\(attempt)", afterType)
+                if let stop = verificationStopIfNeeded(afterType) {
+                    return stop
+                }
+                if Self.boolValue(typed["ok"]) == true {
+                    typedOK = true
+                    break
+                }
+                if attempt == 0 {
+                    inputScan = await scanPage(intent: inputIntent, name: "browser.find_elements.type_retry")
+                    if let scan = inputScan,
+                       let stop = verificationStopIfNeeded(scan) {
+                        return stop
+                    }
+                    if let element = Self.bestScannedInputElement(in: inputScan),
+                       let coordinateCall = await browserCoordinateCall(from: element, baseCall: typeCall) {
+                        typeCall = coordinateCall
+                        typeCall["text"] = text
+                    }
+                }
             }
-            if Self.boolValue(typed["ok"]) != true {
+            if !typedOK {
                 return Self.workflowPayload(
                     ok: false,
                     steps: steps,
-                    summary: typed["error"] as? String ?? typed["summary"] as? String ?? "自动流程未能输入文本。"
+                    summary: lastTyped?["error"] as? String ?? lastTyped?["summary"] as? String ?? "自动流程未能输入文本。"
                 )
             }
         }
@@ -1388,37 +1451,52 @@ final class BrowserWebSearchService: NSObject {
                 ? Self.firstString(in: call, keys: ["target", "label"])
                 : "generate create submit send search start run continue next 免费生成 生成图片")
         if let buttonLabel {
+            var clickScan = await scanPage(intent: buttonLabel, name: "browser.find_elements.before_click")
+            if let stop = verificationStopIfNeeded(clickScan) {
+                return stop
+            }
             let beforeClick = await executeNativeObserve(continuationCall)
-            steps.append(Self.workflowStep("browser.observe.before_click", beforeClick))
-            if Self.boolValue(beforeClick["requires_user_verification"]) == true {
-                return Self.workflowPayload(
-                    ok: false,
-                    steps: steps,
-                    requiresVerification: true,
-                    summary: "网页需要先完成人机验证，已定位到验证区域。"
-                )
+            appendStep("browser.observe.before_click", beforeClick)
+            if let stop = verificationStopIfNeeded(beforeClick) {
+                return stop
             }
             var clickCall = continuationCall
             clickCall["label"] = buttonLabel
             clickCall["button_text"] = buttonLabel
-            let clicked = await executeNativeClick(clickCall)
-            steps.append(Self.workflowStep("browser.click", clicked))
-            let afterClick = await executeNativeObserve(continuationCall)
-            steps.append(Self.workflowStep("browser.observe.after_click", afterClick))
-            if Self.boolValue(clicked["requires_user_verification"]) == true
-                || Self.boolValue(afterClick["requires_user_verification"]) == true {
-                return Self.workflowPayload(
-                    ok: false,
-                    steps: steps,
-                    requiresVerification: true,
-                    summary: "网页需要先完成人机验证，已定位到验证区域。"
-                )
+            var clickedOK = false
+            var lastClicked: [String: Any]?
+            for attempt in 0..<maxLoops {
+                let clicked = await executeNativeClick(clickCall)
+                appendStep(attempt == 0 ? "browser.click" : "browser.click.retry_\(attempt)", clicked)
+                lastClicked = clicked
+                if let stop = verificationStopIfNeeded(clicked) {
+                    return stop
+                }
+                let afterClick = await executeNativeObserve(continuationCall)
+                appendStep(attempt == 0 ? "browser.observe.after_click" : "browser.observe.after_click_retry_\(attempt)", afterClick)
+                if let stop = verificationStopIfNeeded(afterClick) {
+                    return stop
+                }
+                if Self.boolValue(clicked["ok"]) == true {
+                    clickedOK = true
+                    break
+                }
+                if attempt == 0 {
+                    clickScan = await scanPage(intent: buttonLabel, name: "browser.find_elements.click_retry")
+                    if let stop = verificationStopIfNeeded(clickScan) {
+                        return stop
+                    }
+                    if let element = Self.bestScannedClickableElement(in: clickScan),
+                       let coordinateCall = await browserCoordinateCall(from: element, baseCall: clickCall) {
+                        clickCall = coordinateCall
+                    }
+                }
             }
-            if Self.boolValue(clicked["ok"]) != true {
+            if !clickedOK {
                 return Self.workflowPayload(
                     ok: false,
                     steps: steps,
-                    summary: clicked["error"] as? String ?? clicked["summary"] as? String ?? "自动流程未能点击目标按钮。"
+                    summary: lastClicked?["error"] as? String ?? lastClicked?["summary"] as? String ?? "自动流程未能点击目标按钮。"
                 )
             }
         }
@@ -1430,17 +1508,14 @@ final class BrowserWebSearchService: NSObject {
                 waitCall["timeout"] = 60
             }
             let image = await executeNativeWaitForImage(waitCall)
-            steps.append(Self.workflowStep("browser.wait_for_image", image))
+            appendStep("browser.wait_for_image", image)
             let afterImageWait = await executeNativeObserve(continuationCall)
-            steps.append(Self.workflowStep("browser.observe.after_wait_for_image", afterImageWait))
-            if Self.boolValue(image["requires_user_verification"]) == true
-                || Self.boolValue(afterImageWait["requires_user_verification"]) == true {
-                return Self.workflowPayload(
-                    ok: false,
-                    steps: steps,
-                    requiresVerification: true,
-                    summary: "网页需要先完成人机验证，已定位到验证区域。"
-                )
+            appendStep("browser.observe.after_wait_for_image", afterImageWait)
+            if let stop = verificationStopIfNeeded(image) {
+                return stop
+            }
+            if let stop = verificationStopIfNeeded(afterImageWait) {
+                return stop
             }
             return Self.workflowPayload(
                 ok: Self.boolValue(image["ok"]) == true,
@@ -1451,17 +1526,14 @@ final class BrowserWebSearchService: NSObject {
         }
 
         let stable = await executeNativeWaitForDOMStable(continuationCall)
-        steps.append(Self.workflowStep("browser.wait_for_dom_stable", stable))
+        appendStep("browser.wait_for_dom_stable", stable)
         let finalObserve = await executeNativeObserve(continuationCall)
-        steps.append(Self.workflowStep("browser.observe.final", finalObserve))
-        if Self.boolValue(stable["requires_user_verification"]) == true
-            || Self.boolValue(finalObserve["requires_user_verification"]) == true {
-            return Self.workflowPayload(
-                ok: false,
-                steps: steps,
-                requiresVerification: true,
-                summary: "网页需要先完成人机验证，已定位到验证区域。"
-            )
+        appendStep("browser.observe.final", finalObserve)
+        if let stop = verificationStopIfNeeded(stable) {
+            return stop
+        }
+        if let stop = verificationStopIfNeeded(finalObserve) {
+            return stop
         }
         return Self.workflowPayload(
             ok: true,
@@ -1479,6 +1551,123 @@ final class BrowserWebSearchService: NSObject {
         copy["forceReload"] = false
         copy["reload"] = false
         return copy
+    }
+
+    private func browserCoordinateCall(
+        from item: [String: Any],
+        baseCall: [String: Any]
+    ) async -> [String: Any]? {
+        guard let pageCenterX = Self.scannedElementPageCenterX(item),
+              let pageCenterY = Self.scannedElementPageCenterY(item),
+              let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) else {
+            return nil
+        }
+        let viewportHeight = max(Self.intValue(metrics["viewport_height"]) ?? 720, 240)
+        let maxY = max((Self.intValue(metrics["scroll_height"]) ?? viewportHeight) - viewportHeight, 0)
+        let targetY = min(max(pageCenterY - viewportHeight / 2, 0), maxY)
+        _ = await evaluateJSONObject(Self.scrollToPageYScript(targetY))
+        try? await Task.sleep(nanoseconds: 220_000_000)
+        let updatedMetrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) ?? metrics
+        let scrollX = Self.intValue(updatedMetrics["scroll_x"]) ?? 0
+        let scrollY = Self.intValue(updatedMetrics["scroll_y"]) ?? targetY
+
+        var call = baseCall
+        for key in [
+            "selector", "css", "element", "label", "button_text", "buttonText",
+            "aria_label", "ariaLabel", "name", "title", "placeholder", "target"
+        ] {
+            call.removeValue(forKey: key)
+        }
+        call["coordinate_x"] = max(pageCenterX - scrollX, 1)
+        call["coordinate_y"] = max(pageCenterY - scrollY, 1)
+        call["visual_fallback"] = false
+        call["force_reload"] = false
+        call["reload"] = false
+        return call
+    }
+
+    private static func bestScannedInputElement(in payload: [String: Any]?) -> [String: Any]? {
+        guard let items = payload?["items"] as? [[String: Any]] else { return nil }
+        return rankedScannedElements(items).first { item in
+            guard !isScannedElementDisabled(item) else { return false }
+            let tag = ((item["tag"] as? String) ?? "").lowercased()
+            let role = ((item["role"] as? String) ?? "").lowercased()
+            let type = ((item["type"] as? String) ?? "").lowercased()
+            if tag == "textarea" || tag == "select" { return true }
+            if role == "textbox" { return true }
+            if tag == "input" {
+                return !["button", "submit", "reset", "checkbox", "radio", "hidden", "file"].contains(type)
+            }
+            return false
+        }
+    }
+
+    private static func bestScannedClickableElement(in payload: [String: Any]?) -> [String: Any]? {
+        guard let items = payload?["items"] as? [[String: Any]] else { return nil }
+        return rankedScannedElements(items).first { item in
+            guard !isScannedElementDisabled(item) else { return false }
+            let tag = ((item["tag"] as? String) ?? "").lowercased()
+            let role = ((item["role"] as? String) ?? "").lowercased()
+            let type = ((item["type"] as? String) ?? "").lowercased()
+            if tag == "button" || tag == "a" || role == "button" || role == "link" {
+                return true
+            }
+            if tag == "input", ["button", "submit", "reset"].contains(type) {
+                return true
+            }
+            return Self.scannedElementPageCenterX(item) != nil && Self.scannedElementPageCenterY(item) != nil
+        }
+    }
+
+    private static func rankedScannedElements(_ items: [[String: Any]]) -> [[String: Any]] {
+        items.sorted { lhs, rhs in
+            let lhsScore = Self.intValue(lhs["match_score"]) ?? 0
+            let rhsScore = Self.intValue(rhs["match_score"]) ?? 0
+            if lhsScore != rhsScore { return lhsScore > rhsScore }
+            let lhsY = Self.scannedElementPageCenterY(lhs) ?? Int.max
+            let rhsY = Self.scannedElementPageCenterY(rhs) ?? Int.max
+            if lhsY != rhsY { return lhsY < rhsY }
+            let lhsIndex = Self.intValue(lhs["index"]) ?? Int.max
+            let rhsIndex = Self.intValue(rhs["index"]) ?? Int.max
+            return lhsIndex < rhsIndex
+        }
+    }
+
+    private static func isScannedElementDisabled(_ item: [String: Any]) -> Bool {
+        Self.boolValue(item["disabled"]) == true
+            || Self.boolValue(item["blocked_by_human_verification"]) == true
+    }
+
+    private static func scannedElementPageCenterX(_ item: [String: Any]) -> Int? {
+        if let direct = Self.intValue(item["page_center_x"]) {
+            return direct
+        }
+        if let rect = item["rect"] as? [String: Any] {
+            if let center = Self.intValue(rect["page_center_x"]) {
+                return center
+            }
+            if let x = Self.intValue(rect["page_x"] ?? rect["x"]),
+               let width = Self.intValue(rect["width"]) {
+                return x + width / 2
+            }
+        }
+        return nil
+    }
+
+    private static func scannedElementPageCenterY(_ item: [String: Any]) -> Int? {
+        if let direct = Self.intValue(item["page_center_y"]) {
+            return direct
+        }
+        if let rect = item["rect"] as? [String: Any] {
+            if let center = Self.intValue(rect["page_center_y"]) {
+                return center
+            }
+            if let y = Self.intValue(rect["page_y"] ?? rect["y"]),
+               let height = Self.intValue(rect["height"]) {
+                return y + height / 2
+            }
+        }
+        return nil
     }
 
     private static func workflowStep(_ name: String, _ payload: [String: Any]) -> [String: Any] {

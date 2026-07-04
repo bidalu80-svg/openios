@@ -12746,43 +12746,69 @@ final class ChatViewModel {
         )
     }
 
+    private func latestUserBrowserAutomationPrompt() -> String? {
+        conversation?.messages
+            .last(where: { $0.role == .user && !Self.isLocalAlpineAgentResult($0) })?
+            .content
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func executeLocalAlpineWebSearchToolCall(
         _ call: LocalAlpineNativeToolCall,
         assistantMessageId: String
     ) async -> LocalAlpineAgentResult {
-        let arguments = Self.localAlpineNativeToolArguments(for: call)
+        let effectiveCall = Self.redirectURLSearchToBrowserUseIfNeeded(
+            call,
+            latestUserPrompt: latestUserBrowserAutomationPrompt()
+        )
+        let arguments = Self.localAlpineNativeToolArguments(for: effectiveCall)
         let query = ((arguments["query"] as? String)
             ?? (arguments["queries"] as? [String])?.first
             ?? (arguments["keywords"] as? String)
             ?? (arguments["url"] as? String)
             ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let detailFallback = call.name == "browser_use" ? "操作网页" : "搜索网页"
+        let detailFallback = effectiveCall.name == "browser_use" ? "操作网页" : "搜索网页"
         let detail = query.isEmpty
             ? detailFallback
             : String(query.prefix(96))
-        let content = Self.localNativeFunctionToolEnvelopeContent(for: call)
-        let actionName = Self.localAlpineBrowserActionName(from: call)
+        let statusQuery = effectiveCall.name == "browser_use" ? "" : query
+        let content = Self.localNativeFunctionToolEnvelopeContent(for: effectiveCall)
+        let actionName = Self.localAlpineBrowserActionName(from: effectiveCall)
         let startingStatus = ChatStatusUpdate(
             action: "browser_web_search",
             status: Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .start),
-            description: query.isEmpty ? localBrowserToolRunningTitle(for: actionName) : "正在搜索网页：\(detail)",
+            description: query.isEmpty || effectiveCall.name == "browser_use"
+                ? localBrowserToolRunningTitle(for: actionName)
+                : "正在搜索网页：\(detail)",
             done: false,
             occurredAt: .now,
-            query: query.isEmpty ? nil : query,
-            queries: query.isEmpty ? [] : [query]
+            query: statusQuery.isEmpty ? nil : statusQuery,
+            queries: statusQuery.isEmpty ? [] : [statusQuery]
         )
         updateLocalBrowserToolMessage(
             messageId: assistantMessageId,
-            content: query.isEmpty ? localBrowserToolRunningTitle(for: actionName) : "正在搜索网页：\(detail)",
+            content: query.isEmpty || effectiveCall.name == "browser_use"
+                ? localBrowserToolRunningTitle(for: actionName)
+                : "正在搜索网页：\(detail)",
             isStreaming: true,
             status: startingStatus
         )
-        let result = await LocalNativeToolService.shared.executeBlocks(in: content)
-        let browserVerificationCompleted = await waitForBrowserUserVerificationIfNeeded(
-            result,
-            messageId: assistantMessageId
-        )
+        var result = await LocalNativeToolService.shared.executeBlocks(in: content)
+        var browserVerificationCompleted = false
+        var verificationContinuationCount = 0
+        while result.requiresBrowserUserVerification && verificationContinuationCount < 4 {
+            let completed = await waitForBrowserUserVerificationIfNeeded(
+                result,
+                messageId: assistantMessageId
+            )
+            guard completed else { break }
+            browserVerificationCompleted = true
+            verificationContinuationCount += 1
+            let continuedCall = Self.browserContinuationToolCallAfterVerification(effectiveCall)
+            let continuedContent = Self.localNativeFunctionToolEnvelopeContent(for: continuedCall)
+            result = await LocalNativeToolService.shared.executeBlocks(in: continuedContent)
+        }
         if !result.requiresBrowserUserVerification {
             enqueueLocalAlpineOpenRequests(result.openRequests)
         }
@@ -12798,15 +12824,15 @@ final class ChatViewModel {
                     ? Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .waitingVerification)
                     : Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .readingResults)),
             description: browserVerificationCompleted
-                ? "人机验证已完成，正在继续读取网页结果..."
+                ? (result.requiresBrowserUserVerification ? "人机验证已完成，网页需要再次验证..." : "人机验证已完成，已继续操作网页...")
                 : (result.requiresBrowserUserVerification ? "等待人机验证完成..." : (result.browserDocument?.summary ?? result.summary)),
             done: false,
             urls: result.browserDocument?.url.map { [$0] } ?? [],
             occurredAt: .now,
             items: result.browserDocument?.items ?? [],
             count: max(result.browserDocument?.items.count ?? 0, browserURLCount),
-            query: query.isEmpty ? nil : query,
-            queries: query.isEmpty ? [] : [query]
+            query: statusQuery.isEmpty ? nil : statusQuery,
+            queries: statusQuery.isEmpty ? [] : [statusQuery]
         )
         updateLocalBrowserToolMessage(
             messageId: assistantMessageId,
@@ -12814,26 +12840,24 @@ final class ChatViewModel {
             isStreaming: true,
             status: inProgressStatus
         )
-        let browserDocument = browserVerificationCompleted
-            ? result.browserDocument.map { Self.localNativeBrowserVerificationCompletedDocument(from: $0) }
-            : result.browserDocument
+        let browserDocument = result.browserDocument
         let failed = result.browserDocument.map { !$0.ok && !$0.requiresUserVerification }
             ?? Self.localAlpineSyntheticToolFailed(result.summary)
-        let finalDone = browserVerificationCompleted || !result.requiresBrowserUserVerification
-        let browserSucceeded = browserVerificationCompleted || browserDocument?.ok == true
+        let finalDone = !result.requiresBrowserUserVerification
+        let browserSucceeded = browserDocument?.ok == true
         let finalStatus = ChatStatusUpdate(
             action: "browser_web_search",
             status: Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .completed),
             description: browserVerificationCompleted
-                ? "网页已继续执行完成"
+                ? (result.requiresBrowserUserVerification ? "网页正在等待你再次完成人机验证" : (browserDocument?.summary ?? result.summary))
                 : (result.requiresBrowserUserVerification ? "网页正在等待你完成人机验证" : (browserDocument?.summary ?? result.summary)),
             done: finalDone,
             urls: browserDocument?.url.map { [$0] } ?? [],
             occurredAt: .now,
             items: browserDocument?.items ?? [],
             count: max(browserDocument?.items.count ?? 0, browserURLCount),
-            query: query.isEmpty ? nil : query,
-            queries: query.isEmpty ? [] : [query]
+            query: statusQuery.isEmpty ? nil : statusQuery,
+            queries: statusQuery.isEmpty ? [] : [statusQuery]
         )
         updateLocalBrowserToolMessage(
             messageId: assistantMessageId,
@@ -12842,7 +12866,7 @@ final class ChatViewModel {
                 : (result.requiresBrowserUserVerification
                     ? "网页操作暂停：请先完成人机验证"
                     : "\(Self.localBrowserToolFailedTitle(for: actionName))：\(browserDocument?.error ?? browserDocument?.summary ?? result.summary)"),
-            isStreaming: result.requiresBrowserUserVerification && !browserVerificationCompleted,
+            isStreaming: result.requiresBrowserUserVerification,
             status: finalStatus
         )
         let output = Self.localNativeFunctionToolResultContent(
@@ -12850,7 +12874,7 @@ final class ChatViewModel {
             browserVerificationCompleted: browserVerificationCompleted
         )
         return executeLocalAlpineSyntheticToolCall(
-            call,
+            effectiveCall,
             assistantMessageId: assistantMessageId,
             detail: detail,
             filePaths: result.files.compactMap(\.url),
@@ -13118,6 +13142,130 @@ final class ChatViewModel {
         }
         let trimmed = call.arguments.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? [:] : ["value": trimmed]
+    }
+
+    private static func redirectURLSearchToBrowserUseIfNeeded(
+        _ call: LocalAlpineNativeToolCall,
+        latestUserPrompt: String?
+    ) -> LocalAlpineNativeToolCall {
+        guard call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "web_search" else {
+            return call
+        }
+        let arguments = localAlpineNativeToolArguments(for: call)
+        let rawTarget = firstBrowserURLCandidate(in: arguments)
+        guard let urlString = normalizedHTTPURLString(rawTarget) else { return call }
+
+        var redirected = arguments
+        for key in ["query", "q", "queries", "keywords", "keyword"] {
+            redirected.removeValue(forKey: key)
+        }
+        redirected["url"] = urlString
+        redirected["force_reload"] = false
+        redirected["reload"] = false
+
+        let userPrompt = latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if userPromptLooksLikeImageGeneration(userPrompt) {
+            redirected["action"] = "auto"
+            redirected["text"] = firstNonEmptyString(
+                in: redirected,
+                keys: ["text", "value", "input", "content", "message", "prompt"]
+            ) ?? browserAutomationPrompt(from: userPrompt, removing: urlString)
+            redirected["wait_for_image"] = true
+            if redirected["button_text"] == nil && redirected["buttonText"] == nil {
+                redirected["button_text"] = "generate create submit send start run 免费生成 生成图片"
+            }
+        } else {
+            redirected["action"] = "get_readable"
+        }
+
+        let data = (try? JSONSerialization.data(withJSONObject: redirected, options: [.sortedKeys])) ?? Data()
+        return LocalAlpineNativeToolCall(
+            id: call.id,
+            name: "browser_use",
+            arguments: String(data: data, encoding: .utf8) ?? "{}"
+        )
+    }
+
+    private static func browserContinuationToolCallAfterVerification(
+        _ call: LocalAlpineNativeToolCall
+    ) -> LocalAlpineNativeToolCall {
+        guard call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "browser_use" else {
+            return call
+        }
+        var arguments = localAlpineNativeToolArguments(for: call)
+        let action = firstNonEmptyString(
+            in: arguments,
+            keys: ["action", "browser_action", "browser_use_action", "operation", "op", "type"]
+        )?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        for key in ["url", "link", "href", "page_url", "source", "input_url"] {
+            arguments.removeValue(forKey: key)
+        }
+        if ["open", "navigate", "browser.open", "browser.navigate", "readable", "get_readable", "browser.readable"].contains(action) {
+            arguments["action"] = "text"
+        }
+        arguments["force_reload"] = false
+        arguments["forceReload"] = false
+        arguments["reload"] = false
+        let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
+        return LocalAlpineNativeToolCall(
+            id: call.id,
+            name: call.name,
+            arguments: String(data: data, encoding: .utf8) ?? call.arguments
+        )
+    }
+
+    private static func firstBrowserURLCandidate(in arguments: [String: Any]) -> String? {
+        if let query = firstNonEmptyString(in: arguments, keys: ["query", "q", "url", "link", "href"]) {
+            return query
+        }
+        if let queries = arguments["queries"] as? [String] {
+            return queries.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        }
+        return nil
+    }
+
+    private static func normalizedHTTPURLString(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’<>()[]{}，,。"))
+        let candidate: String
+        if let url = URL(string: trimmed),
+           let scheme = url.scheme?.lowercased(),
+           ["http", "https"].contains(scheme),
+           url.host?.isEmpty == false {
+            candidate = url.absoluteString
+        } else if let range = trimmed.range(of: #"https?://[^\s"'<>，,。]+"#, options: .regularExpression) {
+            candidate = String(trimmed[range])
+        } else {
+            return nil
+        }
+        guard let url = URL(string: candidate),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              url.host?.isEmpty == false else {
+            return nil
+        }
+        return url.absoluteString
+    }
+
+    private static func userPromptLooksLikeImageGeneration(_ prompt: String) -> Bool {
+        let lower = prompt.lowercased()
+        let imageWords = ["图", "图片", "照片", "画", "image", "photo", "picture"]
+        let generateWords = ["生成", "生图", "画一", "做一", "给我", "create", "generate", "make"]
+        return imageWords.contains { lower.contains($0) }
+            && generateWords.contains { lower.contains($0) }
+    }
+
+    private static func browserAutomationPrompt(from prompt: String, removing urlString: String) -> String {
+        var cleaned = prompt
+            .replacingOccurrences(of: urlString, with: " ")
+            .replacingOccurrences(of: #"https?://\S+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty {
+            cleaned = "生成一张图片"
+        }
+        return cleaned
     }
 
     private static func firstNonEmptyString(
@@ -13848,7 +13996,7 @@ final class ChatViewModel {
         if browserVerificationCompleted {
             body += """
 
-            Browser human verification was completed by the user in the visible shared browser. Continue the same browser workflow from the current page state now; do not call browser.open/browser.readable/navigate for the same URL again unless you explicitly need a forced reload. Use browser_use actions such as get_page_info, find_elements, scroll, click, type, screenshot, or wait_for_dom_stable on the existing page. Do not ask the user to continue manually.
+            Browser human verification was completed by the user in the visible shared browser. The app already resumed the same browser tool from the current page state and the JSON above is the resumed result. Do not treat verification itself as the final user task; continue with browser_use only if the resumed result still lacks the requested file/result.
             """
         }
         return String(body.prefix(16_000))
@@ -20703,6 +20851,7 @@ final class ChatViewModel {
         if action.contains("web.search") || action == "web_search" || action.contains("browser.search") {
             return "正在搜索网页..."
         }
+        if action.contains("auto") { return "正在自动操作网页..." }
         if action.contains("observe") || action.contains("get_state") { return "正在观察网页状态..." }
         if action.contains("navigate") || action.contains("open") { return "正在打开网页..." }
         if action.contains("readable") || action.contains("text") { return "正在查看网页内容..." }
@@ -20748,6 +20897,7 @@ final class ChatViewModel {
     private static func localBrowserToolCompletedTitle(for actionName: String) -> String {
         let action = actionName.lowercased()
         if action.contains("web.search") || action == "web_search" || action.contains("browser.search") { return "网页搜索完成" }
+        if action.contains("auto") { return "网页自动操作完成" }
         if action.contains("observe") || action.contains("get_state") { return "网页状态已观察" }
         if action.contains("navigate") || action.contains("open") { return "网页已打开" }
         if action.contains("readable") || action.contains("text") { return "网页内容已查看" }
