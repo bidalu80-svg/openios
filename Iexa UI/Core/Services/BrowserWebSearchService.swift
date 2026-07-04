@@ -1257,6 +1257,20 @@ final class BrowserWebSearchService: NSObject {
             )
         }
 
+        if let text,
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           workflowState.typed,
+           let inputStillContainsText = await autoWorkflowInputStillContainsText(text: text, call: continuationCall),
+           !inputStillContainsText {
+            workflowState.typed = false
+            workflowState.clicked = false
+            saveAutoWorkflowState(workflowState)
+            steps.append(Self.workflowStep("observe_input", [
+                "ok": true,
+                "summary": "当前页面输入框未保留上次输入，已重置自动流程状态。"
+            ]))
+        }
+
         if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !workflowState.typed {
             var typeCall = continuationCall
             typeCall["text"] = text
@@ -1388,6 +1402,28 @@ final class BrowserWebSearchService: NSObject {
         ]
             .joined(separator: "|")
             .lowercased()
+    }
+
+    private func autoWorkflowInputStillContainsText(text: String, call: [String: Any]) async -> Bool? {
+        let selector = Self.firstString(in: call, keys: ["selector", "css", "element"])
+        let label = Self.firstString(in: call, keys: [
+            "label", "field_label", "fieldLabel", "aria_label", "ariaLabel",
+            "name", "title", "placeholder", "target"
+        ])
+        guard let object = await evaluateJSONObject(Self.autoWorkflowInputStateScript(
+            selector: selector,
+            label: label,
+            text: text
+        )) else {
+            return nil
+        }
+        if Self.boolValue(object["requires_user_verification"]) == true {
+            return nil
+        }
+        if Self.boolValue(object["found"]) != true {
+            return false
+        }
+        return Self.boolValue(object["has_text"])
     }
 
     private static func browserContinuationCall(from call: [String: Any]) -> [String: Any] {
@@ -3263,6 +3299,116 @@ final class BrowserWebSearchService: NSObject {
             tag,
             text: textOf(node).slice(0, 160),
             value: node.value || ''
+          });
+        })();
+        """
+    }
+
+    private static func autoWorkflowInputStateScript(
+        selector: String?,
+        label: String?,
+        text: String
+    ) -> String {
+        """
+        (() => {
+          const selector = \(Self.javascriptString(selector ?? ""));
+          const desiredLabel = \(Self.javascriptString(label ?? ""));
+          const expectedText = \(Self.javascriptString(text));
+          const editableSelector = 'input:not([type="hidden"]), textarea, select, [contenteditable], [role="textbox"], [aria-label], [placeholder], [name]';
+          function norm(value) { return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase(); }
+          function textOf(node) { return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim(); }
+          function attr(node, name) { return node && node.getAttribute ? (node.getAttribute(name) || '') : ''; }
+          function accessibleText(node) {
+            if (!node) return '';
+            return [
+              textOf(node), attr(node, 'aria-label'), attr(node, 'title'), attr(node, 'name'),
+              attr(node, 'value'), attr(node, 'placeholder'), node.value || '', node.placeholder || ''
+            ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+          }
+          function visible(node) {
+            if (!node || !node.getBoundingClientRect) return false;
+            const style = getComputedStyle(node);
+            const r = node.getBoundingClientRect();
+            return r.width > 1 && r.height > 1 && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
+          }
+          function allRoots() {
+            const roots = [document];
+            for (let i = 0; i < roots.length; i += 1) {
+              const root = roots[i];
+              const nodes = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+              for (const node of nodes) {
+                if (node.shadowRoot) roots.push(node.shadowRoot);
+              }
+            }
+            return roots;
+          }
+          function editableTarget(node) {
+            if (!node) return null;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            if (tag === 'input' || tag === 'textarea' || tag === 'select' || node.isContentEditable || attr(node, 'role') === 'textbox') return node;
+            const closest = node.closest && node.closest(editableSelector);
+            if (closest) return closest;
+            try { return node.querySelector && node.querySelector(editableSelector); } catch (_) { return null; }
+          }
+          function deepQuerySelector(raw) {
+            if (!raw) return null;
+            for (const root of allRoots()) {
+              try {
+                const target = editableTarget(root.querySelector(raw));
+                if (target && visible(target)) return target;
+              } catch (_) { return null; }
+            }
+            return null;
+          }
+          function findByLabel(raw) {
+            const wanted = norm(raw);
+            if (!wanted) return null;
+            let best = null;
+            let bestScore = -1;
+            for (const root of allRoots()) {
+              let nodes = [];
+              try { nodes = Array.from(root.querySelectorAll(editableSelector)); } catch (_) {}
+              for (const node of nodes) {
+                if (!visible(node)) continue;
+                const label = norm(accessibleText(node));
+                let score = -1;
+                if (label === wanted) score = 100;
+                else if (label.startsWith(wanted)) score = 80;
+                else if (label.includes(wanted)) score = 65;
+                else if (wanted.includes(label) && label.length >= 2) score = 45;
+                if (score > bestScore) {
+                  best = node;
+                  bestScore = score;
+                }
+              }
+            }
+            return best;
+          }
+          function humanVerificationState() {
+            const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
+            const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
+            const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || frame.getAttribute('aria-label') || '').join(' ').toLowerCase();
+            const bodyText = norm(document.body && document.body.innerText || '');
+            const detected = Boolean(turnstile || recaptcha || /turnstile|captcha|recaptcha|challenge/.test(frames) || /人机验证|验证您是真人|请验证您是真人|正在检查|captcha|turnstile|recaptcha/.test(bodyText));
+            const tokenNode = turnstile || recaptcha;
+            const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+            return { detected, completed: tokenLength > 0 };
+          }
+          const verification = humanVerificationState();
+          if (verification.detected && !verification.completed) {
+            return JSON.stringify({ found: false, has_text: false, requires_user_verification: true, human_verification: verification });
+          }
+          const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
+          if (!node) return JSON.stringify({ found: false, has_text: false, title: document.title || '', url: location.href });
+          const value = ('value' in node ? node.value : textOf(node)) || '';
+          const expected = norm(expectedText);
+          const actual = norm(value);
+          return JSON.stringify({
+            found: true,
+            has_text: expected.length > 0 && actual.includes(expected),
+            value: String(value).slice(0, 240),
+            title: document.title || '',
+            url: location.href
           });
         })();
         """
