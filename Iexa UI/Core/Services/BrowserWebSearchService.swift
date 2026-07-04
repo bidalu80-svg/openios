@@ -134,6 +134,8 @@ final class BrowserWebSearchService: NSObject {
             return await executeNativeSearch(call)
         case "browser.use", "browser_use":
             return await executeNativeBrowserUse(call)
+        case "browser.auto", "browser_auto", "auto", "complete_task", "browser.complete_task":
+            return await executeNativeAutoWorkflow(call)
         case "browser.open", "browser.navigate", "browser_open", "browser.navigate_url", "navigate":
             return await executeNativeOpen(call, readable: false)
         case "browser.readable", "browser.get_readable", "browser_readable", "get_readable", "read_webpage":
@@ -1183,9 +1185,240 @@ final class BrowserWebSearchService: NSObject {
         } else if typed {
             payload["summary"] = "已向网页元素输入文本。"
         } else {
+            if x == nil,
+               y == nil,
+               (selector != nil || label != nil),
+               let recovered = await attemptTypeByScanningPage(
+                   selector: selector,
+                   label: label,
+                   text: text,
+                   clear: clear,
+                   pressEnter: pressEnter
+               ) {
+                return recovered
+            }
             payload["summary"] = (payload["error"] as? String) ?? "网页输入未完成。"
         }
         return payload
+    }
+
+    private func executeNativeAutoWorkflow(_ call: [String: Any]) async -> [String: Any] {
+        var steps: [[String: Any]] = []
+
+        if let url = Self.urlValue(in: call) {
+            let opened = await executeNativeOpen(call, readable: false)
+            steps.append(Self.workflowStep("open", opened))
+            if Self.boolValue(opened["requires_user_verification"]) == true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    requiresVerification: true,
+                    summary: "网页需要先完成人机验证，已打开浏览器并定位验证区域。"
+                )
+            }
+            if Self.boolValue(opened["ok"]) != true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    summary: opened["error"] as? String ?? "自动浏览器流程未能打开网页。"
+                )
+            }
+        }
+
+        let continuationCall = Self.browserContinuationCall(from: call)
+        let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
+        if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            var typeCall = continuationCall
+            typeCall["text"] = text
+            if typeCall["label"] == nil,
+               typeCall["field_label"] == nil,
+               typeCall["placeholder"] == nil,
+               typeCall["selector"] == nil {
+                typeCall["target"] = Self.firstString(in: call, keys: ["field_hint", "fieldHint", "input_hint", "inputHint"])
+                    ?? "prompt description text input"
+            }
+            let typed = await executeNativeType(typeCall)
+            steps.append(Self.workflowStep("type", typed))
+            if Self.boolValue(typed["requires_user_verification"]) == true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    requiresVerification: true,
+                    summary: "网页需要先完成人机验证，已定位到验证区域。"
+                )
+            }
+            if Self.boolValue(typed["ok"]) != true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    summary: typed["error"] as? String ?? typed["summary"] as? String ?? "自动流程未能输入文本。"
+                )
+            }
+        }
+
+        let buttonLabel = Self.firstString(in: call, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"])
+            ?? (text == nil
+                ? Self.firstString(in: call, keys: ["target", "label"])
+                : "generate create submit send search start run continue next 免费生成 生成图片")
+        if let buttonLabel {
+            var clickCall = continuationCall
+            clickCall["label"] = buttonLabel
+            clickCall["button_text"] = buttonLabel
+            let clicked = await executeNativeClick(clickCall)
+            steps.append(Self.workflowStep("click", clicked))
+            if Self.boolValue(clicked["requires_user_verification"]) == true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    requiresVerification: true,
+                    summary: "网页需要先完成人机验证，已定位到验证区域。"
+                )
+            }
+            if Self.boolValue(clicked["ok"]) != true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    summary: clicked["error"] as? String ?? clicked["summary"] as? String ?? "自动流程未能点击目标按钮。"
+                )
+            }
+        }
+
+        let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? (text != nil && buttonLabel != nil)
+        if shouldWaitForImage {
+            var waitCall = continuationCall
+            if waitCall["timeout"] == nil {
+                waitCall["timeout"] = 60
+            }
+            let image = await executeNativeWaitForImage(waitCall)
+            steps.append(Self.workflowStep("wait_for_image", image))
+            return Self.workflowPayload(
+                ok: Self.boolValue(image["ok"]) == true,
+                steps: steps,
+                fileURL: image["file_url"] as? String,
+                summary: image["summary"] as? String ?? image["error"] as? String ?? "自动浏览器流程已完成。"
+            )
+        }
+
+        let stable = await executeNativeWaitForDOMStable(continuationCall)
+        steps.append(Self.workflowStep("wait_for_dom_stable", stable))
+        return Self.workflowPayload(
+            ok: true,
+            steps: steps,
+            summary: "自动浏览器流程已完成。"
+        )
+    }
+
+    private static func browserContinuationCall(from call: [String: Any]) -> [String: Any] {
+        var copy = call
+        for key in ["url", "link", "href", "page_url", "source", "input_url"] {
+            copy.removeValue(forKey: key)
+        }
+        copy["force_reload"] = false
+        copy["forceReload"] = false
+        copy["reload"] = false
+        return copy
+    }
+
+    private static func workflowStep(_ name: String, _ payload: [String: Any]) -> [String: Any] {
+        [
+            "step": name,
+            "ok": Self.boolValue(payload["ok"]) ?? false,
+            "summary": payload["summary"] as? String ?? payload["error"] as? String ?? "",
+            "requires_user_verification": Self.boolValue(payload["requires_user_verification"]) ?? false,
+            "url": payload["url"] as? String ?? "",
+            "title": payload["title"] as? String ?? "",
+            "file_url": payload["file_url"] as? String ?? ""
+        ]
+    }
+
+    private static func workflowPayload(
+        ok: Bool,
+        steps: [[String: Any]],
+        requiresVerification: Bool = false,
+        fileURL: String? = nil,
+        summary: String
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "action": "browser.auto",
+            "ok": ok,
+            "steps": steps,
+            "step_count": steps.count,
+            "requires_user_verification": requiresVerification,
+            "summary": summary
+        ]
+        if let fileURL, !fileURL.isEmpty {
+            payload["file_url"] = fileURL
+            payload["attach_file"] = true
+            payload["preview_images"] = [fileURL]
+            payload["items"] = [[
+                "title": "自动浏览器结果",
+                "link": fileURL,
+                "snippet": summary,
+                "thumbnail_url": fileURL
+            ]]
+        }
+        return payload
+    }
+
+    private func attemptTypeByScanningPage(
+        selector: String?,
+        label: String?,
+        text: String,
+        clear: Bool,
+        pressEnter: Bool
+    ) async -> [String: Any]? {
+        guard let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) else {
+            return nil
+        }
+        let originalY = Self.intValue(metrics["scroll_y"]) ?? 0
+        let viewportHeight = max(Self.intValue(metrics["viewport_height"]) ?? 720, 240)
+        let scrollHeight = max(Self.intValue(metrics["scroll_height"]) ?? viewportHeight, viewportHeight)
+        let maxY = max(scrollHeight - viewportHeight, 0)
+        let step = max(Int(Double(viewportHeight) * 0.72), 220)
+        var offsets = [0]
+        if maxY > 0 {
+            var nextY = 0
+            while nextY < maxY {
+                offsets.append(nextY)
+                nextY += step
+            }
+            offsets.append(maxY)
+        }
+        offsets = Self.sampledUniqueOffsets(offsets, limit: 22)
+
+        for (index, offset) in offsets.enumerated() {
+            _ = await evaluateJSONObject(Self.scrollToPageYScript(offset))
+            try? await Task.sleep(nanoseconds: index == 0 ? 180_000_000 : 320_000_000)
+
+            guard var object = await evaluateJSONObject(Self.typeVisibleElementScript(
+                selector: selector,
+                label: label,
+                text: text,
+                clear: clear,
+                pressEnter: pressEnter
+            )) else {
+                continue
+            }
+            if Self.boolValue(object["requires_user_verification"]) == true {
+                _ = await scrollToVisibleHumanVerification()
+                object["action"] = "browser.type"
+                object["auto_scanned_page"] = true
+                object["scroll_positions"] = offsets.count
+                object["summary"] = "网页需要先完成人机验证，已滚动到验证区域。"
+                return object
+            }
+            if Self.boolValue(object["ok"]) == true {
+                object["action"] = "browser.type"
+                object["auto_scanned_page"] = true
+                object["scroll_positions"] = offsets.count
+                object["scroll_y"] = offset
+                object["summary"] = "已自动滚动整页并向匹配输入框输入文本。"
+                return object
+            }
+        }
+
+        _ = await evaluateJSONObject(Self.scrollToPageYScript(originalY))
+        return nil
     }
 
     private func attemptClickByScanningPage(selector: String?, label: String?) async -> [String: Any]? {
@@ -2308,6 +2541,7 @@ final class BrowserWebSearchService: NSObject {
         case "", "browser_use", "browser.use":
             if wantsSave { return "browser.fetch" }
             if hasScript { return "browser.execute_js" }
+            if hasURL && hasTypedText { return "browser.auto" }
             if hasTypedText && (hasSelector || hasLabel || hasCoordinates) { return "browser.type" }
             if hasLabel || hasCoordinates { return "browser.click" }
             if hasSelector && wantsScreenshot { return "browser.screenshot" }
@@ -2331,6 +2565,8 @@ final class BrowserWebSearchService: NSObject {
             return "browser.click"
         case "type", "browser.type":
             return "browser.type"
+        case "auto", "complete_task", "browser.auto", "browser.complete_task":
+            return "browser.auto"
         case "hover", "browser.hover":
             return "browser.hover"
         case "scroll", "browser.scroll":
@@ -2763,6 +2999,173 @@ final class BrowserWebSearchService: NSObject {
             text: accessibleText(target).slice(0, 160),
             coordinate_x: cx,
             coordinate_y: cy
+          });
+        })();
+        """
+    }
+
+    private static func typeVisibleElementScript(
+        selector: String?,
+        label: String?,
+        text: String,
+        clear: Bool,
+        pressEnter: Bool
+    ) -> String {
+        """
+        (() => {
+          const selector = \(Self.javascriptString(selector ?? ""));
+          const desiredLabel = \(Self.javascriptString(label ?? ""));
+          const text = \(Self.javascriptString(text));
+          const clear = \(clear ? "true" : "false");
+          const pressEnter = \(pressEnter ? "true" : "false");
+          const editableSelector = 'input:not([type="hidden"]), textarea, select, [contenteditable], [role="textbox"], [aria-label], [placeholder], [name]';
+          function norm(value) { return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase(); }
+          function textOf(node) { return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim(); }
+          function attr(node, name) { return node && node.getAttribute ? (node.getAttribute(name) || '') : ''; }
+          function accessibleText(node) {
+            if (!node) return '';
+            return [
+              textOf(node), attr(node, 'aria-label'), attr(node, 'title'), attr(node, 'alt'),
+              attr(node, 'name'), attr(node, 'value'), attr(node, 'placeholder'), attr(node, 'data-testid'),
+              node.value || '', node.placeholder || ''
+            ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+          }
+          function visible(node) {
+            if (!node || !node.getBoundingClientRect) return false;
+            if (node.hidden || (node.closest && node.closest('[hidden],[aria-hidden="true"]'))) return false;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
+            const r = node.getBoundingClientRect();
+            return r.width > 1 && r.height > 1 && r.bottom >= 0 && r.right >= 0 && r.top <= innerHeight && r.left <= innerWidth;
+          }
+          function allRoots() {
+            const roots = [document];
+            for (let i = 0; i < roots.length; i += 1) {
+              const root = roots[i];
+              const nodes = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+              for (const node of nodes) {
+                if (node.shadowRoot) roots.push(node.shadowRoot);
+              }
+            }
+            return roots;
+          }
+          function isEditable(node) {
+            if (!node) return false;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            return tag === 'input' || tag === 'textarea' || tag === 'select' || !!node.isContentEditable || attr(node, 'role') === 'textbox';
+          }
+          function editableTarget(node) {
+            if (!node) return null;
+            if (isEditable(node)) return node;
+            const closest = node.closest && node.closest(editableSelector);
+            if (closest) return closest;
+            try {
+              const descendant = node.querySelector && node.querySelector(editableSelector);
+              if (descendant) return descendant;
+            } catch (_) {}
+            return null;
+          }
+          function deepQuerySelector(raw) {
+            if (!raw) return null;
+            for (const root of allRoots()) {
+              try {
+                const match = root.querySelector(raw);
+                const editable = editableTarget(match);
+                if (editable && visible(editable)) return editable;
+              } catch (_) {
+                return null;
+              }
+            }
+            return null;
+          }
+          function findByLabel(raw) {
+            const wanted = norm(raw);
+            if (!wanted) return null;
+            let best = null;
+            let bestScore = -1;
+            for (const root of allRoots()) {
+              let nodes = [];
+              try { nodes = Array.from(root.querySelectorAll(editableSelector)); } catch (_) {}
+              for (const node of nodes) {
+                if (!visible(node)) continue;
+                const label = norm(accessibleText(node));
+                if (!label) continue;
+                let score = -1;
+                if (label === wanted) score = 100;
+                else if (label.startsWith(wanted)) score = 80;
+                else if (label.includes(wanted)) score = 65;
+                else if (wanted.includes(label) && label.length >= 2) score = 45;
+                if (score > bestScore) {
+                  best = node;
+                  bestScore = score;
+                }
+              }
+            }
+            return best;
+          }
+          function humanVerificationState() {
+            const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
+            const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
+            const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || frame.getAttribute('aria-label') || '').join(' ');
+            const bodyText = norm(document.body && document.body.innerText || '');
+            const textDetected = /prove you are human|verify you are human|checking if the site connection is secure|captcha|turnstile|recaptcha|人机验证|验证您是真人|请验证您是真人|正在检查/.test(bodyText);
+            const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
+            const provider = recaptcha ? 'recaptcha' : ((frameDetected || textDetected || turnstile) ? 'human_verification' : '');
+            const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
+            return { detected: Boolean(provider), provider, completed: successState };
+          }
+          const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
+          if (!node) {
+            const verification = humanVerificationState();
+            if (verification.detected && !verification.completed) {
+              return JSON.stringify({ ok: false, requires_user_verification: true, human_verification: verification, title: document.title || '', url: location.href });
+            }
+            return JSON.stringify({ ok: false, error: 'Element not found in current viewport', title: document.title || '', url: location.href });
+          }
+          try { node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
+          const disabled = Boolean(node.disabled || attr(node, 'aria-disabled') === 'true' || node.closest('[disabled],[aria-disabled="true"]'));
+          if (disabled) {
+            return JSON.stringify({ ok: false, disabled: true, title: document.title || '', url: location.href, text: accessibleText(node).slice(0, 160) });
+          }
+          const tag = (node.tagName || node.nodeName || '').toLowerCase();
+          try { node.dispatchEvent(new FocusEvent('focusin', { bubbles: true, composed: true })); } catch (_) {}
+          try { node.focus && node.focus(); } catch (_) {}
+          if (tag === 'select' && node.options) {
+            const wanted = norm(text);
+            const options = Array.from(node.options);
+            const match = options.find(option => option.value === text)
+              || options.find(option => norm(option.textContent) === wanted)
+              || options.find(option => norm(option.textContent).includes(wanted));
+            node.value = match ? match.value : text;
+          } else if (node.isContentEditable || attr(node, 'role') === 'textbox') {
+            node.innerText = (clear ? '' : textOf(node)) + text;
+          } else if ('value' in node) {
+            const nextValue = (clear ? '' : (node.value || '')) + text;
+            const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), 'value')
+              || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+              || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+            if (descriptor && descriptor.set) descriptor.set.call(node, nextValue);
+            else node.value = nextValue;
+          }
+          try { node.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, composed: true, data: text, inputType: 'insertText' })); }
+          catch (_) { try { node.dispatchEvent(new Event('input', { bubbles: true, cancelable: true, composed: true })); } catch (_) {} }
+          try { node.dispatchEvent(new Event('change', { bubbles: true, cancelable: true, composed: true })); } catch (_) {}
+          if (pressEnter) {
+            for (const event of [
+              new KeyboardEvent('keydown', { bubbles: true, cancelable: true, composed: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }),
+              new KeyboardEvent('keypress', { bubbles: true, cancelable: true, composed: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }),
+              new KeyboardEvent('keyup', { bubbles: true, cancelable: true, composed: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 })
+            ]) {
+              try { node.dispatchEvent(event); } catch (_) {}
+            }
+          }
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            tag,
+            text: textOf(node).slice(0, 160),
+            value: node.value || ''
           });
         })();
         """
