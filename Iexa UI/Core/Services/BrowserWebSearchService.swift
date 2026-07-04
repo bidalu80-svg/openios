@@ -1291,6 +1291,14 @@ final class BrowserWebSearchService: NSObject {
             }
             let image = await executeNativeWaitForImage(waitCall)
             steps.append(Self.workflowStep("wait_for_image", image))
+            if Self.boolValue(image["requires_user_verification"]) == true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    requiresVerification: true,
+                    summary: image["summary"] as? String ?? "网页等待结果时需要先完成人机验证，已定位到验证区域。"
+                )
+            }
             return Self.workflowPayload(
                 ok: Self.boolValue(image["ok"]) == true,
                 steps: steps,
@@ -2250,6 +2258,20 @@ final class BrowserWebSearchService: NSObject {
         var lastCandidates: [[String: Any]] = []
 
         while Date() < deadline {
+            if let verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()),
+               Self.boolValue(verification["detected"]) == true,
+               Self.boolValue(verification["completed"]) != true {
+                _ = await scrollToVisibleHumanVerification()
+                return [
+                    "action": "browser.wait_for_image",
+                    "ok": false,
+                    "human_verification": verification,
+                    "requires_user_verification": true,
+                    "candidate_count": lastCandidates.count,
+                    "candidates": Array(lastCandidates.prefix(5)),
+                    "summary": "网页在等待结果时再次要求人机验证，已定位到验证区域。"
+                ]
+            }
             if let object = await evaluateJSONObject(Self.generatedImageCandidateScript(
                 minWidth: minWidth,
                 minHeight: minHeight,

@@ -12778,11 +12778,37 @@ final class ChatViewModel {
             isStreaming: true,
             status: startingStatus
         )
-        let result = await LocalNativeToolService.shared.executeBlocks(in: content)
-        let browserVerificationCompleted = await waitForBrowserUserVerificationIfNeeded(
-            result,
-            messageId: assistantMessageId
-        )
+        var result = await LocalNativeToolService.shared.executeBlocks(in: content)
+        var browserVerificationCompleted = false
+        var verificationCycleCount = 0
+        let maxVerificationCycles = 4
+        while result.requiresBrowserUserVerification && verificationCycleCount < maxVerificationCycles {
+            let completed = await waitForBrowserUserVerificationIfNeeded(
+                result,
+                messageId: assistantMessageId
+            )
+            guard completed else { break }
+            browserVerificationCompleted = true
+            verificationCycleCount += 1
+            updateLocalBrowserToolMessage(
+                messageId: assistantMessageId,
+                content: "人机验证已完成，正在从当前网页状态继续自动操作...",
+                isStreaming: true,
+                status: ChatStatusUpdate(
+                    action: "browser_web_search",
+                    status: Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .verificationCompleted),
+                    description: "人机验证已完成，继续执行网页工具...",
+                    done: false,
+                    urls: result.browserDocument?.url.map { [$0] } ?? [],
+                    occurredAt: .now,
+                    items: result.browserDocument?.items ?? [],
+                    count: max(result.browserDocument?.items.count ?? 0, result.browserDocument?.url == nil ? 0 : 1),
+                    query: query.isEmpty ? nil : query,
+                    queries: query.isEmpty ? [] : [query]
+                )
+            )
+            result = await LocalNativeToolService.shared.executeBlocks(in: content)
+        }
         if !result.requiresBrowserUserVerification {
             enqueueLocalAlpineOpenRequests(result.openRequests)
         }
@@ -12814,19 +12840,17 @@ final class ChatViewModel {
             isStreaming: true,
             status: inProgressStatus
         )
-        let browserDocument = browserVerificationCompleted
-            ? result.browserDocument.map { Self.localNativeBrowserVerificationCompletedDocument(from: $0) }
-            : result.browserDocument
+        let browserDocument = result.browserDocument
         let failed = result.browserDocument.map { !$0.ok && !$0.requiresUserVerification }
             ?? Self.localAlpineSyntheticToolFailed(result.summary)
-        let finalDone = browserVerificationCompleted || !result.requiresBrowserUserVerification
-        let browserSucceeded = browserVerificationCompleted || browserDocument?.ok == true
+        let finalDone = !result.requiresBrowserUserVerification
+        let browserSucceeded = browserDocument?.ok == true
         let finalStatus = ChatStatusUpdate(
             action: "browser_web_search",
             status: Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .completed),
-            description: browserVerificationCompleted
-                ? "网页已继续执行完成"
-                : (result.requiresBrowserUserVerification ? "网页正在等待你完成人机验证" : (browserDocument?.summary ?? result.summary)),
+            description: result.requiresBrowserUserVerification
+                ? "网页仍在等待你完成人机验证"
+                : (browserVerificationCompleted ? "人机验证后已继续执行网页操作" : (browserDocument?.summary ?? result.summary)),
             done: finalDone,
             urls: browserDocument?.url.map { [$0] } ?? [],
             occurredAt: .now,
@@ -12840,9 +12864,9 @@ final class ChatViewModel {
             content: browserSucceeded
                 ? "\(Self.localBrowserToolCompletedTitle(for: actionName))：\(browserDocument?.title ?? detailFallback)"
                 : (result.requiresBrowserUserVerification
-                    ? "网页操作暂停：请先完成人机验证"
+                    ? "网页操作仍在等待人机验证"
                     : "\(Self.localBrowserToolFailedTitle(for: actionName))：\(browserDocument?.error ?? browserDocument?.summary ?? result.summary)"),
-            isStreaming: result.requiresBrowserUserVerification && !browserVerificationCompleted,
+            isStreaming: result.requiresBrowserUserVerification,
             status: finalStatus
         )
         let output = Self.localNativeFunctionToolResultContent(
@@ -12945,6 +12969,7 @@ final class ChatViewModel {
             .replacingOccurrences(of: "_", with: ".")
         switch action {
         case "navigate", "browser.navigate",
+            "auto", "browser.auto",
             "scroll", "browser.scroll",
             "click", "browser.click",
             "type", "browser.type",
