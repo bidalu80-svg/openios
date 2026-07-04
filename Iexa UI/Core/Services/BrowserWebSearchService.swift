@@ -833,13 +833,15 @@ final class BrowserWebSearchService: NSObject {
             const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+            const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
             const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
+            const completed = Boolean(tokenLength > 0 || successState);
             return {
               detected: Boolean(provider),
               provider,
               token_length: tokenLength,
-              completed: Boolean(tokenLength > 0),
-              reason: provider && tokenLength === 0 ? 'Human verification is present but not completed.' : ''
+              completed,
+              reason: provider && !completed ? 'Human verification is present but not completed.' : ''
             };
           }
           const node = findNode(selector)
@@ -1162,13 +1164,15 @@ final class BrowserWebSearchService: NSObject {
             const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+            const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
             const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
+            const completed = Boolean(tokenLength > 0 || successState);
             return {
               detected: Boolean(provider),
               provider,
               token_length: tokenLength,
-              completed: Boolean(tokenLength > 0),
-              reason: provider && tokenLength === 0 ? 'Human verification is present but not completed.' : ''
+              completed,
+              reason: provider && !completed ? 'Human verification is present but not completed.' : ''
             };
           }
           const coordinateNode = (Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null;
@@ -3675,12 +3679,20 @@ final class BrowserWebSearchService: NSObject {
             const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+            const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
+            const actionPattern = /generate|create|submit|start|run|continue|next|free image|生成|开始|提交|继续|下一步|立即生成|生成图片/i;
+            const actionReady = findElements('button, a[href], input[type="submit"], input[type="button"], [role="button"], [onclick], [tabindex]')
+              .slice(0, 240)
+              .some(node => visible(node) && !disabledState(node) && actionPattern.test(accessibleText(node)));
             const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
+            const completed = Boolean(tokenLength > 0 || successState || actionReady);
             return {
               detected: Boolean(provider),
               provider,
               token_length: tokenLength,
-              completed: Boolean(tokenLength > 0)
+              completed,
+              success_state: successState,
+              action_ready: actionReady
             };
           }
           function scoreElement(node, label, nodeHref) {
@@ -5370,6 +5382,33 @@ final class BrowserWebSearchService: NSObject {
           const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
           const tokenNode = turnstile || recaptcha;
           const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+          function visible(node) {
+            if (!node || !node.getBoundingClientRect) return false;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return false;
+            const r = node.getBoundingClientRect();
+            return r.width > 12 && r.height > 12 && r.bottom >= 0 && r.right >= 0 && r.top <= innerHeight * 1.25 && r.left <= innerWidth;
+          }
+          function enabledActionButtonPresent() {
+            const selector = 'button, a[href], input[type="submit"], input[type="button"], [role="button"], [onclick], [tabindex]';
+            const actionPattern = /generate|create|submit|start|run|continue|next|free image|生成|开始|提交|继续|下一步|立即生成|生成图片/i;
+            const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 240);
+            return nodes.some(node => {
+              if (!visible(node)) return false;
+              const disabled = Boolean(node.disabled || node.getAttribute('aria-disabled') === 'true' || node.closest('[disabled],[aria-disabled="true"]'));
+              if (disabled) return false;
+              const label = [
+                node.innerText || '',
+                node.textContent || '',
+                node.getAttribute('aria-label') || '',
+                node.getAttribute('title') || '',
+                node.getAttribute('value') || '',
+                node.value || ''
+              ].join(' ').replace(/\\s+/g, ' ').trim();
+              return actionPattern.test(label);
+            });
+          }
+          const actionReady = enabledActionButtonPresent();
           const challengeDetected = Boolean(
             turnstile ||
             recaptcha ||
@@ -5379,10 +5418,13 @@ final class BrowserWebSearchService: NSObject {
           const failedState = /故障排除|验证失败|troubleshooting|verification failed/.test(bodyText);
           const successState = /verified|验证成功|已验证/.test(bodyText)
             || (/成功|success/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText));
+          const completedState = tokenLength > 0 || successState || actionReady;
           return JSON.stringify({
             detected: challengeDetected,
-            completed: tokenLength > 0 || successState,
-            failed_state: failedState
+            completed: completedState,
+            failed_state: failedState && !completedState,
+            success_state: successState,
+            action_ready: actionReady
           });
         })();
         """
