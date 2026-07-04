@@ -7,6 +7,13 @@ import OSLog
 final class BrowserWebSearchService: NSObject {
     static let shared = BrowserWebSearchService()
 
+    private struct BrowserAutoWorkflowState {
+        var signature: String
+        var typed: Bool
+        var clicked: Bool
+        var lastUpdated: Date
+    }
+
     private let logger = Logger(subsystem: "com.openui", category: "BrowserWebSearch")
     private var webView: WKWebView?
     private var browserTabs: [Int: WKWebView] = [:]
@@ -18,6 +25,7 @@ final class BrowserWebSearchService: NSObject {
     private var browserHumanVerificationSeenTabs: Set<Int> = []
     private var browserHumanVerificationCompletedAtByTab: [Int: Date] = [:]
     private var browserHumanVerificationCompletedURLByTab: [Int: URL] = [:]
+    private var browserAutoWorkflowStateByTab: [Int: BrowserAutoWorkflowState] = [:]
     private var lastBrowserNavigationReusedExistingPage = false
     private let humanVerificationPageReuseWindow: TimeInterval = 10 * 60
     private var navigationContinuation: CheckedContinuation<Bool, Never>?
@@ -1227,7 +1235,29 @@ final class BrowserWebSearchService: NSObject {
 
         let continuationCall = Self.browserContinuationCall(from: call)
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
-        if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let buttonLabel = Self.firstString(in: call, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"])
+            ?? (text == nil
+                ? Self.firstString(in: call, keys: ["target", "label"])
+                : "generate create submit send search start run continue next 免费生成 生成图片")
+        var workflowState = autoWorkflowState(for: call, text: text, buttonLabel: buttonLabel)
+
+        if let verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()),
+           Self.boolValue(verification["detected"]) == true,
+           Self.boolValue(verification["completed"]) != true {
+            _ = await scrollToVisibleHumanVerification()
+            return Self.workflowPayload(
+                ok: false,
+                steps: steps + [Self.workflowStep("observe_verification", [
+                    "ok": false,
+                    "requires_user_verification": true,
+                    "summary": "网页当前需要人机验证，已定位到验证区域。"
+                ])],
+                requiresVerification: true,
+                summary: "网页当前需要人机验证，已定位到验证区域。"
+            )
+        }
+
+        if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !workflowState.typed {
             var typeCall = continuationCall
             typeCall["text"] = text
             if typeCall["label"] == nil,
@@ -1239,6 +1269,10 @@ final class BrowserWebSearchService: NSObject {
             }
             let typed = await executeNativeType(typeCall)
             steps.append(Self.workflowStep("type", typed))
+            if Self.boolValue(typed["ok"]) == true {
+                workflowState.typed = true
+                saveAutoWorkflowState(workflowState)
+            }
             if Self.boolValue(typed["requires_user_verification"]) == true {
                 return Self.workflowPayload(
                     ok: false,
@@ -1256,16 +1290,16 @@ final class BrowserWebSearchService: NSObject {
             }
         }
 
-        let buttonLabel = Self.firstString(in: call, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"])
-            ?? (text == nil
-                ? Self.firstString(in: call, keys: ["target", "label"])
-                : "generate create submit send search start run continue next 免费生成 生成图片")
-        if let buttonLabel {
+        if let buttonLabel, !workflowState.clicked {
             var clickCall = continuationCall
             clickCall["label"] = buttonLabel
             clickCall["button_text"] = buttonLabel
             let clicked = await executeNativeClick(clickCall)
             steps.append(Self.workflowStep("click", clicked))
+            if Self.boolValue(clicked["ok"]) == true {
+                workflowState.clicked = true
+                saveAutoWorkflowState(workflowState)
+            }
             if Self.boolValue(clicked["requires_user_verification"]) == true {
                 return Self.workflowPayload(
                     ok: false,
@@ -1283,7 +1317,7 @@ final class BrowserWebSearchService: NSObject {
             }
         }
 
-        let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? (text != nil && buttonLabel != nil)
+        let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? (workflowState.clicked || (text != nil && buttonLabel != nil))
         if shouldWaitForImage {
             var waitCall = continuationCall
             if waitCall["timeout"] == nil {
@@ -1314,6 +1348,46 @@ final class BrowserWebSearchService: NSObject {
             steps: steps,
             summary: "自动浏览器流程已完成。"
         )
+    }
+
+    private func autoWorkflowState(
+        for call: [String: Any],
+        text: String?,
+        buttonLabel: String?
+    ) -> BrowserAutoWorkflowState {
+        let signature = autoWorkflowSignature(call: call, text: text, buttonLabel: buttonLabel)
+        let tabID = browserTabID(for: webView) ?? activeBrowserTabID
+        if let existing = browserAutoWorkflowStateByTab[tabID],
+           existing.signature == signature,
+           Date().timeIntervalSince(existing.lastUpdated) <= 10 * 60 {
+            return existing
+        }
+        return BrowserAutoWorkflowState(
+            signature: signature,
+            typed: false,
+            clicked: false,
+            lastUpdated: Date()
+        )
+    }
+
+    private func saveAutoWorkflowState(_ state: BrowserAutoWorkflowState) {
+        let tabID = browserTabID(for: webView) ?? activeBrowserTabID
+        var next = state
+        next.lastUpdated = Date()
+        browserAutoWorkflowStateByTab[tabID] = next
+    }
+
+    private func autoWorkflowSignature(call: [String: Any], text: String?, buttonLabel: String?) -> String {
+        let currentURL = webView?.url?.absoluteString ?? Self.urlValue(in: call)?.absoluteString ?? ""
+        let target = Self.firstString(in: call, keys: ["target", "label", "selector", "field_label", "fieldLabel", "placeholder"]) ?? ""
+        return [
+            Self.normalizedBrowserURLString(currentURL),
+            text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+            buttonLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+            target.trimmingCharacters(in: .whitespacesAndNewlines)
+        ]
+            .joined(separator: "|")
+            .lowercased()
     }
 
     private static func browserContinuationCall(from call: [String: Any]) -> [String: Any] {
@@ -2439,6 +2513,7 @@ final class BrowserWebSearchService: NSObject {
         browserHumanVerificationSeenTabs.remove(tabID)
         browserHumanVerificationCompletedAtByTab.removeValue(forKey: tabID)
         browserHumanVerificationCompletedURLByTab.removeValue(forKey: tabID)
+        browserAutoWorkflowStateByTab.removeValue(forKey: tabID)
 
         if browserTabs.isEmpty {
             let replacement = makeBrowserWebView()
@@ -4603,6 +4678,21 @@ final class BrowserWebSearchService: NSObject {
     private static func isHTTPBrowserURL(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased() else { return false }
         return scheme == "http" || scheme == "https"
+    }
+
+    private static func normalizedBrowserURLString(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              var components = URLComponents(string: trimmed) else {
+            return trimmed
+        }
+        components.fragment = nil
+        if components.path.isEmpty {
+            components.path = "/"
+        }
+        return (components.string ?? trimmed)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            .lowercased()
     }
 
     private static func browserURLsAreEquivalent(_ lhs: URL, _ rhs: URL) -> Bool {
