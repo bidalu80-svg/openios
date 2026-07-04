@@ -303,9 +303,14 @@ final class BrowserWebSearchService: NSObject {
 
         let maxLength = min(max(Self.intValue(call["max_length"] ?? call["limit"]) ?? 8_000, 800), 18_000)
         let includeScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"] ?? call["attach_preview"] ?? call["attachPreview"]) ?? false
-        let snapshot = readable
-            ? await evaluateFullPageSnapshot(maxScrolls: min(max(Self.intValue(call["scroll_count"] ?? call["max_scrolls"] ?? call["maxScrolls"]) ?? 14, 1), 24))
-            : await evaluatePageSnapshot()
+        let maxScrolls = min(max(Self.intValue(call["scroll_count"] ?? call["max_scrolls"] ?? call["maxScrolls"]) ?? 14, 1), 24)
+        let snapshot = await evaluateFullPageSnapshot(maxScrolls: maxScrolls)
+        let verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()) ?? ["detected": false]
+        let verificationDetected = Self.boolValue(verification["detected"]) == true
+        let verificationCompleted = Self.boolValue(verification["completed"]) == true
+        if verificationDetected && !verificationCompleted {
+            _ = await scrollToVisibleHumanVerification()
+        }
         let thumbnail = includeScreenshot ? await capturePageThumbnail(prefix: "browser") : nil
         let title = snapshot?.title.isEmpty == false ? snapshot!.title : (url.host ?? url.absoluteString)
         let finalURL = snapshot?.url.isEmpty == false ? snapshot!.url : url.absoluteString
@@ -319,10 +324,16 @@ final class BrowserWebSearchService: NSObject {
             "description": snapshot?.description ?? "",
             "text": String(text.prefix(maxLength)),
             "text_truncated": text.count > maxLength,
+            "full_page": true,
+            "max_scrolls": maxScrolls,
+            "human_verification": verification,
+            "requires_user_verification": verificationDetected && !verificationCompleted,
             "reused_existing_page": reusedExistingPage,
-            "summary": reusedExistingPage
-                ? (text.isEmpty ? "已复用当前浏览器页面：\(title)" : "已复用当前浏览器页面并读取：\(title)")
-                : (text.isEmpty ? "已打开网页：\(title)" : "已打开并读取网页：\(title)")
+            "summary": verificationDetected && !verificationCompleted
+                ? "网页需要先完成人机验证；请在弹出的共享浏览器中完成后继续。"
+                : (reusedExistingPage
+                    ? (text.isEmpty ? "已复用当前浏览器页面：\(title)" : "已复用当前浏览器页面并滚动读取全文：\(title)")
+                    : (text.isEmpty ? "已打开网页：\(title)" : "已打开并滚动读取网页全文：\(title)"))
         ]
         if let thumbnail {
             payload["attach_file"] = false
@@ -837,6 +848,7 @@ final class BrowserWebSearchService: NSObject {
         let requiresVerification = Self.boolValue(payload["requires_user_verification"]) == true
         let clicked = Self.boolValue(payload["ok"]) ?? false
         if requiresVerification {
+            _ = await scrollToVisibleHumanVerification()
             payload["summary"] = "网页需要先完成人机验证，目标按钮当前不可点击。请在浏览器中完成验证后继续。"
         } else if clicked {
             payload["summary"] = "已点击网页元素。"
@@ -1160,6 +1172,7 @@ final class BrowserWebSearchService: NSObject {
         let requiresVerification = Self.boolValue(payload["requires_user_verification"]) == true
         let typed = Self.boolValue(payload["ok"]) ?? false
         if requiresVerification {
+            _ = await scrollToVisibleHumanVerification()
             payload["summary"] = "网页需要先完成人机验证，目标输入框当前不可用。请在浏览器中完成验证后继续。"
         } else if typed {
             payload["summary"] = "已向网页元素输入文本。"
@@ -1648,6 +1661,7 @@ final class BrowserWebSearchService: NSObject {
         let verificationCompleted = Self.boolValue(verification["completed"]) == true
         let summary: String
         if verificationDetected && !verificationCompleted {
+            _ = await scrollToVisibleHumanVerification()
             summary = collected.isEmpty
                 ? "网页存在未完成的人机验证，整页扫描后未找到匹配网页元素。"
                 : "网页存在未完成的人机验证；已滚动扫描整页并找到 \(collected.count) 个网页元素，返回其中 \(returnedItems.count) 个代表项。"
@@ -3039,6 +3053,7 @@ final class BrowserWebSearchService: NSObject {
     }
 
     func waitForVisibleHumanVerificationCompletion(timeout: TimeInterval = 120) async -> Bool {
+        _ = await scrollToVisibleHumanVerification()
         let deadline = Date().addingTimeInterval(timeout)
         var sawChallenge = false
         var missingChallengeCount = 0
@@ -4115,6 +4130,13 @@ final class BrowserWebSearchService: NSObject {
         return Self.browserHostsMatch(completedURL, url)
     }
 
+    private func scrollToVisibleHumanVerification() async -> Bool {
+        guard let object = await evaluateJSONObject(Self.scrollToHumanVerificationScript()) else {
+            return false
+        }
+        return Self.boolValue(object["scrolled"]) == true
+    }
+
     private func notifyHumanVerificationStateIfNeeded(from source: WKWebView) {
         Task { @MainActor [weak self, weak source] in
             try? await Task.sleep(nanoseconds: 350_000_000)
@@ -4135,6 +4157,13 @@ final class BrowserWebSearchService: NSObject {
         if let tabID = browserTabID(for: webView) {
             if detected {
                 browserHumanVerificationSeenTabs.insert(tabID)
+            }
+            if detected && !explicitCompleted {
+                browserHumanVerificationCompletedAtByTab.removeValue(forKey: tabID)
+                browserHumanVerificationCompletedURLByTab.removeValue(forKey: tabID)
+                if let currentURL = webView?.url {
+                    browserVisibleChallengeRefreshURLs.remove(currentURL.absoluteString)
+                }
             }
             if completed,
                (explicitCompleted || browserHumanVerificationSeenTabs.contains(tabID)),
@@ -4161,6 +4190,66 @@ final class BrowserWebSearchService: NSObject {
         )
     }
 
+    private static func scrollToHumanVerificationScript() -> String {
+        """
+        (() => {
+          const visible = el => {
+            if (!el || !el.getBoundingClientRect) return false;
+            const r = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return r.width > 1 && r.height > 1 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+          };
+          const selectors = [
+            '[name="cf-turnstile-response"]',
+            'input[id^="cf-chl-widget"]',
+            '.cf-turnstile',
+            '[data-sitekey]',
+            '[name="g-recaptcha-response"]',
+            '.g-recaptcha',
+            'iframe[src*="turnstile"]',
+            'iframe[src*="recaptcha"]',
+            'iframe[src*="challenge"]',
+            'iframe[title*="challenge" i]',
+            'iframe[title*="captcha" i]',
+            'iframe[title*="verification" i]'
+          ];
+          let target = null;
+          for (const selector of selectors) {
+            const node = Array.from(document.querySelectorAll(selector)).find(visible);
+            if (node) {
+              target = node.closest('form, section, main, div') || node;
+              break;
+            }
+          }
+          if (!target) {
+            const pattern = /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|captcha|turnstile|验证您是真人|请验证您是真人|正在检查|验证失败|故障排除/i;
+            const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
+            let node;
+            while ((node = walker.nextNode())) {
+              if (!visible(node)) continue;
+              const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+              if (text && pattern.test(text)) {
+                target = node;
+                break;
+              }
+            }
+          }
+          if (!target) {
+            return JSON.stringify({ scrolled: false, reason: 'verification target not found', url: location.href });
+          }
+          try { target.scrollIntoView({ block: 'center', inline: 'center', behavior: 'smooth' }); }
+          catch (_) { target.scrollIntoView(true); }
+          const r = target.getBoundingClientRect();
+          return JSON.stringify({
+            scrolled: true,
+            url: location.href,
+            scroll_y: Math.round(window.scrollY || 0),
+            rect: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) }
+          });
+        })();
+        """
+    }
+
     private static func visibleChallengeProbeScript() -> String {
         """
         (() => {
@@ -4174,10 +4263,10 @@ final class BrowserWebSearchService: NSObject {
             turnstile ||
             recaptcha ||
             /turnstile|captcha|recaptcha|challenge/.test(frames) ||
-            /prove you are human|verify you are human|captcha|turnstile|故障排除|验证失败|troubleshooting|verification failed/.test(bodyText)
+            /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|故障排除|验证失败|验证您是真人|请验证您是真人|正在检查|troubleshooting|verification failed/.test(bodyText)
           );
           const failedState = /故障排除|验证失败|troubleshooting|verification failed/.test(bodyText);
-          const successState = /成功|success|verified/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText);
+          const successState = /成功|success|verified|验证成功|已验证/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText);
           return JSON.stringify({
             detected: challengeDetected,
             completed: tokenLength > 0 || successState,
