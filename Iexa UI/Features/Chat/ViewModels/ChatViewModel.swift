@@ -12757,7 +12757,7 @@ final class ChatViewModel {
         _ call: LocalAlpineNativeToolCall,
         assistantMessageId: String
     ) async -> LocalAlpineAgentResult {
-        let effectiveCall = Self.redirectURLSearchToBrowserUseIfNeeded(
+        let effectiveCall = Self.normalizeBrowserAutomationToolCallIfNeeded(
             call,
             latestUserPrompt: latestUserBrowserAutomationPrompt()
         )
@@ -13186,6 +13186,88 @@ final class ChatViewModel {
         )
     }
 
+    private static func normalizeBrowserAutomationToolCallIfNeeded(
+        _ call: LocalAlpineNativeToolCall,
+        latestUserPrompt: String?
+    ) -> LocalAlpineNativeToolCall {
+        let toolName = call.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if toolName == "web_search" {
+            return redirectURLSearchToBrowserUseIfNeeded(call, latestUserPrompt: latestUserPrompt)
+        }
+        guard toolName == "browser_use" else { return call }
+
+        let userPrompt = latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard userPromptLooksLikeImageGeneration(userPrompt) else { return call }
+
+        var arguments = localAlpineNativeToolArguments(for: call)
+        let action = firstNonEmptyString(
+            in: arguments,
+            keys: ["action", "browser_action", "browser_use_action", "operation", "op", "type"]
+        )?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let urlString = normalizedBrowserAutomationURLString(firstBrowserURLCandidate(in: arguments))
+        let lowerTarget = [
+            urlString,
+            firstNonEmptyString(in: arguments, keys: ["target", "query", "q", "keywords", "keyword"])
+        ]
+            .compactMap { $0?.lowercased() }
+            .joined(separator: " ")
+        let imageSiteHinted = lowerTarget.contains("imagefree")
+            || lowerTarget.contains("image-free")
+            || lowerTarget.contains("image generator")
+            || lowerTarget.contains("generate image")
+
+        let passiveActions: Set<String> = [
+            "", "browser_use", "browser.use",
+            "open", "navigate", "goto", "go", "browser.open", "browser.navigate",
+            "readable", "get_readable", "browser.readable",
+            "observe", "get_state", "state", "browser.observe", "browser.get_state",
+            "info", "get_page_info", "browser.info", "text", "get_text", "browser.text"
+        ]
+        guard passiveActions.contains(action), urlString != nil || imageSiteHinted else {
+            return call
+        }
+
+        arguments["action"] = "auto"
+        if let urlString {
+            arguments["url"] = urlString
+        }
+        arguments["text"] = firstNonEmptyString(
+            in: arguments,
+            keys: ["text", "value", "input", "content", "message", "prompt"]
+        ) ?? browserAutomationPrompt(from: userPrompt, removing: urlString ?? "")
+        arguments["wait_for_image"] = true
+        arguments["force_reload"] = false
+        arguments["forceReload"] = false
+        arguments["reload"] = false
+        arguments["max_loops"] = max(Self.intValue(arguments["max_loops"] ?? arguments["maxLoops"]) ?? 3, 3)
+        if arguments["button_text"] == nil && arguments["buttonText"] == nil {
+            arguments["button_text"] = "generate create submit send start run continue next 免费生成 生成图片 立即生成 开始生成"
+        }
+
+        let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
+        return LocalAlpineNativeToolCall(
+            id: call.id,
+            name: "browser_use",
+            arguments: String(data: data, encoding: .utf8) ?? call.arguments
+        )
+    }
+
+    private static func normalizedBrowserAutomationURLString(_ raw: String?) -> String? {
+        if let urlString = normalizedHTTPURLString(raw) {
+            return urlString
+        }
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’<>()[]{}，,。"))
+        guard trimmed.range(of: #"^[a-z0-9.-]+\.[a-z]{2,}(?:/[^\s]*)?$"#, options: [.regularExpression, .caseInsensitive]) != nil,
+              !trimmed.contains(".."),
+              let url = URL(string: "https://\(trimmed)"),
+              url.host?.isEmpty == false else {
+            return nil
+        }
+        return url.absoluteString
+    }
+
     private static func browserContinuationToolCallAfterVerification(
         _ call: LocalAlpineNativeToolCall
     ) -> LocalAlpineNativeToolCall {
@@ -13215,7 +13297,10 @@ final class ChatViewModel {
     }
 
     private static func firstBrowserURLCandidate(in arguments: [String: Any]) -> String? {
-        if let query = firstNonEmptyString(in: arguments, keys: ["query", "q", "url", "link", "href"]) {
+        if let query = firstNonEmptyString(
+            in: arguments,
+            keys: ["url", "link", "href", "page_url", "source", "input_url", "target", "query", "q"]
+        ) {
             return query
         }
         if let queries = arguments["queries"] as? [String] {
