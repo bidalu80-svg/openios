@@ -1212,21 +1212,6 @@ final class BrowserWebSearchService: NSObject {
             _ = await evaluateJSONObject(Self.scrollToPageYScript(offset))
             try? await Task.sleep(nanoseconds: index == 0 ? 180_000_000 : 320_000_000)
 
-            if let probe = await evaluateJSONObject(Self.visibleChallengeProbeScript()),
-               Self.boolValue(probe["detected"]) == true,
-               Self.boolValue(probe["completed"]) != true {
-                _ = await scrollToVisibleHumanVerification()
-                return [
-                    "action": "browser.click",
-                    "ok": false,
-                    "requires_user_verification": true,
-                    "human_verification": probe,
-                    "auto_scanned_page": true,
-                    "scroll_positions": offsets.count,
-                    "summary": "网页需要先完成人机验证，已滚动到验证区域。"
-                ]
-            }
-
             guard var object = await evaluateJSONObject(Self.clickVisibleElementScript(selector: selector, label: label)) else {
                 continue
             }
@@ -2733,15 +2718,16 @@ final class BrowserWebSearchService: NSObject {
             const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+            const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
             const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
-            return { detected: Boolean(provider), provider, token_length: tokenLength, completed: Boolean(tokenLength > 0) };
-          }
-          const verification = humanVerificationState();
-          if (verification.detected && !verification.completed) {
-            return JSON.stringify({ ok: false, requires_user_verification: true, human_verification: verification, title: document.title || '', url: location.href });
+            return { detected: Boolean(provider), provider, token_length: tokenLength, completed: Boolean(tokenLength > 0 || successState) };
           }
           const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
           if (!node) {
+            const verification = humanVerificationState();
+            if (verification.detected && !verification.completed) {
+              return JSON.stringify({ ok: false, requires_user_verification: true, human_verification: verification, title: document.title || '', url: location.href });
+            }
             return JSON.stringify({ ok: false, error: 'Element not found in current viewport', title: document.title || '', url: location.href });
           }
           try { node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
@@ -4541,6 +4527,14 @@ final class BrowserWebSearchService: NSObject {
           const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
           const tokenNode = turnstile || recaptcha;
           const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+          const actionableGenerateButton = Array.from(document.querySelectorAll('button, a[href], [role="button"], input[type="button"], input[type="submit"]')).some(node => {
+            const text = ((node.innerText || node.textContent || node.value || node.getAttribute('aria-label') || '') + '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            if (!/(generate|create|免费生成|生成图片|ai 图片|image)/.test(text)) return false;
+            const style = getComputedStyle(node);
+            const rect = node.getBoundingClientRect();
+            const disabled = Boolean(node.disabled || node.getAttribute('aria-disabled') === 'true' || node.closest('[disabled],[aria-disabled="true"]'));
+            return !disabled && rect.width > 20 && rect.height > 20 && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
+          });
           const challengeDetected = Boolean(
             turnstile ||
             recaptcha ||
@@ -4548,7 +4542,7 @@ final class BrowserWebSearchService: NSObject {
             /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|故障排除|验证失败|验证您是真人|请验证您是真人|正在检查|troubleshooting|verification failed/.test(bodyText)
           );
           const failedState = /故障排除|验证失败|troubleshooting|verification failed/.test(bodyText);
-          const successState = /成功|success|verified|验证成功|已验证/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText);
+          const successState = (/成功|success|verified|验证成功|已验证/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText)) || actionableGenerateButton;
           return JSON.stringify({
             detected: challengeDetected,
             completed: tokenLength > 0 || successState,
