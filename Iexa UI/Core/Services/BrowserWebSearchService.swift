@@ -508,7 +508,17 @@ final class BrowserWebSearchService: NSObject {
 
         let context = await evaluateJSONObject(Self.viewportContextScript(textLimit: 2600, elementLimit: 32)) ?? [:]
         let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) ?? [:]
-        let screenshot = await captureViewportScreenshot(prefix: "browser_observe")
+        let includeScreenshot = Self.boolValue(
+            call["screenshot"]
+                ?? call["with_screenshot"]
+                ?? call["capture_screenshot"]
+                ?? call["captureScreenshot"]
+                ?? call["visual"]
+                ?? call["visual_observation"]
+                ?? call["include_visual"]
+                ?? call["includeVisual"]
+        ) ?? false
+        let screenshot = includeScreenshot ? await captureViewportScreenshot(prefix: "browser_observe") : nil
         let title = (context["title"] as? String)
             ?? (metrics["title"] as? String)
             ?? webView?.title
@@ -1334,6 +1344,8 @@ final class BrowserWebSearchService: NSObject {
             scanCall["full_page"] = true
             scanCall["limit"] = limit
             scanCall["max_scrolls"] = Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 18
+            scanCall["capture_visuals"] = false
+            scanCall["screenshot"] = false
             if let intent, !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 scanCall["target"] = intent
                 scanCall["query"] = intent
@@ -1467,6 +1479,7 @@ final class BrowserWebSearchService: NSObject {
             var clickCall = continuationCall
             clickCall["label"] = buttonLabel
             clickCall["button_text"] = buttonLabel
+            clickCall["visual_fallback"] = false
             var clickedOK = false
             var lastClicked: [String: Any]?
             for attempt in 0..<maxLoops {
@@ -2168,13 +2181,26 @@ final class BrowserWebSearchService: NSObject {
         let limit = min(max(Self.intValue(call["limit"] ?? call["max_results"]) ?? 30, 1), 100)
         let intent = Self.findElementsIntent(in: call)
         let scanPage = Self.boolValue(call["scan_page"] ?? call["scanPage"] ?? call["full_page"] ?? call["fullPage"]) ?? true
+        let captureVisuals = Self.boolValue(
+            call["capture_visuals"]
+                ?? call["captureVisuals"]
+                ?? call["with_screenshots"]
+                ?? call["withScreenshots"]
+                ?? call["screenshots"]
+                ?? call["visual"]
+                ?? call["visual_observation"]
+                ?? call["include_visuals"]
+                ?? call["includeVisuals"]
+                ?? call["screenshot"]
+        ) ?? false
         if scanPage {
             let maxScrolls = min(max(Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 16, 1), 20)
             return await executeNativeFindElementsAcrossPage(
                 selector: selector,
                 limit: limit,
                 maxScrolls: maxScrolls,
-                intent: intent
+                intent: intent,
+                captureVisuals: captureVisuals
             )
         }
 
@@ -2196,7 +2222,8 @@ final class BrowserWebSearchService: NSObject {
         selector: String,
         limit: Int,
         maxScrolls: Int,
-        intent: String?
+        intent: String?,
+        captureVisuals: Bool
     ) async -> [String: Any] {
         guard let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) else {
             return [
@@ -2257,7 +2284,7 @@ final class BrowserWebSearchService: NSObject {
             _ = await evaluateJSONObject(Self.scrollToPageYScript(offset))
             try? await Task.sleep(nanoseconds: viewportIndex == 0 ? 180_000_000 : 300_000_000)
 
-            if viewportIndex == 0 || viewportIndex == viewportCount - 1 || viewportIndex % visualStride == 0 {
+            if captureVisuals && (viewportIndex == 0 || viewportIndex == viewportCount - 1 || viewportIndex % visualStride == 0) {
                 if let screenshot = await captureViewportScreenshot(prefix: "browser_scan_\(viewportIndex)", scrollY: offset) {
                     visualViewports.append([
                         "viewport_index": viewportIndex,
@@ -4328,11 +4355,54 @@ final class BrowserWebSearchService: NSObject {
     private nonisolated func browserOutputDirectory() throws -> URL {
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        let folder = base
-            .appendingPathComponent("iexa-browser-tool", isDirectory: true)
+        let root = base.appendingPathComponent("iexa-browser-tool", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try? Self.pruneTemporaryBrowserOutputFiles(in: root)
+        let folder = root
             .appendingPathComponent(Self.dateFolderName(), isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder
+    }
+
+    private nonisolated static func pruneTemporaryBrowserOutputFiles(in root: URL) throws {
+        let fileManager = FileManager.default
+        let tempPrefixes = [
+            "browser_observe_",
+            "browser_scan_",
+            "browser_click_miss_",
+            "browser_full_",
+            "browser_image_timeout_",
+            "search_"
+        ]
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        var directories: [URL] = []
+        for case let url as URL in enumerator {
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey, .isRegularFileKey])
+            if values?.isDirectory == true {
+                directories.append(url)
+                continue
+            }
+            guard tempPrefixes.contains(where: { url.lastPathComponent.hasPrefix($0) }) else {
+                continue
+            }
+            guard values?.isRegularFile == true,
+                  let modified = values?.contentModificationDate,
+                  modified < cutoff else {
+                continue
+            }
+            try? fileManager.removeItem(at: url)
+        }
+        for directory in directories.sorted(by: { $0.pathComponents.count > $1.pathComponents.count }) {
+            guard (try? fileManager.contentsOfDirectory(atPath: directory.path).isEmpty) == true else {
+                continue
+            }
+            try? fileManager.removeItem(at: directory)
+        }
     }
 
     private static func itemPayload(from item: WebSearchResultItem) -> [String: Any] {

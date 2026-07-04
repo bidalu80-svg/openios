@@ -2,6 +2,7 @@ import Foundation
 import CoreFoundation
 import os.log
 import SwiftUI
+import UIKit
 
 extension Notification.Name {
     static let conversationTitleUpdated = Notification.Name("conversationTitleUpdated")
@@ -11881,6 +11882,7 @@ final class ChatViewModel {
         let toolContent: String
         let completedAssistantTurn: Bool
         let visibleContent: String?
+        let modelVisualContextMessage: [String: Any]? = nil
     }
 
     private func streamOpenAICompatibleLocalNativeFunctionLoop(
@@ -11970,6 +11972,7 @@ final class ChatViewModel {
             apiMessages.append(Self.openAIToolCallAssistantMessage(for: calls))
             var needsFinalAnswerWithoutTools = false
             var finalAnswerFallback: String?
+            var pendingVisualContextMessages: [[String: Any]] = []
             for call in calls {
                 if needsFinalAnswerWithoutTools {
                     let message = "本地工具已经返回足够结果。请直接根据已有工具结果回答用户，不要继续调用工具。"
@@ -12039,6 +12042,9 @@ final class ChatViewModel {
                     "tool_call_id": call.id,
                     "content": execution.toolContent
                 ])
+                if let visualMessage = execution.modelVisualContextMessage {
+                    pendingVisualContextMessages.append(visualMessage)
+                }
                 if browserKind != nil {
                     browserToolCount += 1
                     if browserKind == .search {
@@ -12064,6 +12070,7 @@ final class ChatViewModel {
                     finalAnswerFallback = lastNativeToolFallback
                 }
             }
+            apiMessages.append(contentsOf: pendingVisualContextMessages)
 
             if needsFinalAnswerWithoutTools {
                 return try await streamFinalWithoutTools(
@@ -12294,10 +12301,14 @@ final class ChatViewModel {
             result.summary,
             browserVerificationCompleted: browserVerificationCompleted
         )
+        let modelVisualContextMessage = browserAction != nil && selectedModel?.supportsImageInput == true
+            ? Self.localNativeBrowserVisualContextMessage(from: result.summary)
+            : nil
         return LocalNativeFunctionToolExecution(
             toolContent: toolContent,
             completedAssistantTurn: false,
-            visibleContent: nil
+            visibleContent: nil,
+            modelVisualContextMessage: modelVisualContextMessage
         )
     }
 
@@ -13239,7 +13250,7 @@ final class ChatViewModel {
         arguments["force_reload"] = false
         arguments["forceReload"] = false
         arguments["reload"] = false
-        arguments["max_loops"] = max(Self.intValue(arguments["max_loops"] ?? arguments["maxLoops"]) ?? 3, 3)
+        arguments["max_loops"] = max(Self.nativeToolIntValue(arguments["max_loops"] ?? arguments["maxLoops"]) ?? 3, 3)
         if arguments["button_text"] == nil && arguments["buttonText"] == nil {
             arguments["button_text"] = "generate create submit send start run continue next 免费生成 生成图片 立即生成 开始生成"
         }
@@ -13948,6 +13959,130 @@ final class ChatViewModel {
                 if let match = firstJSONStringValue(in: item, key: key) {
                     return match
                 }
+            }
+        }
+        return nil
+    }
+
+    private static func localNativeBrowserVisualContextMessage(from toolContent: String) -> [String: Any]? {
+        guard let data = toolContent.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let reference = firstLocalNativeBrowserVisualReference(in: object),
+              let dataURL = browserVisualDataURL(from: reference) else {
+            return nil
+        }
+
+        return [
+            "role": "user",
+            "content": [
+                [
+                    "type": "text",
+                    "text": "Hidden browser visual observation. Use this tool-only screenshot only to choose the next browser_use coordinate, scroll, or verification-area action. Do not show or mention this screenshot unless the user explicitly asks."
+                ],
+                [
+                    "type": "image_url",
+                    "image_url": ["url": dataURL]
+                ]
+            ]
+        ]
+    }
+
+    private static func firstLocalNativeBrowserVisualReference(in value: Any) -> String? {
+        if let dictionary = value as? [String: Any] {
+            if let visual = dictionary["visual_observation"] as? [String: Any],
+               nativeToolBoolValue(visual["tool_only"]) == true,
+               let reference = firstBrowserVisualFileReference(in: visual) {
+                return reference
+            }
+            if nativeToolBoolValue(dictionary["needs_visual_coordinates"]) == true,
+               let reference = firstBrowserVisualFileReference(in: dictionary) {
+                return reference
+            }
+            if let viewports = dictionary["visual_viewports"] as? [[String: Any]] {
+                for viewport in viewports {
+                    if let reference = firstBrowserVisualFileReference(in: viewport) {
+                        return reference
+                    }
+                }
+            }
+            for rawValue in dictionary.values {
+                if let reference = firstLocalNativeBrowserVisualReference(in: rawValue) {
+                    return reference
+                }
+            }
+        } else if let array = value as? [Any] {
+            for item in array {
+                if let reference = firstLocalNativeBrowserVisualReference(in: item) {
+                    return reference
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func firstBrowserVisualFileReference(in dictionary: [String: Any]) -> String? {
+        let keys = [
+            "file_path", "screenshot_path", "image_path",
+            "file_url", "screenshot_url", "image_url"
+        ]
+        for key in keys {
+            if let reference = dictionary[key] as? String {
+                let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func nativeToolBoolValue(_ value: Any?) -> Bool? {
+        switch value {
+        case let bool as Bool:
+            return bool
+        case let number as NSNumber:
+            return number.boolValue
+        case let string as String:
+            let normalized = string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if ["true", "1", "yes", "y", "on"].contains(normalized) { return true }
+            if ["false", "0", "no", "n", "off"].contains(normalized) { return false }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    private static func browserVisualDataURL(from reference: String) -> String? {
+        guard let data = imageData(fromImageReference: reference),
+              let image = UIImage(data: data),
+              image.size.width > 0,
+              image.size.height > 0 else {
+            return nil
+        }
+
+        func renderedJPEG(maxSide: CGFloat, quality: CGFloat) -> Data? {
+            let longestSide = max(image.size.width, image.size.height)
+            let scale = min(1, maxSide / max(longestSide, 1))
+            let targetSize = CGSize(
+                width: max(1, floor(image.size.width * scale)),
+                height: max(1, floor(image.size.height * scale))
+            )
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            format.opaque = true
+            let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+            let rendered = renderer.image { context in
+                context.cgContext.setFillColor(UIColor.white.cgColor)
+                context.cgContext.fill(CGRect(origin: .zero, size: targetSize))
+                image.draw(in: CGRect(origin: .zero, size: targetSize))
+            }
+            return rendered.jpegData(compressionQuality: quality)
+        }
+
+        for (maxSide, quality) in [(720 as CGFloat, 0.62 as CGFloat), (512, 0.52), (384, 0.46)] {
+            if let jpeg = renderedJPEG(maxSide: maxSide, quality: quality),
+               (1...1_500_000).contains(jpeg.count) {
+                return "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
             }
         }
         return nil
