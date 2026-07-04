@@ -3660,19 +3660,10 @@ final class BrowserWebSearchService: NSObject {
     func waitForVisibleHumanVerificationCompletion(timeout: TimeInterval = 120) async -> Bool {
         _ = await scrollToVisibleHumanVerification()
         let deadline = Date().addingTimeInterval(timeout)
-        var sawChallenge = false
-        var missingChallengeCount = 0
         while Date() < deadline {
             if let probe = await evaluateJSONObject(Self.visibleChallengeProbeScript()) {
-                let detected = Self.boolValue(probe["detected"]) == true
                 let completed = Self.boolValue(probe["completed"]) == true
-                if detected {
-                    sawChallenge = true
-                    missingChallengeCount = 0
-                } else if sawChallenge {
-                    missingChallengeCount += 1
-                }
-                if completed || (sawChallenge && missingChallengeCount >= 2) {
+                if completed {
                     var completedProbe = probe
                     completedProbe["completed"] = true
                     notifyHumanVerificationState(completedProbe)
@@ -4758,7 +4749,7 @@ final class BrowserWebSearchService: NSObject {
     private func notifyHumanVerificationState(_ probe: [String: Any]) {
         let detected = Self.boolValue(probe["detected"]) == true
         let explicitCompleted = Self.boolValue(probe["completed"]) == true
-        let completed = explicitCompleted || !detected
+        let completed = explicitCompleted
         if let tabID = browserTabID(for: webView) {
             if detected {
                 browserHumanVerificationSeenTabs.insert(tabID)
