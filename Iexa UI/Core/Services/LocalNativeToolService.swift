@@ -225,6 +225,7 @@ final class LocalNativeToolService {
             "browser.readable", "browser_readable", "browser.get_readable", "get_readable",
             "browser.text", "browser_text", "browser.get_text", "get_text",
             "browser.info", "browser_info", "browser.get_page_info", "get_page_info",
+            "browser.observe", "browser_observe", "browser.get_state", "browser_get_state", "observe", "get_state",
             "browser.screenshot", "browser_screenshot",
             "browser.fetch", "browser_fetch",
             "browser.click", "browser_click", "click",
@@ -301,6 +302,7 @@ final class LocalNativeToolService {
              "browser.readable", "browser_readable", "browser.get_readable", "get_readable", "read_webpage",
              "browser.text", "browser_text", "browser.get_text", "get_text",
              "browser.info", "browser_info", "browser.get_page_info", "get_page_info",
+             "browser.observe", "browser_observe", "browser.get_state", "browser_get_state", "observe", "get_state",
              "browser.screenshot", "browser_screenshot", "screenshot",
              "browser.fetch", "browser_fetch", "fetch",
              "browser.click", "browser_click", "click",
@@ -763,6 +765,8 @@ final class LocalNativeToolService {
                     || action == "scroll_and_collect"
                     || action == "find_elements"
                     || action == "get_backbone"
+                    || action == "observe"
+                    || action == "get_state"
                     || action == "execute_js"
                     || action == "set_viewport"
                     || action == "set_user_agent"
@@ -1611,6 +1615,8 @@ final class LocalNativeToolService {
             return "browser.readable"
         case "browser.use", "browser_use":
             return "browser_use"
+        case "browser.observe", "browser_observe", "browser.get_state", "browser_get_state", "observe", "get_state":
+            return "browser.observe"
         case "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result":
             return "browser.wait_for_image"
         case "shortcuts.run", "shortcut.run", "shortcuts_run", "run_shortcut":
@@ -1659,6 +1665,7 @@ final class LocalNativeToolService {
              "browser.readable", "browser_readable", "browser.get_readable", "get_readable", "read_webpage",
              "browser.text", "browser_text", "browser.get_text", "get_text",
              "browser.info", "browser_info", "browser.get_page_info", "get_page_info",
+             "browser.observe", "browser_observe", "browser.get_state", "browser_get_state", "observe", "get_state",
              "browser.screenshot", "browser_screenshot", "screenshot",
              "browser.fetch", "browser_fetch", "fetch",
              "browser.click", "browser_click", "click",

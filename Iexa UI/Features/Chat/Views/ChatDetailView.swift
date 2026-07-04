@@ -130,6 +130,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
             "browser.open", "browser.navigate", "browser.find_elements",
             "browser.click", "browser.type", "browser.hover", "browser.scroll",
             "browser.scroll_and_collect", "browser.get_backbone", "browser.get_page_info",
+            "browser.observe", "browser.get_state",
             "browser.screenshot", "browser.wait_for_dom_stable", "browser.wait_for_image",
             "browser.execute_js", "browser.fetch", "browser.new_tab", "browser.close_tab",
             "browser.list_tabs", "browser.set_viewport", "browser.set_user_agent", "browser.get_cookies"
@@ -1066,6 +1067,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         if step.contains("browser.open") || step.contains("browser.navigate") { return "打开网页" }
         if step.contains("browser.search") { return status.query?.isEmpty == false ? "搜索 \(status.query!)" : "搜索网页" }
         if step.contains("browser.readable") || step.contains("browser.text") { return "查看网页内容" }
+        if step.contains("browser.observe") || step.contains("browser.get_state") { return "观察网页状态" }
         if step.contains("browser.find_elements") { return "识别网页元素" }
         if step.contains("browser.click") { return "点击网页控件" }
         if step.contains("browser.type") { return "输入网页内容" }

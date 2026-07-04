@@ -144,6 +144,8 @@ final class BrowserWebSearchService: NSObject {
             return await executeNativeText(call)
         case "browser.info", "browser.get_page_info", "browser_info", "get_page_info":
             return await executeNativePageInfo(call)
+        case "browser.observe", "browser_observe", "observe", "browser.get_state", "browser_get_state", "get_state":
+            return await executeNativeObserve(call)
         case "browser.screenshot", "browser_screenshot", "screenshot":
             return await executeNativeScreenshot(call)
         case "browser.fetch", "browser_fetch", "fetch":
@@ -480,6 +482,97 @@ final class BrowserWebSearchService: NSObject {
         payload["action"] = "browser.info"
         payload["ok"] = true
         payload["summary"] = "已读取网页结构。"
+        return payload
+    }
+
+    private func executeNativeObserve(_ call: [String: Any]) async -> [String: Any] {
+        if let url = Self.urlValue(in: call),
+           !(await load(url: url, timeout: 14, forceReload: Self.boolValue(call["force_reload"] ?? call["forceReload"] ?? call["reload"]) ?? false)) {
+            return [
+                "action": "browser.observe",
+                "ok": false,
+                "url": url.absoluteString,
+                "error": "Failed to load webpage"
+            ]
+        }
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        let verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()) ?? ["detected": false]
+        let verificationDetected = Self.boolValue(verification["detected"]) == true
+        let verificationCompleted = Self.boolValue(verification["completed"]) == true
+        var verificationVisible = false
+        if verificationDetected && !verificationCompleted {
+            verificationVisible = await scrollToVisibleHumanVerification()
+            try? await Task.sleep(nanoseconds: 180_000_000)
+        }
+
+        let context = await evaluateJSONObject(Self.viewportContextScript(textLimit: 2600, elementLimit: 32)) ?? [:]
+        let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) ?? [:]
+        let screenshot = await captureViewportScreenshot(prefix: "browser_observe")
+        let title = (context["title"] as? String)
+            ?? (metrics["title"] as? String)
+            ?? webView?.title
+            ?? ""
+        let finalURL = (context["url"] as? String)
+            ?? (metrics["url"] as? String)
+            ?? webView?.url?.absoluteString
+            ?? ""
+        let visibleText = context["visible_text"] as? String ?? ""
+        let visibleElements = context["interactive_elements"] as? [[String: Any]] ?? []
+        let scrollY = Self.intValue(context["scroll_y"] ?? metrics["scroll_y"]) ?? 0
+        let scrollHeight = Self.intValue(metrics["scroll_height"]) ?? 0
+        let viewportHeight = Self.intValue(metrics["viewport_height"] ?? context["viewport_height"]) ?? 0
+        let nearBottom = scrollHeight > 0 && viewportHeight > 0 && scrollY + viewportHeight >= scrollHeight - 24
+        let canScrollDown = scrollHeight > 0 && viewportHeight > 0 && !nearBottom
+        let stateLabel: String
+        if verificationDetected && !verificationCompleted {
+            stateLabel = "needs_user_verification"
+        } else if visibleElements.contains(where: { (($0["tag"] as? String) ?? "").lowercased() == "input" || (($0["tag"] as? String) ?? "").lowercased() == "textarea" }) {
+            stateLabel = "form_available"
+        } else if canScrollDown {
+            stateLabel = "needs_more_scroll"
+        } else {
+            stateLabel = "ready"
+        }
+
+        var payload: [String: Any] = [
+            "action": "browser.observe",
+            "ok": true,
+            "title": title,
+            "url": finalURL,
+            "ready_state": await evaluateString("document.readyState") ?? "",
+            "scroll_y": scrollY,
+            "scroll_height": scrollHeight,
+            "viewport_height": viewportHeight,
+            "viewport_width": Self.intValue(metrics["viewport_width"] ?? context["viewport_width"]) ?? 0,
+            "can_scroll_down": canScrollDown,
+            "near_bottom": nearBottom,
+            "visible_text": visibleText,
+            "visible_elements": visibleElements,
+            "visible_element_count": visibleElements.count,
+            "viewport_context": context,
+            "human_verification": verification,
+            "requires_user_verification": verificationDetected && !verificationCompleted,
+            "verification_scrolled_into_view": verificationVisible,
+            "state_label": stateLabel,
+            "attach_file": false,
+            "preview_images": [],
+            "summary": verificationDetected && !verificationCompleted
+                ? "已观察当前网页：发现人机验证，并已尝试滚动定位验证区域；等待用户在同一浏览器页面完成。"
+                : (canScrollDown
+                    ? "已观察当前网页视口；页面仍可继续向下滚动，继续任务前应按需滚动/扫描。"
+                    : "已观察当前网页视口；页面已接近底部，可基于当前状态继续。")
+        ]
+        if let screenshot {
+            payload["screenshot_url"] = screenshot.absoluteString
+            payload["screenshot_path"] = screenshot.path
+            payload["visual_observation"] = [
+                "screenshot_url": screenshot.absoluteString,
+                "file_path": screenshot.path,
+                "tool_only": true,
+                "note": "Tool-only current viewport screenshot. Do not show in chat unless the user explicitly asks."
+            ]
+        }
         return payload
     }
 
@@ -865,8 +958,15 @@ final class BrowserWebSearchService: NSObject {
                Self.boolValue(payload["needs_visual_coordinates"]) == true,
                let screenshot = await captureViewportScreenshot(prefix: "browser_click_miss") {
                 payload["screenshot_url"] = screenshot.absoluteString
+                payload["screenshot_path"] = screenshot.path
                 payload["attach_file"] = false
-                payload["preview_images"] = [screenshot.absoluteString]
+                payload["preview_images"] = []
+                payload["visual_observation"] = [
+                    "screenshot_url": screenshot.absoluteString,
+                    "file_path": screenshot.path,
+                    "tool_only": true,
+                    "note": "Tool-only current viewport screenshot. Do not show in chat unless the user explicitly asks."
+                ]
                 payload["summary"] = "未在 DOM/可访问性文本中找到目标，已截取当前视口；请根据截图使用坐标点击重试，不要断定页面没有按钮。"
                 return payload
             }
@@ -1204,11 +1304,15 @@ final class BrowserWebSearchService: NSObject {
 
     private func executeNativeAutoWorkflow(_ call: [String: Any]) async -> [String: Any] {
         var steps: [[String: Any]] = []
+        let continuationCall = Self.browserContinuationCall(from: call)
 
         if let url = Self.urlValue(in: call) {
             let opened = await executeNativeOpen(call, readable: false)
-            steps.append(Self.workflowStep("open", opened))
-            if Self.boolValue(opened["requires_user_verification"]) == true {
+            steps.append(Self.workflowStep("browser.open", opened))
+            let observed = await executeNativeObserve(continuationCall)
+            steps.append(Self.workflowStep("browser.observe.after_open", observed))
+            if Self.boolValue(opened["requires_user_verification"]) == true
+                || Self.boolValue(observed["requires_user_verification"]) == true {
                 return Self.workflowPayload(
                     ok: false,
                     steps: steps,
@@ -1223,11 +1327,31 @@ final class BrowserWebSearchService: NSObject {
                     summary: opened["error"] as? String ?? "自动浏览器流程未能打开网页。"
                 )
             }
+        } else {
+            let observed = await executeNativeObserve(continuationCall)
+            steps.append(Self.workflowStep("browser.observe.initial", observed))
+            if Self.boolValue(observed["requires_user_verification"]) == true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    requiresVerification: true,
+                    summary: "网页需要先完成人机验证，已定位到验证区域。"
+                )
+            }
         }
 
-        let continuationCall = Self.browserContinuationCall(from: call)
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
         if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let beforeType = await executeNativeObserve(continuationCall)
+            steps.append(Self.workflowStep("browser.observe.before_type", beforeType))
+            if Self.boolValue(beforeType["requires_user_verification"]) == true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    requiresVerification: true,
+                    summary: "网页需要先完成人机验证，已定位到验证区域。"
+                )
+            }
             var typeCall = continuationCall
             typeCall["text"] = text
             if typeCall["label"] == nil,
@@ -1238,8 +1362,11 @@ final class BrowserWebSearchService: NSObject {
                     ?? "prompt description text input"
             }
             let typed = await executeNativeType(typeCall)
-            steps.append(Self.workflowStep("type", typed))
-            if Self.boolValue(typed["requires_user_verification"]) == true {
+            steps.append(Self.workflowStep("browser.type", typed))
+            let afterType = await executeNativeObserve(continuationCall)
+            steps.append(Self.workflowStep("browser.observe.after_type", afterType))
+            if Self.boolValue(typed["requires_user_verification"]) == true
+                || Self.boolValue(afterType["requires_user_verification"]) == true {
                 return Self.workflowPayload(
                     ok: false,
                     steps: steps,
@@ -1261,12 +1388,25 @@ final class BrowserWebSearchService: NSObject {
                 ? Self.firstString(in: call, keys: ["target", "label"])
                 : "generate create submit send search start run continue next 免费生成 生成图片")
         if let buttonLabel {
+            let beforeClick = await executeNativeObserve(continuationCall)
+            steps.append(Self.workflowStep("browser.observe.before_click", beforeClick))
+            if Self.boolValue(beforeClick["requires_user_verification"]) == true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    requiresVerification: true,
+                    summary: "网页需要先完成人机验证，已定位到验证区域。"
+                )
+            }
             var clickCall = continuationCall
             clickCall["label"] = buttonLabel
             clickCall["button_text"] = buttonLabel
             let clicked = await executeNativeClick(clickCall)
-            steps.append(Self.workflowStep("click", clicked))
-            if Self.boolValue(clicked["requires_user_verification"]) == true {
+            steps.append(Self.workflowStep("browser.click", clicked))
+            let afterClick = await executeNativeObserve(continuationCall)
+            steps.append(Self.workflowStep("browser.observe.after_click", afterClick))
+            if Self.boolValue(clicked["requires_user_verification"]) == true
+                || Self.boolValue(afterClick["requires_user_verification"]) == true {
                 return Self.workflowPayload(
                     ok: false,
                     steps: steps,
@@ -1290,7 +1430,18 @@ final class BrowserWebSearchService: NSObject {
                 waitCall["timeout"] = 60
             }
             let image = await executeNativeWaitForImage(waitCall)
-            steps.append(Self.workflowStep("wait_for_image", image))
+            steps.append(Self.workflowStep("browser.wait_for_image", image))
+            let afterImageWait = await executeNativeObserve(continuationCall)
+            steps.append(Self.workflowStep("browser.observe.after_wait_for_image", afterImageWait))
+            if Self.boolValue(image["requires_user_verification"]) == true
+                || Self.boolValue(afterImageWait["requires_user_verification"]) == true {
+                return Self.workflowPayload(
+                    ok: false,
+                    steps: steps,
+                    requiresVerification: true,
+                    summary: "网页需要先完成人机验证，已定位到验证区域。"
+                )
+            }
             return Self.workflowPayload(
                 ok: Self.boolValue(image["ok"]) == true,
                 steps: steps,
@@ -1300,7 +1451,18 @@ final class BrowserWebSearchService: NSObject {
         }
 
         let stable = await executeNativeWaitForDOMStable(continuationCall)
-        steps.append(Self.workflowStep("wait_for_dom_stable", stable))
+        steps.append(Self.workflowStep("browser.wait_for_dom_stable", stable))
+        let finalObserve = await executeNativeObserve(continuationCall)
+        steps.append(Self.workflowStep("browser.observe.final", finalObserve))
+        if Self.boolValue(stable["requires_user_verification"]) == true
+            || Self.boolValue(finalObserve["requires_user_verification"]) == true {
+            return Self.workflowPayload(
+                ok: false,
+                steps: steps,
+                requiresVerification: true,
+                summary: "网页需要先完成人机验证，已定位到验证区域。"
+            )
+        }
         return Self.workflowPayload(
             ok: true,
             steps: steps,
@@ -1320,7 +1482,7 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private static func workflowStep(_ name: String, _ payload: [String: Any]) -> [String: Any] {
-        [
+        var step: [String: Any] = [
             "step": name,
             "ok": Self.boolValue(payload["ok"]) ?? false,
             "summary": payload["summary"] as? String ?? payload["error"] as? String ?? "",
@@ -1329,6 +1491,25 @@ final class BrowserWebSearchService: NSObject {
             "title": payload["title"] as? String ?? "",
             "file_url": payload["file_url"] as? String ?? ""
         ]
+        if let stateLabel = payload["state_label"] as? String, !stateLabel.isEmpty {
+            step["state_label"] = stateLabel
+        }
+        if let visibleText = payload["visible_text"] as? String, !visibleText.isEmpty {
+            step["visible_text_preview"] = String(visibleText.prefix(420))
+        }
+        if let visibleElementCount = Self.intValue(payload["visible_element_count"]) {
+            step["visible_element_count"] = visibleElementCount
+        }
+        if let canScrollDown = Self.boolValue(payload["can_scroll_down"]) {
+            step["can_scroll_down"] = canScrollDown
+        }
+        if let screenshotURL = payload["screenshot_url"] as? String, !screenshotURL.isEmpty {
+            step["screenshot_url"] = screenshotURL
+        }
+        if let screenshotPath = payload["screenshot_path"] as? String, !screenshotPath.isEmpty {
+            step["screenshot_path"] = screenshotPath
+        }
+        return step
     }
 
     private static func workflowPayload(
@@ -2562,7 +2743,9 @@ final class BrowserWebSearchService: NSObject {
             if hasSelector { return "browser.find_elements" }
             if wantsScreenshot { return "browser.screenshot" }
             if hasURL { return "browser.navigate" }
-            return "browser.info"
+            return "browser.observe"
+        case "observe", "get_state", "state", "browser.observe", "browser.get_state":
+            return "browser.observe"
         case "navigate", "open", "goto", "go", "go_to", "go_to_url", "browser.navigate", "browser.open":
             return "browser.navigate"
         case "readable", "get_readable", "read_webpage", "browser.readable":
