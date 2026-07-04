@@ -4921,14 +4921,6 @@ final class BrowserWebSearchService: NSObject {
           const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
           const tokenNode = turnstile || recaptcha;
           const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
-          const actionableGenerateButton = Array.from(document.querySelectorAll('button, a[href], [role="button"], input[type="button"], input[type="submit"]')).some(node => {
-            const text = ((node.innerText || node.textContent || node.value || node.getAttribute('aria-label') || '') + '').replace(/\\s+/g, ' ').trim().toLowerCase();
-            if (!/(generate|create|免费生成|生成图片|ai 图片|image)/.test(text)) return false;
-            const style = getComputedStyle(node);
-            const rect = node.getBoundingClientRect();
-            const disabled = Boolean(node.disabled || node.getAttribute('aria-disabled') === 'true' || node.closest('[disabled],[aria-disabled="true"]'));
-            return !disabled && rect.width > 20 && rect.height > 20 && style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity || 1) > 0;
-          });
           const challengeDetected = Boolean(
             turnstile ||
             recaptcha ||
@@ -4936,7 +4928,8 @@ final class BrowserWebSearchService: NSObject {
             /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|故障排除|验证失败|验证您是真人|请验证您是真人|正在检查|troubleshooting|verification failed/.test(bodyText)
           );
           const failedState = /故障排除|验证失败|troubleshooting|verification failed/.test(bodyText);
-          const successState = (/成功|success|verified|验证成功|已验证/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText)) || actionableGenerateButton;
+          const successState = /verified|验证成功|已验证/.test(bodyText)
+            || (/成功|success/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText));
           return JSON.stringify({
             detected: challengeDetected,
             completed: tokenLength > 0 || successState,
