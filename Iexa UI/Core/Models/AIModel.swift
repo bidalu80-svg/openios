@@ -604,7 +604,7 @@ enum LocalModelCapabilityRegistry {
         }
     }
 
-    private static func stringValues(_ value: Any) -> [String] {
+    private nonisolated static func stringValues(_ value: Any) -> [String] {
         if let string = value as? String {
             return string
                 .split { $0 == "," || $0.isWhitespace }

@@ -1,16 +1,16 @@
 import Foundation
 
-enum LocalAlpineTerminalAgentToolUse: Sendable {
+nonisolated enum LocalAlpineTerminalAgentToolUse: Sendable {
     case executableContent(String)
     case shellCommand(String)
 }
 
-struct LocalAlpineTerminalAgentToolResult: Sendable {
+nonisolated struct LocalAlpineTerminalAgentToolResult: Sendable {
     let toolUse: LocalAlpineTerminalAgentToolUse
     let result: LocalAlpineAgentResult
 }
 
-enum LocalAlpineTerminalAgentRunner {
+nonisolated enum LocalAlpineTerminalAgentRunner {
     static func run(
         _ toolUse: LocalAlpineTerminalAgentToolUse,
         persistentSessionKey: String? = nil,

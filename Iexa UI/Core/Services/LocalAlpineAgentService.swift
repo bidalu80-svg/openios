@@ -1,7 +1,7 @@
 import Foundation
 import ImageIO
 
-struct LocalAlpineAgentResult: Sendable {
+nonisolated struct LocalAlpineAgentResult: Sendable {
     let didExecute: Bool
     let summary: String
     let modelObservation: String?
@@ -44,8 +44,8 @@ struct LocalAlpineAgentResult: Sendable {
     }
 }
 
-enum LocalAlpineOutputOffloadStore {
-    struct CompactText: Sendable {
+nonisolated enum LocalAlpineOutputOffloadStore {
+    nonisolated struct CompactText: Sendable {
         let preview: String
         let reference: String?
         let byteCount: Int
@@ -183,7 +183,7 @@ enum LocalAlpineOutputOffloadStore {
     }
 }
 
-struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
+nonisolated struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
     let path: String
     let source: String
     let byteCount: Int
@@ -333,7 +333,7 @@ struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
     }
 }
 
-struct LocalAlpineLineDelta: Codable, Hashable, Sendable {
+nonisolated struct LocalAlpineLineDelta: Codable, Hashable, Sendable {
     let added: Int
     let deleted: Int
 
@@ -353,7 +353,7 @@ struct LocalAlpineLineDelta: Codable, Hashable, Sendable {
     }
 }
 
-struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
+nonisolated struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
     private static let defaultOutputPreviewLimit = 6_000
     private static let readFileOutputPreviewLimit = 6_000
 
@@ -459,17 +459,17 @@ struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
     }
 }
 
-enum LocalAlpineToolCallPhase: String, Codable, Hashable, Sendable {
+nonisolated enum LocalAlpineToolCallPhase: String, Codable, Hashable, Sendable {
     case start
     case result
 }
 
-struct LocalAlpineToolDisplay: Hashable, Sendable {
+nonisolated struct LocalAlpineToolDisplay: Hashable, Sendable {
     let icon: String
     let title: String
 }
 
-enum LocalAlpineToolDisplayRegistry {
+nonisolated enum LocalAlpineToolDisplayRegistry {
     static func display(for toolName: String) -> LocalAlpineToolDisplay {
         switch toolName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "read_file", "read_files", "read", "file_read":
@@ -532,7 +532,7 @@ enum LocalAlpineToolDisplayRegistry {
     }
 }
 
-struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
+nonisolated struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
     private static let defaultOutputPreviewLimit = 6_000
     private static let readFileOutputPreviewLimit = 6_000
 
@@ -750,7 +750,7 @@ struct LocalAlpineToolCall: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
-struct LocalAlpineToolEvent: Sendable {
+nonisolated struct LocalAlpineToolEvent: Sendable {
     let runId: String
     let call: LocalAlpineToolCall
 }
@@ -7733,7 +7733,7 @@ actor LocalAlpineAgentService {
     }
 }
 
-private struct LocalAlpineAgentCommand: Sendable {
+private nonisolated struct LocalAlpineAgentCommand: Sendable {
     let command: String?
     let cwd: String?
     let writeFiles: [LocalAlpineAgentFile]
@@ -7779,7 +7779,7 @@ private struct LocalAlpineAgentCommand: Sendable {
     }
 }
 
-private struct LocalAlpineToolCallContext: Sendable {
+private nonisolated struct LocalAlpineToolCallContext: Sendable {
     let id: String
     let runId: String
     let name: String
@@ -7791,7 +7791,7 @@ private struct LocalAlpineToolCallContext: Sendable {
     let startedAtMs: Int64
 }
 
-private struct LocalAlpineAgentFile: Sendable {
+private nonisolated struct LocalAlpineAgentFile: Sendable {
     let path: String
     let content: String
     let source: LocalAlpineAgentFileSource
@@ -7810,12 +7810,12 @@ private struct LocalAlpineAgentFile: Sendable {
     }
 }
 
-private enum LocalAlpineAgentFileMode: Sendable {
+private nonisolated enum LocalAlpineAgentFileMode: Sendable {
     case overwrite
     case append
 }
 
-private struct LocalAlpineReadFileRequest: Sendable {
+private nonisolated struct LocalAlpineReadFileRequest: Sendable {
     let path: String
     let startLine: Int?
     let lineCount: Int?
@@ -7833,16 +7833,16 @@ private struct LocalAlpineReadFileRequest: Sendable {
     }
 }
 
-private struct LocalAlpineReadImageRequest: Sendable {
+private nonisolated struct LocalAlpineReadImageRequest: Sendable {
     let path: String
 }
 
-private struct LocalAlpineEditFileRequest: Sendable {
+private nonisolated struct LocalAlpineEditFileRequest: Sendable {
     let path: String
     let replacements: [LocalAlpineEditReplacement]
 }
 
-private struct LocalAlpineEditReplacement: Sendable {
+private nonisolated struct LocalAlpineEditReplacement: Sendable {
     let oldText: String
     let newText: String
     let replaceAll: Bool
@@ -7867,18 +7867,18 @@ private struct LocalAlpineEditReplacement: Sendable {
     }
 }
 
-private struct LocalAlpinePatchFileRequest: Sendable {
+private nonisolated struct LocalAlpinePatchFileRequest: Sendable {
     let path: String?
     let patch: String
 }
 
-private struct LocalAlpineDeleteFileRequest: Sendable {
+private nonisolated struct LocalAlpineDeleteFileRequest: Sendable {
     let path: String
     let recursive: Bool
     let missingOK: Bool
 }
 
-private enum LocalAlpineAgentFileSource: Equatable, Sendable {
+private nonisolated enum LocalAlpineAgentFileSource: Equatable, Sendable {
     case content
     case codeLines
     case contentLines
@@ -7923,7 +7923,7 @@ private enum LocalAlpineAgentFileSource: Equatable, Sendable {
 
 }
 
-private struct LocalAlpineProtectedWriteOutcome {
+private nonisolated struct LocalAlpineProtectedWriteOutcome {
     let lines: [String]
     let writtenPath: String?
     let writtenFile: LocalAlpineWrittenFile?
@@ -7931,7 +7931,7 @@ private struct LocalAlpineProtectedWriteOutcome {
     let hadFailure: Bool
 }
 
-private struct LocalAlpineWriteResult {
+private nonisolated struct LocalAlpineWriteResult {
     let summary: String
     let writtenPaths: [String]
     let writtenFiles: [LocalAlpineWrittenFile]
@@ -7939,7 +7939,7 @@ private struct LocalAlpineWriteResult {
     let hadFailure: Bool
 }
 
-private struct LocalAlpineStructuredToolResult {
+private nonisolated struct LocalAlpineStructuredToolResult {
     let summary: String
     let commandResults: [LocalAlpineAgentCommandResult]
     let writtenFiles: [LocalAlpineWrittenFile]
@@ -7948,7 +7948,7 @@ private struct LocalAlpineStructuredToolResult {
     let hadFailure: Bool
 }
 
-private enum LocalAlpineAgentEditError: LocalizedError {
+private nonisolated enum LocalAlpineAgentEditError: LocalizedError {
     case binaryFile(String)
     case noMatch(path: String)
     case ambiguousMatch(path: String, count: Int)
@@ -7974,7 +7974,7 @@ private enum LocalAlpineAgentEditError: LocalizedError {
     }
 }
 
-private enum LocalAlpineAgentError: LocalizedError {
+private nonisolated enum LocalAlpineAgentError: LocalizedError {
     case noCommands
     case invalidToolCall(String)
 
@@ -7988,7 +7988,7 @@ private enum LocalAlpineAgentError: LocalizedError {
     }
 }
 
-private enum LocalAlpineAgentImageError: LocalizedError {
+private nonisolated enum LocalAlpineAgentImageError: LocalizedError {
     case unsupportedImage(String)
 
     var errorDescription: String? {

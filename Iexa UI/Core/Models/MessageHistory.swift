@@ -10,7 +10,7 @@ import Foundation
 /// Branching (edits, regenerations) is expressed through `childrenIds`
 /// — multiple children of the same parent with the same role are siblings
 /// (alternative versions).
-struct HistoryNode: Codable, Sendable {
+nonisolated struct HistoryNode: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case id, parentId, childrenIds, role, content, timestamp, model, done
         case files, sources, followUps, statusHistory, error, usage, embeds, models, metadata
@@ -261,7 +261,7 @@ struct HistoryNode: Codable, Sendable {
 ///
 /// All mutation operations (edit, regenerate, new message, version switch)
 /// modify the tree directly, then the flat list is re-derived.
-struct MessageHistory: Codable, Sendable {
+nonisolated struct MessageHistory: Codable, Sendable {
     var nodes: [String: HistoryNode] = [:]
     var currentId: String?
 

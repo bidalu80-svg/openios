@@ -6296,7 +6296,7 @@ final class APIClient: @unchecked Sendable {
         return normalizeQueryList(lines, maxQueries: maxQueries)
     }
 
-    private static func flattenSearchQueries(_ json: Any) -> [String] {
+    private nonisolated static func flattenSearchQueries(_ json: Any) -> [String] {
         if let array = json as? [String] { return array }
         if let array = json as? [Any] {
             return array.flatMap(flattenSearchQueries)
@@ -6311,11 +6311,11 @@ final class APIClient: @unchecked Sendable {
         return []
     }
 
-    private static func normalizeQueryList(_ values: [String], maxQueries: Int) -> [String] {
+    private nonisolated static func normalizeQueryList(_ values: [String], maxQueries: Int) -> [String] {
         Array(uniqueStrings(values.map(stripQueryDecoration)).prefix(max(1, maxQueries)))
     }
 
-    private static func stripQueryDecoration(_ raw: String) -> String {
+    private nonisolated static func stripQueryDecoration(_ raw: String) -> String {
         raw
             .replacingOccurrences(of: #"^[\s\-\*\d\.\)\"]+"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"[\s\"]+$"#, with: "", options: .regularExpression)
@@ -6323,7 +6323,7 @@ final class APIClient: @unchecked Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func uniqueStrings(_ values: [String]) -> [String] {
+    private nonisolated static func uniqueStrings(_ values: [String]) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
         for value in values {

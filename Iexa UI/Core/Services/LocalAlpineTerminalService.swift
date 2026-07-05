@@ -2,7 +2,7 @@ import Foundation
 import os.log
 import UIKit
 
-struct LocalAlpineExternalMount: Identifiable, Codable, Hashable, Sendable {
+nonisolated struct LocalAlpineExternalMount: Identifiable, Codable, Hashable, Sendable {
     let id: String
     var name: String
     var displayName: String
@@ -11,7 +11,7 @@ struct LocalAlpineExternalMount: Identifiable, Codable, Hashable, Sendable {
     var addedAt: Date
 }
 
-enum LocalAlpineMountStore {
+nonisolated enum LocalAlpineMountStore {
     static let maximumMounts = 10
     private static let storageKey = "localAlpine.externalMounts.v1"
     private static let workspaceFolderName = "Iexa Alpine"
@@ -243,20 +243,20 @@ enum LocalAlpineMountStore {
     }
 }
 
-struct LocalAlpineStatus: Sendable {
+nonisolated struct LocalAlpineStatus: Sendable {
     let isRuntimeLinked: Bool
     let isRootFSBundled: Bool
     let rootArchiveName: String
     let workspacePath: String
 }
 
-enum LocalAlpineMirrorKind: String, Codable, Sendable {
+nonisolated enum LocalAlpineMirrorKind: String, Codable, Sendable {
     case apk
     case pip
     case npm
 }
 
-struct LocalAlpineMirrorOption: Identifiable, Codable, Hashable, Sendable {
+nonisolated struct LocalAlpineMirrorOption: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let name: String
     let region: String
@@ -264,7 +264,7 @@ struct LocalAlpineMirrorOption: Identifiable, Codable, Hashable, Sendable {
     let isOfficial: Bool
 }
 
-struct LocalAlpineMirrorSettings: Codable, Equatable, Sendable {
+nonisolated struct LocalAlpineMirrorSettings: Codable, Equatable, Sendable {
     var apkMirrorsEnabled: Bool = true
     var pipMirrorsEnabled: Bool = true
     var npmMirrorsEnabled: Bool = true
@@ -273,7 +273,7 @@ struct LocalAlpineMirrorSettings: Codable, Equatable, Sendable {
     var selectedNpmMirrorID: String = "npmmirror"
 }
 
-struct LocalAlpineRootFSManagementStatus: Sendable {
+nonisolated struct LocalAlpineRootFSManagementStatus: Sendable {
     let isRuntimeLinked: Bool
     let isRootFSBundled: Bool
     let isRuntimeRootFSInstalled: Bool
@@ -287,7 +287,7 @@ struct LocalAlpineRootFSManagementStatus: Sendable {
     let npmMirrorURL: String
 }
 
-enum LocalAlpineMirrorStore {
+nonisolated enum LocalAlpineMirrorStore {
     private static let storageKey = "localAlpine.mirrorSettings.v1"
 
     static let apkMirrors: [LocalAlpineMirrorOption] = [
@@ -347,7 +347,7 @@ enum LocalAlpineMirrorStore {
     }
 }
 
-struct LocalAlpineCommandResult: Sendable {
+nonisolated struct LocalAlpineCommandResult: Sendable {
     let command: String
     let output: String
     let exitCode: Int?
@@ -369,12 +369,12 @@ struct LocalAlpineCommandResult: Sendable {
     }
 }
 
-enum LocalAlpineCommandExecutionMode: Sendable {
+nonisolated enum LocalAlpineCommandExecutionMode: Sendable {
     case oneShot
     case persistentAgent(sessionKey: String, timeoutSeconds: TimeInterval)
 }
 
-struct LocalAlpineFileSample: Sendable {
+nonisolated struct LocalAlpineFileSample: Sendable {
     let data: Data
     let fullSize: Int64?
 
@@ -384,8 +384,8 @@ struct LocalAlpineFileSample: Sendable {
     }
 }
 
-struct LocalAlpineInteractiveRequest: Identifiable, Sendable {
-    enum Kind: String, Sendable {
+nonisolated struct LocalAlpineInteractiveRequest: Identifiable, Sendable {
+    nonisolated enum Kind: String, Sendable {
         case command
         case agentBlocks
     }
@@ -400,17 +400,17 @@ struct LocalAlpineInteractiveRequest: Identifiable, Sendable {
     let cwd: String
 }
 
-struct LocalAlpineRootFSResetResult: Sendable {
+nonisolated struct LocalAlpineRootFSResetResult: Sendable {
     let resetImmediately: Bool
     let message: String
 }
 
-struct LocalAlpineSessionStartResult: Sendable {
+nonisolated struct LocalAlpineSessionStartResult: Sendable {
     let sessionID: Int?
     let message: String?
 }
 
-struct LocalAlpineOpenRequest: Identifiable, Hashable, Sendable {
+nonisolated struct LocalAlpineOpenRequest: Identifiable, Hashable, Sendable {
     let id = UUID()
     let target: String
 
@@ -487,7 +487,7 @@ struct LocalAlpineOpenRequest: Identifiable, Hashable, Sendable {
     }
 }
 
-enum LocalAlpineOpenMarkerParser {
+nonisolated enum LocalAlpineOpenMarkerParser {
     private static let escape = Character("\u{001B}")
     private static let bell = Character("\u{0007}")
     private static let stTerminator = "\u{001B}\\"
@@ -558,7 +558,7 @@ enum LocalAlpineOpenMarkerParser {
 }
 
 @MainActor
-enum LocalAlpineBackgroundExecution {
+nonisolated enum LocalAlpineBackgroundExecution {
     private static var taskId: UIBackgroundTaskIdentifier = .invalid
     private static var depth = 0
 
@@ -3564,7 +3564,7 @@ actor LocalAlpineTerminalService {
     }
 }
 
-enum LocalAlpineError: LocalizedError {
+nonisolated enum LocalAlpineError: LocalizedError {
     case documentsUnavailable
     case invalidPath(String)
     case protectedPath(String)

@@ -640,7 +640,7 @@ struct ChatCompletionRequest: Sendable {
         return nil
     }
 
-    private static func anthropicContentBlock(from part: [String: Any]) -> [String: Any]? {
+    private nonisolated static func anthropicContentBlock(from part: [String: Any]) -> [String: Any]? {
         guard let type = part["type"] as? String else { return nil }
         if type == "text" {
             return ["type": "text", "text": part["text"] as? String ?? ""]
@@ -2430,7 +2430,7 @@ struct WebSearchResponse: Sendable {
     }
 }
 
-struct WebSearchResultItem: Sendable, Hashable {
+nonisolated struct WebSearchResultItem: Sendable, Hashable {
     var title: String?
     var link: String?
     var snippet: String?
@@ -2455,7 +2455,7 @@ struct WebSearchResultItem: Sendable, Hashable {
     }
 }
 
-struct WebSearchDocument: Sendable, Hashable {
+nonisolated struct WebSearchDocument: Sendable, Hashable {
     var content: String
     var metadata: [String: String]
 
@@ -3076,7 +3076,7 @@ struct UserIdsForm: Codable, Sendable {
 }
 
 /// Returns the MIME type for a given file extension.
-func mimeType(for fileName: String) -> String {
+nonisolated func mimeType(for fileName: String) -> String {
     let ext = (fileName as NSString).pathExtension.lowercased()
     switch ext {
     case "m4a": return "audio/mp4"

@@ -19,7 +19,7 @@ struct ChatTask: Codable, Identifiable, Hashable, Sendable {
 // MARK: - Conversation
 
 /// Represents a chat conversation with its message history.
-struct Conversation: Codable, Identifiable, Hashable, Sendable {
+nonisolated struct Conversation: Codable, Identifiable, Hashable, Sendable {
     var id: String
     var title: String
     var createdAt: Date

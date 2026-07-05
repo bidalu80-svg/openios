@@ -8,7 +8,7 @@ import Foundation
 /// provides shell access, file management, and command execution to AI models.
 /// When connected to Iexa native server, the model can run commands, manage files,
 /// and interact with a real operating system environment.
-struct TerminalServer: Identifiable, Hashable, Sendable {
+nonisolated struct TerminalServer: Identifiable, Hashable, Sendable {
     static let localAlpineId = "__iexa_local_alpine__"
 
     let id: String
@@ -30,7 +30,7 @@ struct TerminalServer: Identifiable, Hashable, Sendable {
 
 /// Response from `GET /api/v1/terminals/{server_id}/api/config`.
 /// Indicates which features the terminal server supports.
-struct TerminalConfig: Sendable {
+nonisolated struct TerminalConfig: Sendable {
     let terminal: Bool
     let notebooks: Bool
 
@@ -44,7 +44,7 @@ struct TerminalConfig: Sendable {
 // MARK: - Terminal File Item
 
 /// Represents a file or directory in the terminal's filesystem.
-struct TerminalFileItem: Identifiable, Sendable {
+nonisolated struct TerminalFileItem: Identifiable, Sendable {
     let name: String
     let path: String
     let isDirectory: Bool
@@ -132,7 +132,7 @@ struct TerminalFileItem: Identifiable, Sendable {
 // MARK: - Terminal Command Result
 
 /// Result of executing a command on the terminal server.
-struct TerminalCommandResult: Sendable {
+nonisolated struct TerminalCommandResult: Sendable {
     let id: String
     let command: String
     let output: String

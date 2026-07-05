@@ -1,13 +1,13 @@
 import Foundation
 
 @_silgen_name("iexa_local_alpine_runtime_available")
-private func iexaLocalAlpineRuntimeAvailable() -> Int32
+private nonisolated func iexaLocalAlpineRuntimeAvailable() -> Int32
 
 @_silgen_name("iexa_local_alpine_interrupt")
-private func iexaLocalAlpineInterrupt() -> Int32
+private nonisolated func iexaLocalAlpineInterrupt() -> Int32
 
 @_silgen_name("iexa_local_alpine_session_start")
-private func iexaLocalAlpineSessionStart(
+private nonisolated func iexaLocalAlpineSessionStart(
     _ cwd: UnsafePointer<CChar>,
     _ rootArchivePath: UnsafePointer<CChar>,
     _ workspacePath: UnsafePointer<CChar>,
@@ -16,29 +16,29 @@ private func iexaLocalAlpineSessionStart(
 ) -> Int32
 
 @_silgen_name("iexa_local_alpine_session_write")
-private func iexaLocalAlpineSessionWrite(
+private nonisolated func iexaLocalAlpineSessionWrite(
     _ sessionID: Int32,
     _ input: UnsafePointer<CChar>
 ) -> Int32
 
 @_silgen_name("iexa_local_alpine_session_read")
-private func iexaLocalAlpineSessionRead(_ sessionID: Int32) -> UnsafeMutablePointer<CChar>?
+private nonisolated func iexaLocalAlpineSessionRead(_ sessionID: Int32) -> UnsafeMutablePointer<CChar>?
 
 @_silgen_name("iexa_local_alpine_session_resize")
-private func iexaLocalAlpineSessionResize(
+private nonisolated func iexaLocalAlpineSessionResize(
     _ sessionID: Int32,
     _ columns: Int32,
     _ rows: Int32
 ) -> Int32
 
 @_silgen_name("iexa_local_alpine_session_interrupt")
-private func iexaLocalAlpineSessionInterrupt(_ sessionID: Int32) -> Int32
+private nonisolated func iexaLocalAlpineSessionInterrupt(_ sessionID: Int32) -> Int32
 
 @_silgen_name("iexa_local_alpine_session_close")
-private func iexaLocalAlpineSessionClose(_ sessionID: Int32) -> Int32
+private nonisolated func iexaLocalAlpineSessionClose(_ sessionID: Int32) -> Int32
 
 @_silgen_name("iexa_local_alpine_execute")
-private func iexaLocalAlpineExecute(
+private nonisolated func iexaLocalAlpineExecute(
     _ command: UnsafePointer<CChar>,
     _ cwd: UnsafePointer<CChar>,
     _ rootArchivePath: UnsafePointer<CChar>,
@@ -49,7 +49,7 @@ private func iexaLocalAlpineExecute(
 ) -> UnsafeMutablePointer<CChar>?
 
 @_silgen_name("iexa_local_alpine_free")
-private func iexaLocalAlpineFree(_ buffer: UnsafeMutablePointer<CChar>)
+private nonisolated func iexaLocalAlpineFree(_ buffer: UnsafeMutablePointer<CChar>)
 
 nonisolated struct LocalAlpineNativeCommand: Sendable {
     let command: String
