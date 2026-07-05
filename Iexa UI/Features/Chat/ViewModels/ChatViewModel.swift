@@ -568,20 +568,21 @@ final class ChatViewModel {
     @ObservationIgnored private var localAlpinePendingToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
     @ObservationIgnored private var localAlpineToolEventFlushTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var localAlpineLastToolEventFlushAtByMessageId: [String: Date] = [:]
-    private let localAlpineAgentMaxSteps = 24
-    private let localAlpineNoProgressRepeatLimit = 2
+    private let localAlpineAgentMaxSteps = 36
+    private let localAlpineNoProgressRepeatLimit = 4
     private let localAlpineToolEventFlushInterval: TimeInterval = 0.45
     private let localAlpineLiveToolPreviewLimit = 260
     private let localAlpineLiveToolDetailLimit = 180
     private let localAlpineLiveToolCommandLimit = 420
-    private static let localNativeFunctionMaxSteps = 24
-    private static let localNativeBrowserRepeatedSignatureLimit = 6
-    private static let localNativeBrowserToolSoftLimit = 24
+    private static let localNativeFunctionMaxSteps = 36
+    private static let localNativeBrowserRepeatedSignatureLimit = 10
+    private static let localNativeBrowserToolSoftLimit = 36
     private static let localNativeBrowserSearchSoftLimit = 5
     private static let localNativeBrowserReadableSoftLimit = 5
-    private static let localBrowserVerificationContinuationLimit = 8
+    private static let localBrowserVerificationContinuationLimit = 12
+    private static let localNativeBrowserForcedContinuationLimit = 16
     private static let localAlpineBrowserFailureSoftLimit = 5
-    private static let localAlpineBrowserToolSoftLimit = 24
+    private static let localAlpineBrowserToolSoftLimit = 36
     private static let localAlpineBrowserSearchSoftLimit = 5
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
@@ -2619,6 +2620,7 @@ final class ChatViewModel {
         - Prefer `file_read`, `file_write`, `file_edit`, `list_dir`, `glob`, `grep`, `verify`, and `browser_use` over raw shell for common work.
         - Raw shell must be POSIX sh/BusyBox ash. Use `/mnt/iexa/shared` as the default project workspace; `/mnt/iexa` is only the namespace root for shared, skills, memory, and mounts.
         - Install OS packages with Alpine `apk` only: check `command -v <tool>` or `apk info -e <pkg>`, then `apk add --no-cache <pkg>`.
+        - RootFS Management mirror settings are already applied inside the live Alpine rootfs. APK uses `/etc/apk/repositories`; Python uses `/etc/pip.conf` and `/root/.config/pip/pip.conf`; npm uses `/etc/npmrc` and `/root/.npmrc`. Use `apk add --no-cache`, `python3 -m pip install ...`, and `npm install` normally; inspect those config files only when package installs are slow or failing.
         - Do not use apt/brew/sudo/systemctl/macOS/Windows commands or bash/GNU-only syntax such as `find -printf`, `grep -P`, `[[ ... ]]`, `source`, process substitution, or `sed -i ''`.
         - Use the tool `delay` field for waits; avoid shell `sleep` and Python `time.sleep()` in generated tests.
         - Large command/tool outputs are offloaded under `/mnt/iexa/.iexa-output-offload`; use `file_read` on an `output_reference` if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
@@ -2854,6 +2856,7 @@ final class ChatViewModel {
         Rules:
         - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` (model read/write for local `SKILL.md` skills), `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
+        - RootFS Management in Iexa has already written the selected mirrors into the active Alpine rootfs: `/etc/apk/repositories`, `/etc/pip.conf`, `/root/.config/pip/pip.conf`, `/etc/npmrc`, and `/root/.npmrc`. Trust those settings and install packages normally with `apk add --no-cache <pkg>`, `python3 -m pip install ...`, and `npm install ...`; if a package install is slow or fails, inspect those config files or suggest changing mirrors/resetting RootFS Management instead of guessing a different OS.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
@@ -11086,10 +11089,10 @@ final class ChatViewModel {
             let count = (countsBySignature[signature] ?? 0) + 1
             countsBySignature[signature] = count
             let signatureWarningThreshold = ChatViewModel.isRepeatableBrowserMicroAction(call)
-                ? 4
+                ? 6
                 : warningThreshold
             let signatureBlockThreshold = ChatViewModel.isRepeatableBrowserMicroAction(call)
-                ? 6
+                ? 10
                 : blockThreshold
 
             if count >= signatureBlockThreshold {
@@ -11738,13 +11741,14 @@ final class ChatViewModel {
             var calls = toolAccumulator.completedCalls()
             if calls.isEmpty,
                let continuationCall = pendingBrowserContinuationCall,
-               forcedBrowserContinuationCount < 10 {
+               forcedBrowserContinuationCount < Self.localNativeBrowserForcedContinuationLimit {
                 forcedBrowserContinuationCount += 1
                 pendingBrowserContinuationCall = nil
                 if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     acc.replace("")
                     updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
                 }
+                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage())
                 calls = [continuationCall]
             } else if !calls.isEmpty {
                 pendingBrowserContinuationCall = nil
@@ -11994,13 +11998,14 @@ final class ChatViewModel {
                 .filter(Self.isLocalNativeFunctionToolCall)
             if calls.isEmpty,
                let continuationCall = pendingBrowserContinuationCall,
-               forcedBrowserContinuationCount < 10 {
+               forcedBrowserContinuationCount < Self.localNativeBrowserForcedContinuationLimit {
                 forcedBrowserContinuationCount += 1
                 pendingBrowserContinuationCall = nil
                 if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     acc.replace("")
                     updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
                 }
+                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage())
                 calls = [continuationCall]
             } else if !calls.isEmpty {
                 pendingBrowserContinuationCall = nil
@@ -13076,7 +13081,8 @@ final class ChatViewModel {
             .lowercased()
             .replacingOccurrences(of: "_", with: ".")
         switch action {
-        case "navigate", "browser.navigate",
+        case "auto", "browser.auto",
+            "navigate", "browser.navigate",
             "inspect", "browser.inspect", "page.inspect", "inspect.page", "page.state", "browser.page.state",
             "observe", "browser.observe", "get.state", "browser.get.state",
             "scroll", "browser.scroll",
@@ -13975,27 +13981,209 @@ final class ChatViewModel {
         """
     }
 
+    private static func localNativeBrowserForcedContinuationSystemMessage() -> [String: Any] {
+        [
+            "role": "system",
+            "content": """
+            The previous browser result was an intermediate page-operation state, but the assistant did not issue the next browser tool call. The app is continuing the same shared browser session automatically.
+            Treat the previous prose as premature. Continue with the browser result after this forced tool call. Do not navigate/reload the same URL unless explicitly required. Stop only after the user's page task is complete, a final file/result exists, or the tool explicitly reports requires_user_verification.
+            """
+        ]
+    }
+
+    private static func normalizedBrowserResultActionName(_ raw: String) -> String {
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: ".")
+            .lowercased()
+        switch normalized {
+        case "auto", "complete.task", "browser.complete.task", "browser.auto":
+            return "browser.auto"
+        case "find.elements", "browser.find.elements":
+            return "browser.find_elements"
+        case "scroll.and.collect", "browser.scroll.and.collect":
+            return "browser.scroll_and_collect"
+        case "wait.for.image", "wait.image", "image.result", "browser.wait.for.image":
+            return "browser.wait_for_image"
+        case "readable", "get.readable", "get.readable.webpage", "browser.readable":
+            return "browser.readable"
+        case "text", "get.text", "browser.text":
+            return "browser.text"
+        case "open", "navigate", "browser.open", "browser.navigate":
+            return "browser.open"
+        case "inspect", "page.inspect", "browser.inspect":
+            return "browser.inspect"
+        case "observe", "get.state", "browser.observe", "browser.get.state":
+            return "browser.observe"
+        case "click", "browser.click":
+            return "browser.click"
+        case "type", "browser.type":
+            return "browser.type"
+        case "scroll", "browser.scroll":
+            return "browser.scroll"
+        case "fetch", "download", "browser.fetch":
+            return "browser.fetch"
+        default:
+            return normalized.hasPrefix("browser.") ? normalized : "browser.\(normalized)"
+        }
+    }
+
+    private static func browserResultActionName(
+        from call: LocalAlpineNativeToolCall,
+        toolContent: String
+    ) -> String {
+        if let action = firstJSONStringValue(in: toolContent, key: "action"),
+           !action.isEmpty {
+            return normalizedBrowserResultActionName(action)
+        }
+        return localAlpineBrowserActionName(from: call)
+    }
+
+    private static func browserToolResultLooksComplete(
+        call: LocalAlpineNativeToolCall,
+        toolContent: String
+    ) -> Bool {
+        if toolContent.localizedCaseInsensitiveContains("\"file_url\"")
+            || toolContent.localizedCaseInsensitiveContains("已等待到网页生成图片")
+            || toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
+            return true
+        }
+
+        let action = browserResultActionName(from: call, toolContent: toolContent)
+        if action == "browser.fetch" || action == "browser.wait_for_image" {
+            return true
+        }
+
+        let ok = anyJSONBoolValue(in: toolContent, key: "ok", equals: true)
+        let fullPage = anyJSONBoolValue(in: toolContent, key: "full_page", equals: true)
+        if ok && ["browser.readable", "browser.text"].contains(action) {
+            return true
+        }
+        if ok && action == "browser.open" && fullPage {
+            return true
+        }
+        if ok && action == "browser.auto" {
+            return true
+        }
+
+        return false
+    }
+
+    private static func browserToolResultLooksLikeInteractiveIntermediate(
+        call: LocalAlpineNativeToolCall,
+        toolContent: String,
+        latestUserPrompt: String?
+    ) -> Bool {
+        if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
+            return false
+        }
+        if browserToolResultLooksComplete(call: call, toolContent: toolContent) {
+            return false
+        }
+
+        let action = browserResultActionName(from: call, toolContent: toolContent)
+        let lowerContent = toolContent.lowercased()
+        let prompt = latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let arguments = localAlpineNativeToolArguments(for: call)
+        let hasExplicitInteractionArgument = firstNonEmptyString(
+            in: arguments,
+            keys: [
+                "text", "value", "input", "content", "message", "prompt",
+                "target", "label", "button_text", "buttonText", "field_label",
+                "fieldLabel", "selector", "coordinate_x", "coordinate_y"
+            ]
+        ) != nil
+        let promptLooksInteractive = [
+            "打开", "继续", "点击", "填写", "输入", "提交", "搜索", "查找", "生成", "下载", "登录", "注册", "下一步", "操作",
+            "open", "continue", "click", "fill", "type", "submit", "search", "find", "generate", "download", "login", "sign in", "next"
+        ].contains { prompt.contains($0) }
+        let actionIsInteractiveProgress: Set<String> = [
+            "browser.observe", "browser.inspect", "browser.scroll", "browser.find_elements",
+            "browser.click", "browser.type", "browser.scroll_and_collect"
+        ]
+
+        if anyJSONBoolValue(in: toolContent, key: "needs_visual_coordinates", equals: true) {
+            return true
+        }
+        if let stateLabel = firstJSONStringValue(in: toolContent, key: "state_label")?.lowercased(),
+           ["form_available", "needs_more_scroll", "ready"].contains(stateLabel),
+           actionIsInteractiveProgress.contains(action),
+           (hasExplicitInteractionArgument || promptLooksInteractive || stateLabel != "ready") {
+            return true
+        }
+        if anyJSONBoolValue(in: toolContent, key: "can_scroll_down", equals: true),
+           ["browser.observe", "browser.inspect", "browser.scroll", "browser.find_elements"].contains(action),
+           hasExplicitInteractionArgument || promptLooksInteractive {
+            return true
+        }
+        if anyJSONBoolValue(in: toolContent, key: "prompt_field_found", equals: true)
+            || anyJSONBoolValue(in: toolContent, key: "generate_button_found", equals: true)
+            || anyJSONBoolValue(in: toolContent, key: "generate_button_enabled", equals: true) {
+            return hasExplicitInteractionArgument || promptLooksInteractive || userPromptLooksLikeImageGeneration(latestUserPrompt ?? "")
+        }
+        if let generationState = firstJSONStringValue(in: toolContent, key: "generation_state")?.lowercased(),
+           ["idle", "ready", "generating", "waiting", "unknown", "retry"].contains(generationState) {
+            return true
+        }
+        if (firstJSONIntValue(in: toolContent, key: "visible_element_count") ?? 0) > 0,
+           ["browser.observe", "browser.find_elements", "browser.scroll"].contains(action),
+           hasExplicitInteractionArgument || promptLooksInteractive {
+            return true
+        }
+        if (firstJSONIntValue(in: toolContent, key: "count") ?? 0) > 0,
+           action == "browser.find_elements",
+           hasExplicitInteractionArgument || promptLooksInteractive {
+            return true
+        }
+
+        return lowerContent.contains("tool-only current viewport")
+            && actionIsInteractiveProgress.contains(action)
+            && (hasExplicitInteractionArgument || promptLooksInteractive)
+    }
+
+    private static func browserContinuationShouldScanPage(
+        action: String,
+        toolContent: String
+    ) -> Bool {
+        let stateLabel = firstJSONStringValue(in: toolContent, key: "state_label")?.lowercased() ?? ""
+        if stateLabel == "needs_more_scroll" {
+            return true
+        }
+        return anyJSONBoolValue(in: toolContent, key: "can_scroll_down", equals: true)
+            && ["browser.observe", "browser.inspect", "browser.scroll"].contains(action)
+            && !anyJSONBoolValue(in: toolContent, key: "prompt_field_found", equals: true)
+            && !anyJSONBoolValue(in: toolContent, key: "generate_button_found", equals: true)
+    }
+
+    private static func browserContinuationShouldTypePrompt(
+        arguments: [String: Any],
+        toolContent: String,
+        latestUserPrompt: String?
+    ) -> Bool {
+        if firstNonEmptyString(
+            in: arguments,
+            keys: ["text", "value", "input", "content", "message", "prompt", "expected_prompt"]
+        ) != nil {
+            return true
+        }
+        if anyJSONBoolValue(in: toolContent, key: "prompt_field_found", equals: true) {
+            return true
+        }
+        let prompt = latestUserPrompt?.lowercased() ?? ""
+        let asksToType = [
+            "填写", "输入", "搜索", "查找", "生成", "写入", "填入",
+            "fill", "type", "enter", "search", "find", "generate", "write"
+        ].contains { prompt.contains($0) }
+        return asksToType
+            && (firstJSONStringValue(in: toolContent, key: "state_label")?.lowercased() == "form_available"
+                || toolContent.localizedCaseInsensitiveContains("\"visible_elements\""))
+    }
+
     private static func localNativeBrowserToolResultShouldStop(
         _ call: LocalAlpineNativeToolCall,
         toolContent: String
     ) -> Bool {
-        let args = localAlpineNativeToolArguments(for: call)
-        let rawAction = (args["browser_use_action"] as? String)
-            ?? (args["browser_action"] as? String)
-            ?? (args["operation"] as? String)
-            ?? (args["op"] as? String)
-            ?? (args["action"] as? String)
-            ?? ""
-        let action = rawAction
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "_", with: ".")
-            .lowercased()
-        if action == "wait.for.image" || action == "browser.wait.for.image" {
-            return true
-        }
-        if toolContent.localizedCaseInsensitiveContains("\"file_url\"")
-            || toolContent.localizedCaseInsensitiveContains("已等待到网页生成图片")
-            || toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
+        if browserToolResultLooksComplete(call: call, toolContent: toolContent) {
             return true
         }
         if let generationState = firstJSONStringValue(in: toolContent, key: "generation_state")?.lowercased(),
@@ -14022,11 +14210,17 @@ final class ChatViewModel {
         guard effectiveCall.name.trimmingCharacters(in: .whitespacesAndNewlines) == "browser_use" else {
             return nil
         }
-        guard browserToolResultLooksLikeImageWorkflow(
+        let isImageWorkflow = browserToolResultLooksLikeImageWorkflow(
             call: effectiveCall,
             toolContent: toolContent,
             latestUserPrompt: latestUserPrompt
-        ) else {
+        )
+        let isInteractiveIntermediate = browserToolResultLooksLikeInteractiveIntermediate(
+            call: effectiveCall,
+            toolContent: toolContent,
+            latestUserPrompt: latestUserPrompt
+        )
+        guard isImageWorkflow || isInteractiveIntermediate else {
             return nil
         }
         if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
@@ -14038,7 +14232,9 @@ final class ChatViewModel {
 
         let lowerContent = toolContent.lowercased()
         if lowerContent.contains("自动流程未能输入文本")
-            || lowerContent.contains("自动流程未能点击目标按钮") {
+            || lowerContent.contains("自动流程未能点击目标按钮")
+            || lowerContent.contains("点击后没有验证到生成已开始")
+            || lowerContent.contains("自动流程已持续尝试") {
             return nil
         }
 
@@ -14054,13 +14250,13 @@ final class ChatViewModel {
             from: arguments,
             latestUserPrompt: latestUserPrompt
         )
-        let action = localAlpineBrowserActionName(from: effectiveCall)
+        let action = browserResultActionName(from: effectiveCall, toolContent: toolContent)
         let generationState = firstJSONStringValue(in: toolContent, key: "generation_state")?.lowercased() ?? ""
         let clicked = action == "browser.click"
             && (lowerContent.contains("\"ok\" : true") || lowerContent.contains("\"ok\":true"))
-        let shouldWaitForImage = clicked
+        let shouldWaitForImage = isImageWorkflow && (clicked
             || ["generating", "waiting", "success"].contains(generationState)
-            || ((firstJSONIntValue(in: toolContent, key: "new_candidate_count") ?? 0) > 0)
+            || ((firstJSONIntValue(in: toolContent, key: "new_candidate_count") ?? 0) > 0))
 
         if shouldWaitForImage {
             arguments["action"] = "wait_for_image"
@@ -14072,15 +14268,37 @@ final class ChatViewModel {
             if arguments["timeout"] == nil {
                 arguments["timeout"] = 60
             }
+        } else if !isImageWorkflow && browserContinuationShouldScanPage(
+            action: action,
+            toolContent: toolContent
+        ) {
+            arguments["action"] = "find_elements"
+            arguments["scan_page"] = true
+            arguments["full_page"] = true
+            arguments["screenshot"] = false
+            arguments["capture_visuals"] = false
+            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 18, 18)
+            if let prompt, !prompt.isEmpty {
+                arguments["target"] = prompt
+                arguments["query"] = prompt
+            }
         } else {
             arguments["action"] = "auto"
-            arguments["wait_for_image"] = true
+            arguments["wait_for_image"] = isImageWorkflow
             if let prompt, !prompt.isEmpty {
-                arguments["text"] = prompt
+                if isImageWorkflow || browserContinuationShouldTypePrompt(
+                    arguments: arguments,
+                    toolContent: toolContent,
+                    latestUserPrompt: latestUserPrompt
+                ) {
+                    arguments["text"] = prompt
+                } else if arguments["target"] == nil && arguments["label"] == nil {
+                    arguments["target"] = prompt
+                }
             }
-            arguments["max_loops"] = max(nativeToolIntValue(arguments["max_loops"] ?? arguments["maxLoops"]) ?? 3, 3)
+            arguments["max_loops"] = max(nativeToolIntValue(arguments["max_loops"] ?? arguments["maxLoops"]) ?? 6, 6)
             if arguments["button_text"] == nil && arguments["buttonText"] == nil {
-                arguments["button_text"] = "generate create submit send start run continue next 免费生成 生成图片 立即生成 开始生成"
+                arguments["button_text"] = "generate create submit send search start run continue next 免费生成 生成图片 立即生成 开始生成 提交 搜索 继续 下一步"
             }
         }
 
@@ -18438,6 +18656,7 @@ final class ChatViewModel {
         - Namespace root: `/mnt/iexa`. Reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` containing read/write local `SKILL.md` skill files, `/mnt/iexa/memory` containing user-maintained `GLOBAL.md` plus daily memory files, and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Memory is model-read-only for structured write/edit/delete/move/copy/mkdir tools; use the `memory_write` tool for daily memory entries. Mounted folder structured write permission follows the user's file-browser setting for each mount.
         - Shell: Alpine Linux BusyBox/ash. Prefer portable POSIX `sh` syntax; avoid Bash-only arrays, process substitution, and Debian/macOS assumptions unless the needed tool is first proven installed.
         - Package manager: `apk`. Check first with `apk info -e <pkg>` or `command -v <tool>`; install only packages proven missing with `apk add --no-cache <pkg>`. When a task needs a missing OS tool/library, install it through Local Alpine `apk` and continue; do not tell the user to install it on iOS/macOS/Ubuntu and do not use `apt`/`brew`/`sudo`.
+        - RootFS Management mirror choices are already materialized in the running rootfs before commands run. APK reads `/etc/apk/repositories`; pip reads `/etc/pip.conf` and `/root/.config/pip/pip.conf`; npm reads `/etc/npmrc` and `/root/.npmrc`. Use `apk add --no-cache <pkg>`, `python3 -m pip install ...`, and `npm install ...` directly. If package installation is slow or fails, inspect those files or tell the user to change/reset RootFS Management mirrors; do not assume Ubuntu/Debian package sources.
         - Unsupported command families here: `apt`, `apt-get`, `yum`, `dnf`, `pacman`, `brew`, `sudo`, `systemctl`, `launchctl`, and macOS-only utilities. Translate those intentions to Alpine/BusyBox equivalents.
         - Do not use `ps`, `pgrep`, or `pkill` for server/process checks. They are blocked in this embedded runtime. For preview servers, use `iexa-serve`, `iexa-serve stop <port|all>`, `nc -z 127.0.0.1 <port>`, or `/proc/net/tcp`.
         - Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, and `/var` are system paths. Inspect them when useful; do not edit them except through package-manager operations or explicit user requests.
