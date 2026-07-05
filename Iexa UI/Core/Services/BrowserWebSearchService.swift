@@ -974,7 +974,8 @@ final class BrowserWebSearchService: NSObject {
             const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
             const detected = hasChallengeWidget || (textDetected && !actionReady);
             const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
-            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady && !hasChallengeWidget));
+            const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
+            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText));
             return {
               detected,
               provider,
@@ -1317,7 +1318,8 @@ final class BrowserWebSearchService: NSObject {
             const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
             const detected = hasChallengeWidget || (textDetected && !actionReady);
             const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
-            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady && !hasChallengeWidget));
+            const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
+            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText));
             return {
               detected,
               provider,
@@ -3867,7 +3869,8 @@ final class BrowserWebSearchService: NSObject {
             const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
             const detected = hasChallengeWidget || (textDetected && !actionReady);
             const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
-            return { detected, provider, token_length: tokenLength, completed: Boolean(tokenLength > 0 || successState || (textDetected && actionReady && !hasChallengeWidget)) };
+            const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
+            return { detected, provider, token_length: tokenLength, completed: Boolean(tokenLength > 0 || successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText)) };
           }
           const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
           if (!node) {
@@ -4027,7 +4030,8 @@ final class BrowserWebSearchService: NSObject {
             const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
             const detected = hasChallengeWidget || (textDetected && !actionReady);
             const provider = recaptcha ? 'recaptcha' : (turnstile ? 'cloudflare_turnstile' : (detected ? 'human_verification' : ''));
-            return { detected, provider, completed: Boolean(successState || (textDetected && actionReady && !hasChallengeWidget)) };
+            const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
+            return { detected, provider, completed: Boolean(successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText)) };
           }
           const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
           if (!node) {
@@ -4212,7 +4216,8 @@ final class BrowserWebSearchService: NSObject {
             const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
             const detected = hasChallengeWidget || (textDetected && !actionReady);
             const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
-            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady && !hasChallengeWidget));
+            const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
+            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText));
             return {
               detected,
               provider,
@@ -4539,7 +4544,9 @@ final class BrowserWebSearchService: NSObject {
           const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || attr(frame, 'aria-label') || '').join(' ').toLowerCase();
           const challengeDetected = /turnstile|captcha|recaptcha|challenge/.test(frames) ||
             /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|验证您是真人|请验证您是真人|正在检查|人机验证/.test(bodyText);
-          const challengeBlocking = challengeDetected && newImageSources.length === 0 && !loadingVisible && !(generateNode && !generateDisabled);
+          const promptReady = Boolean(promptNode && !disabledState(promptNode));
+          const challengePendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
+          const challengeBlocking = challengeDetected && newImageSources.length === 0 && !loadingVisible && !promptReady && !(generateNode && !generateDisabled) && challengePendingText;
           let generationState = 'unknown';
           if (challengeBlocking) generationState = 'blocked_verification';
           else if (newImageSources.length > 0 && excluded.size > 0) generationState = 'success';
@@ -6457,24 +6464,35 @@ final class BrowserWebSearchService: NSObject {
               return actionPattern.test(label);
             });
           }
+          function enabledEditablePresent() {
+            const selector = 'textarea, input:not([type="hidden"]), select, [contenteditable], [role="textbox"]';
+            const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 160);
+            return nodes.some(node => {
+              if (!visible(node)) return false;
+              return !Boolean(node.disabled || node.getAttribute('aria-disabled') === 'true' || node.closest('[disabled],[aria-disabled="true"]'));
+            });
+          }
           const actionReady = enabledActionButtonPresent();
+          const pageReady = actionReady || enabledEditablePresent();
           const hasChallengeWidget = Boolean(
             turnstile ||
             recaptcha ||
             /turnstile|captcha|recaptcha|challenge/.test(frames)
           );
           const textChallenge = /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|故障排除|验证失败|验证您是真人|请验证您是真人|正在检查|troubleshooting|verification failed/.test(bodyText);
-          const challengeDetected = hasChallengeWidget || (textChallenge && !actionReady);
           const failedState = /故障排除|验证失败|troubleshooting|verification failed/.test(bodyText);
           const successState = /verified|验证成功|已验证/.test(bodyText)
             || (/成功|success/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText));
-          const completedState = tokenLength > 0 || successState || (textChallenge && actionReady && !hasChallengeWidget);
+          const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
+          const completedState = tokenLength > 0 || successState || (textChallenge && pageReady && !failedState) || (hasChallengeWidget && pageReady && !pendingText && !failedState);
+          const challengeDetected = !completedState && (hasChallengeWidget || (textChallenge && !pageReady));
           return JSON.stringify({
             detected: challengeDetected,
             completed: completedState,
             failed_state: failedState && !completedState,
             success_state: successState,
-            action_ready: actionReady
+            action_ready: actionReady,
+            page_ready: pageReady
           });
         })();
         """
