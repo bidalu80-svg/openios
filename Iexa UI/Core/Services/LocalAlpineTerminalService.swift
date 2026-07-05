@@ -558,7 +558,7 @@ nonisolated enum LocalAlpineOpenMarkerParser {
 }
 
 @MainActor
-nonisolated enum LocalAlpineBackgroundExecution {
+enum LocalAlpineBackgroundExecution {
     private static var taskId: UIBackgroundTaskIdentifier = .invalid
     private static var depth = 0
 

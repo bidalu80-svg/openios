@@ -686,7 +686,7 @@ private struct LocalAlpineRootFSManagementView: View {
     }
 
     private var statusSection: some View {
-        Section("状态") {
+        Section {
             statusRow(
                 title: "已安装",
                 value: status?.isRuntimeRootFSInstalled == true ? "是" : "尚未初始化",
@@ -714,11 +714,13 @@ private struct LocalAlpineRootFSManagementView: View {
                 icon: "terminal.fill",
                 color: status?.isRuntimeLinked == true ? .green : .orange
             )
+        } header: {
+            Text("状态")
         }
     }
 
     private var mirrorSection: some View {
-        Section("镜像") {
+        Section {
             Button {
                 Task { await detectFastMirrors() }
             } label: {
@@ -785,6 +787,8 @@ private struct LocalAlpineRootFSManagementView: View {
             }
         } footer: {
             Text("镜像会写入当前 Local Alpine rootfs：APK 使用 /etc/apk/repositories，pip 使用 pip.conf，npm 使用 npmrc。")
+        } header: {
+            Text("镜像")
         }
     }
 
@@ -962,7 +966,7 @@ private struct LocalAlpineMirrorPickerView: View {
 
     var body: some View {
         List {
-            Section("当前") {
+            Section {
                 Toggle("使用镜像", isOn: Binding(
                     get: { mirrorsEnabled },
                     set: { enabled in
@@ -987,9 +991,11 @@ private struct LocalAlpineMirrorPickerView: View {
                         .lineLimit(2)
                 }
                 .padding(.vertical, 4)
+            } header: {
+                Text("当前")
             }
 
-            Section("镜像") {
+            Section {
                 ForEach(options) { option in
                     Button {
                         var next = settings
@@ -1042,6 +1048,8 @@ private struct LocalAlpineMirrorPickerView: View {
                     }
                     .buttonStyle(.plain)
                 }
+            } header: {
+                Text("镜像")
             }
         }
         .navigationTitle(title)
