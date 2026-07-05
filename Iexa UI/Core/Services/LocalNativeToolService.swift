@@ -134,6 +134,7 @@ final class LocalNativeToolService {
     static func containsNativeToolBlock(_ content: String) -> Bool {
         content.range(of: #"```iexa_native\s*[\s\S]*?```"#, options: [.regularExpression, .caseInsensitive]) != nil
             || taggedNativeToolBodies(in: content).isEmpty == false
+            || plainLineNativeToolCalls(in: content).isEmpty == false
             || looseNativeToolBodies(in: content).isEmpty == false
             || dsmlToolCallObjects(in: content).isEmpty == false
     }
@@ -1354,6 +1355,7 @@ final class LocalNativeToolService {
         let fencedRanges = matches.map(\.range)
         let looseBodies = Self.looseNativeToolBodies(in: content, excluding: fencedRanges)
         calls.append(contentsOf: looseBodies.flatMap { parseJSONCalls($0) })
+        calls.append(contentsOf: plainLineNativeToolCalls(in: content, excluding: fencedRanges))
         calls.append(contentsOf: dsmlToolCallObjects(in: content).map(Self.normalizedNativeCall(_:)))
         return calls.map(Self.normalizedNativeCall(_:)).filter { Self.isSupportedNativeCall($0) }
     }
@@ -1489,7 +1491,7 @@ final class LocalNativeToolService {
     }
 
     private static func stripNativeToolBlocks(from content: String) -> String {
-        let withoutNativeFence = content.replacingOccurrences(
+        var withoutNativeFence = content.replacingOccurrences(
             of: #"```iexa_native\s*[\s\S]*?```"#,
             with: "",
             options: .regularExpression
@@ -1498,6 +1500,10 @@ final class LocalNativeToolService {
             with: "",
             options: [.regularExpression, .caseInsensitive]
         )
+        for range in plainLineNativeToolRanges(in: withoutNativeFence).reversed() {
+            guard let swiftRange = Range(range, in: withoutNativeFence) else { continue }
+            withoutNativeFence.removeSubrange(swiftRange)
+        }
         let looseBodies = looseNativeToolBodies(in: withoutNativeFence)
         guard !looseBodies.isEmpty else { return withoutNativeFence }
         var stripped = withoutNativeFence
@@ -1547,6 +1553,131 @@ final class LocalNativeToolService {
             seen.insert(body)
             return true
         }
+    }
+
+    private static func plainLineNativeToolCalls(
+        in content: String,
+        excluding excludedRanges: [NSRange] = []
+    ) -> [[String: Any]] {
+        plainLineNativeToolMatches(in: content, excluding: excludedRanges).compactMap { match in
+            plainLineNativeToolCall(
+                rawName: match.rawName,
+                body: match.body
+            )
+        }
+    }
+
+    private static func plainLineNativeToolRanges(in content: String) -> [NSRange] {
+        plainLineNativeToolMatches(in: content).compactMap { match in
+            guard plainLineNativeToolCall(rawName: match.rawName, body: match.body) != nil else {
+                return nil
+            }
+            return match.range
+        }
+    }
+
+    private static func plainLineNativeToolMatches(
+        in content: String,
+        excluding excludedRanges: [NSRange] = []
+    ) -> [(range: NSRange, rawName: String?, body: String)] {
+        let pattern = #"<\s*(?:tool_call|tool_use|function_call|function|iexa_native)\b[^>]*>\s*([A-Za-z0-9_.-]+)?"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return []
+        }
+        let ns = content as NSString
+        let fullRange = NSRange(location: 0, length: ns.length)
+        let matches = regex.matches(in: content, range: fullRange)
+        guard !matches.isEmpty else { return [] }
+
+        var results: [(range: NSRange, rawName: String?, body: String)] = []
+        for (index, match) in matches.enumerated() {
+            guard !excludedRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else {
+                continue
+            }
+            let bodyStart = match.range.location + match.range.length
+            let nextStart = index + 1 < matches.count ? matches[index + 1].range.location : ns.length
+            let rawBodyRange = NSRange(location: bodyStart, length: max(0, nextStart - bodyStart))
+            var body = ns.substring(with: rawBodyRange)
+            if let closing = body.range(of: #"</\s*(?:tool_call|tool_use|function_call|function|iexa_native)\s*>"#, options: [.regularExpression, .caseInsensitive]) {
+                body = String(body[..<closing.lowerBound])
+            }
+            let rawName: String?
+            if match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound {
+                let name = ns.substring(with: match.range(at: 1))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                rawName = name.isEmpty ? nil : name
+            } else {
+                rawName = nil
+            }
+            let end = rawBodyRange.location + rawBodyRange.length
+            let range = NSRange(location: match.range.location, length: max(0, end - match.range.location))
+            results.append((range, rawName, body))
+        }
+        return results
+    }
+
+    private static func plainLineNativeToolCall(rawName: String?, body: String) -> [String: Any]? {
+        let lines = body
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { !$0.hasPrefix("</") && !$0.hasPrefix("```") }
+        guard rawName?.isEmpty == false || !lines.isEmpty else { return nil }
+
+        var remaining = lines
+        var toolName = rawName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if toolName == nil, let first = remaining.first,
+           isSupportedNativeAction(first) {
+            toolName = first
+            remaining.removeFirst()
+        }
+
+        var parsed: [String: Any] = [:]
+        var index = 0
+        while index < remaining.count {
+            let line = remaining[index]
+            if let separator = line.firstIndex(where: { $0 == ":" || $0 == "=" }) {
+                let key = String(line[..<separator])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let value = String(line[line.index(after: separator)...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !key.isEmpty, !value.isEmpty {
+                    parsed[key] = scalarNativeToolValue(value)
+                }
+                index += 1
+                continue
+            }
+            guard index + 1 < remaining.count else { break }
+            let key = line
+            let value = remaining[index + 1]
+            parsed[key] = scalarNativeToolValue(value)
+            index += 2
+        }
+
+        if let toolName, !toolName.isEmpty {
+            let normalizedTool = normalizedActionName(toolName)
+            if normalizedTool == "browser_use" || normalizedTool == "browser.use" {
+                if let browserAction = parsed["action"] {
+                    parsed["browser_use_action"] = browserAction
+                }
+                parsed["action"] = "browser_use"
+            } else {
+                parsed["action"] = normalizedTool
+            }
+        }
+
+        let normalized = normalizedNativeCall(parsed)
+        return isSupportedNativeCall(normalized) ? normalized : nil
+    }
+
+    private static func scalarNativeToolValue(_ value: String) -> Any {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if ["true", "yes", "on"].contains(lower) { return true }
+        if ["false", "no", "off"].contains(lower) { return false }
+        if let int = Int(trimmed) { return int }
+        if let double = Double(trimmed), trimmed.contains(".") { return double }
+        return trimmed
     }
 
     private static func taggedNativeToolBodies(in content: String) -> [String] {

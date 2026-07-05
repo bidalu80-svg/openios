@@ -127,6 +127,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
 
     private static func isInteractiveBrowserStatusId(_ value: String) -> Bool {
         [
+            "browser.auto", "browser.use", "browser.workflow_state",
             "browser.open", "browser.navigate", "browser.find_elements",
             "browser.click", "browser.type", "browser.hover", "browser.scroll",
             "browser.scroll_and_collect", "browser.get_backbone", "browser.get_page_info",
@@ -2249,6 +2250,7 @@ struct ChatDetailView: View {
     @State private var agentFloatingStepPreview: AgentFloatingStepPreviewItem?
     @State private var agentFloatingLoadingPath: String?
     @State private var localAlpineLiveToolRenderRevision = 0
+    @State private var automationBrowserLivePreviewReference: String?
     @State private var hideAgentFloatingBarForKeyboard = false
     @State private var suppressStaleAgentFloatingBarAfterKeyboard = false
     @State private var pendingNewAgentFloatingSnapshotAfterKeyboard: AgentActivityItem?
@@ -3775,6 +3777,14 @@ struct ChatDetailView: View {
             suppressStaleAgentFloatingBarAfterKeyboard = !hasResolvedSnapshot
             setAgentFloatingBarHiddenForKeyboard(keyboard.isVisible || !hasResolvedSnapshot)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .browserWebSearchServiceLivePreviewDidChange)) { notification in
+            guard let reference = notification.userInfo?["thumbnail_url"] as? String,
+                  !reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return
+            }
+            automationBrowserLivePreviewReference = reference
+            localAlpineLiveToolRenderRevision &+= 1
+        }
         .onAppear {
             viewModel.syncOnEntry()
             setAgentFloatingBarHiddenForKeyboard(keyboard.isVisible)
@@ -4328,6 +4338,7 @@ struct ChatDetailView: View {
                 AgentStepFloatingBarHost(
                     conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
                     fallbackItem: agentFloatingDisplayItem,
+                    liveBrowserThumbnailReference: automationBrowserLivePreviewReference,
                     onPreviewTap: { item, index in
                         openAgentFloatingPreview(item: item, initialIndex: index)
                     }
@@ -10224,6 +10235,7 @@ private struct AssistantLocalPreviewButton: View {
 private struct AgentStepFloatingBarHost: View {
     let conversationId: String?
     let fallbackItem: AgentActivityItem?
+    let liveBrowserThumbnailReference: String?
     let onPreviewTap: (AgentActivityItem, Int) -> Void
 
     private var displayItem: AgentActivityItem? {
@@ -10236,6 +10248,7 @@ private struct AgentStepFloatingBarHost: View {
                 AgentStepFloatingBar(
                     item: item,
                     taskCount: item.totalStepCount,
+                    liveBrowserThumbnailReference: liveBrowserThumbnailReference,
                     onPreviewTap: onPreviewTap
                 )
                 .padding(.horizontal, 18)
@@ -10258,6 +10271,7 @@ private enum AgentStepFloatingMetrics {
 private struct AgentStepFloatingBar: View {
     let item: AgentActivityItem
     let taskCount: Int
+    let liveBrowserThumbnailReference: String?
     let onPreviewTap: (AgentActivityItem, Int) -> Void
 
     @Environment(\.theme) private var theme
@@ -10319,6 +10333,12 @@ private struct AgentStepFloatingBar: View {
     }
 
     private var previewThumbnailReference: String? {
+        let liveBrowser = liveBrowserThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isBrowserStep = (selectedStep?.isInteractiveBrowserStatusStep == true) || item.hasInteractiveBrowserStatusSteps
+        if liveBrowser?.isEmpty == false,
+           isBrowserStep {
+            return liveBrowser
+        }
         let selected = selectedStep?.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
         if selected?.isEmpty == false {
             return selected

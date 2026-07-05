@@ -568,20 +568,21 @@ final class ChatViewModel {
     @ObservationIgnored private var localAlpinePendingToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
     @ObservationIgnored private var localAlpineToolEventFlushTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var localAlpineLastToolEventFlushAtByMessageId: [String: Date] = [:]
-    private let localAlpineAgentMaxSteps = 16
+    private let localAlpineAgentMaxSteps = 24
     private let localAlpineNoProgressRepeatLimit = 2
     private let localAlpineToolEventFlushInterval: TimeInterval = 0.45
     private let localAlpineLiveToolPreviewLimit = 260
     private let localAlpineLiveToolDetailLimit = 180
     private let localAlpineLiveToolCommandLimit = 420
-    private static let localNativeFunctionMaxSteps = 12
-    private static let localNativeBrowserRepeatedSignatureLimit = 3
-    private static let localNativeBrowserToolSoftLimit = 12
-    private static let localNativeBrowserSearchSoftLimit = 3
-    private static let localNativeBrowserReadableSoftLimit = 3
+    private static let localNativeFunctionMaxSteps = 24
+    private static let localNativeBrowserRepeatedSignatureLimit = 6
+    private static let localNativeBrowserToolSoftLimit = 24
+    private static let localNativeBrowserSearchSoftLimit = 5
+    private static let localNativeBrowserReadableSoftLimit = 5
+    private static let localBrowserVerificationContinuationLimit = 8
     private static let localAlpineBrowserFailureSoftLimit = 5
-    private static let localAlpineBrowserToolSoftLimit = 12
-    private static let localAlpineBrowserSearchSoftLimit = 3
+    private static let localAlpineBrowserToolSoftLimit = 24
+    private static let localAlpineBrowserSearchSoftLimit = 5
     var localAlpineInputRequest: LocalAlpineInteractiveRequest?
     var localAlpineInputText: String = ""
     var localAlpinePendingOpenRequest: LocalAlpineOpenRequest?
@@ -2857,7 +2858,7 @@ final class ChatViewModel {
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
         - Browser override: for interactive websites, call `browser_use` with `action:"observe"` first and use the hidden tool-only current viewport screenshot as the primary state for deciding clicks, typing, scrolling, and verification-area positioning. DOM/text is auxiliary and may be stale or incomplete on Canvas, lazy-loaded, Cloudflare, or generated-result pages. Use `inspect` for full-page reading/summarization, not as the main driver for visual interaction. Use `auto` only for clearly bounded generated-image or simple submit workflows.
-        - Browser interaction: use `browser_use` action `auto` for website tasks that involve opening a page, filling text, clicking a submit/generate button, and waiting for a result; `auto` first inspects the real page logic (visible state, prompt field, action button, verification, loading/failure/result signals), then runs an observe/action/observe loop inside the shared browser and returns workflow-state steps such as `prompt_value_verified`, `generate_button_enabled`, `generation_state`, `new_candidate_count`, and saved `file_url`. Treat click/type/scroll/find success as intermediate only. For generated-image workflows, do not claim completion unless `wait_for_image` saved a file or `generation_state` is `success`; if `generation_state` is `failed`, `retry`, `blocked_verification`, or no-progress, report that blocking state instead of inventing success. Use `observe` before choosing the next browser step and after every important click/type/scroll/wait action; each observation/action result includes a lightweight hidden current-viewport screenshot for visual decisions. Use `find_elements` to scan the page for inputs/buttons when selectors are unknown. It scrolls the page by default and returns text/DOM/control samples; set `capture_visuals:true` only when visual layout is needed or DOM matching misses a visible target. Use `scan_page:true`/`max_scrolls` when a target may be below the first viewport. Do not request full-page screenshots or multi-viewport visual sampling unless truly needed; current-viewport screenshots are the low-latency default. A missing DOM/accessibility match does not prove a visible button is absent. Inspect the observation/full-page scan and retry with `coordinate_x`/`coordinate_y` when the button is visible but text matching failed. Use `screenshot` with `full_page:true` only when visual layout matters; observation screenshots are tool-only by default and should not be presented as the final user-facing result. Do not set `attach_preview`, `show_in_chat`, or `attach_file` for browser observation screenshots unless the user explicitly asks to save, download, or show the screenshot. Before summarizing a webpage or saying what a page contains, use a full-page text/readable result (`browser.readable`, `browser.text`, or `browser.open` after it reports `full_page:true`); do not conclude from only `browser.info`, `observe`, `screenshot`, or the first viewport. For clicks/type, the browser tool will automatically scan the full page when the first viewport misses; do not stop and ask the user to scroll for normal offscreen controls. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, or `aria_label` from `find_elements`; use screenshot coordinates after the target is in the current viewport or when the result says `needs_visual_coordinates:true`. For website workflows, keep using `browser_use` for bounded micro-actions in the same turn until the requested page task is actually complete; a successful observe/scroll/find/click/type step is only intermediate progress, not the final answer. If a result says `requires_user_verification:true`, the app will surface the shared browser on the same page and `observe` will scroll to the verification area; wait for the app's follow-up observation after verification, then continue from the current page once that observation says verification completed. Do not call `browser.open`, `browser.readable`, or navigate to the same URL again after verification unless a forced reload is explicitly required. Do not retry the same failed selector.
+        - Browser interaction: use `browser_use` action `auto` for website tasks that involve opening a page, filling text, clicking a submit/generate button, and waiting for a result; `auto` first inspects the real page logic (visible state, prompt field, action button, verification, loading/failure/result signals), then runs an observe/action/observe loop inside the shared browser and returns workflow-state steps such as `prompt_value_verified`, `generate_button_enabled`, `generation_state`, `new_candidate_count`, and saved `file_url`. Treat click/type/scroll/find success as intermediate only. For generated-image workflows, do not claim completion unless `wait_for_image` saved a file or `generation_state` is `success`; if `generation_state` is `failed`, `retry`, `blocked_verification`, or no-progress, report that blocking state instead of inventing success. Use `observe` before choosing the next browser step and after every important click/type/scroll/wait action; each observation/action result includes a lightweight hidden current-viewport screenshot for visual decisions. Use `find_elements` to scan the page for inputs/buttons when selectors are unknown. It scrolls the page by default and returns text/DOM/control samples; set `capture_visuals:true` only when visual layout is needed or DOM matching misses a visible target. Use `scan_page:true`/`max_scrolls` when a target may be below the first viewport. Do not request full-page screenshots or multi-viewport visual sampling unless truly needed; current-viewport screenshots are the low-latency default. A missing DOM/accessibility match does not prove a visible button is absent. Inspect the observation/full-page scan and retry with `coordinate_x`/`coordinate_y` when the button is visible but text matching failed. Use `screenshot` with `full_page:true` only when visual layout matters; observation screenshots are tool-only by default and should not be presented as the final user-facing result. Do not set `attach_preview`, `show_in_chat`, or `attach_file` for browser observation screenshots unless the user explicitly asks to save, download, or show the screenshot. Before summarizing a webpage or saying what a page contains, use a full-page text/readable result (`browser.readable`, `browser.text`, or `browser.open` after it reports `full_page:true`); do not conclude from only `browser.info`, `observe`, `screenshot`, or the first viewport. For clicks/type, the browser tool will automatically scan the full page when the first viewport misses; do not stop and ask the user to scroll for normal offscreen controls. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, or `aria_label` from `find_elements`; use screenshot coordinates after the target is in the current viewport or when the result says `needs_visual_coordinates:true`. For website workflows, keep using `browser_use` for bounded micro-actions in the same turn until the requested page task is actually complete; a successful observe/scroll/find/click/type step is only intermediate progress, not the final answer. Human-verification words visible on the page are not a failure and must not scare you into stopping; pause only when the tool explicitly returns `requires_user_verification:true`, then the app surfaces the shared browser on the same page and `observe` scrolls to the verification area. After the user completes verification, continue from the current page using the next hidden viewport observation; do not call `browser.open`, `browser.readable`, or navigate to the same URL again after verification unless a forced reload is explicitly required. Do not retry the same failed selector.
         - For image-generation websites, after entering the prompt and clicking generate/download, use `browser_use` action `wait_for_image` to poll for the generated image and save it as an attachment. Do not repeatedly call generic screenshot/read actions once `wait_for_image` returns a saved file.
         - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
@@ -11737,7 +11738,7 @@ final class ChatViewModel {
             var calls = toolAccumulator.completedCalls()
             if calls.isEmpty,
                let continuationCall = pendingBrowserContinuationCall,
-               forcedBrowserContinuationCount < 3 {
+               forcedBrowserContinuationCount < 10 {
                 forcedBrowserContinuationCount += 1
                 pendingBrowserContinuationCall = nil
                 if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -11993,7 +11994,7 @@ final class ChatViewModel {
                 .filter(Self.isLocalNativeFunctionToolCall)
             if calls.isEmpty,
                let continuationCall = pendingBrowserContinuationCall,
-               forcedBrowserContinuationCount < 3 {
+               forcedBrowserContinuationCount < 10 {
                 forcedBrowserContinuationCount += 1
                 pendingBrowserContinuationCall = nil
                 if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -12225,7 +12226,7 @@ final class ChatViewModel {
         if browserAction != nil {
             var verificationContinuationCount = 0
             var continuationCall = effectiveCall
-            while result.requiresBrowserUserVerification && verificationContinuationCount < 4 {
+            while result.requiresBrowserUserVerification && verificationContinuationCount < Self.localBrowserVerificationContinuationLimit {
                 let completed = await waitForBrowserUserVerificationIfNeeded(
                     result,
                     messageId: assistantMessageId
@@ -12883,7 +12884,7 @@ final class ChatViewModel {
         var result = await LocalNativeToolService.shared.executeBlocks(in: content)
         var browserVerificationCompleted = false
         var verificationContinuationCount = 0
-        while result.requiresBrowserUserVerification && verificationContinuationCount < 4 {
+        while result.requiresBrowserUserVerification && verificationContinuationCount < Self.localBrowserVerificationContinuationLimit {
             let completed = await waitForBrowserUserVerificationIfNeeded(
                 result,
                 messageId: assistantMessageId
@@ -12997,7 +12998,28 @@ final class ChatViewModel {
             )
         )
 
-        let completed = await BrowserWebSearchService.shared.waitForVisibleHumanVerificationCompletion(timeout: 300)
+        let completed = await BrowserWebSearchService.shared.waitForVisibleHumanVerificationCompletion(
+            timeout: 600,
+            onUserInteraction: { [weak self] _ in
+                guard let self else { return }
+                self.updateLocalBrowserToolMessage(
+                    messageId: messageId,
+                    content: "检测到你已在浏览器里操作，正在检查网页状态...",
+                    isStreaming: true,
+                    status: ChatStatusUpdate(
+                        action: "browser_web_search",
+                        description: "检测到用户操作，正在检查验证状态...",
+                        done: false,
+                        urls: urls,
+                        occurredAt: .now,
+                        items: document?.items ?? [],
+                        count: max(document?.items.count ?? 0, urls.count),
+                        query: document?.query,
+                        queries: document?.query.map { [$0] } ?? []
+                    )
+                )
+            }
+        )
         updateLocalBrowserToolMessage(
             messageId: messageId,
             content: completed ? "人机验证已完成，正在继续操作网页..." : "人机验证尚未完成。",
@@ -13976,13 +13998,14 @@ final class ChatViewModel {
             || toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
             return true
         }
-        if (action == "auto" || action == "browser.auto" || action == "complete.task" || action == "browser.complete.task")
-            && toolContent.localizedCaseInsensitiveContains("browser.wait_for_image") {
+        if let generationState = firstJSONStringValue(in: toolContent, key: "generation_state")?.lowercased(),
+           generationState == "failed",
+           !anyJSONBoolValue(in: toolContent, key: "retry_visible", equals: true),
+           !anyJSONBoolValue(in: toolContent, key: "generate_button_enabled", equals: true) {
             return true
         }
-        if let generationState = firstJSONStringValue(in: toolContent, key: "generation_state")?.lowercased(),
-           ["failed", "retry", "blocked_verification"].contains(generationState) {
-            return true
+        if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
+            return false
         }
         return false
     }
@@ -14006,17 +14029,15 @@ final class ChatViewModel {
         ) else {
             return nil
         }
-        guard !localNativeBrowserToolResultShouldStop(effectiveCall, toolContent: toolContent) else {
+        if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
             return nil
         }
-        if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
+        guard !localNativeBrowserToolResultShouldStop(effectiveCall, toolContent: toolContent) else {
             return nil
         }
 
         let lowerContent = toolContent.lowercased()
-        if lowerContent.contains("timed out waiting for a generated image")
-            || lowerContent.contains("网页返回生成失败")
-            || lowerContent.contains("自动流程未能输入文本")
+        if lowerContent.contains("自动流程未能输入文本")
             || lowerContent.contains("自动流程未能点击目标按钮") {
             return nil
         }
@@ -20978,7 +20999,7 @@ final class ChatViewModel {
             if let directCall = Self.localNativeMarkdownFunctionToolCalls(from: executableContent)
                 .first(where: { Self.localNativeBrowserToolKind($0) == .interactive }) {
                 var continuationCall = directCall
-                while result.requiresBrowserUserVerification && verificationContinuationCount < 4 {
+                while result.requiresBrowserUserVerification && verificationContinuationCount < Self.localBrowserVerificationContinuationLimit {
                     let completed = await waitForBrowserUserVerificationIfNeeded(
                         result,
                         messageId: messageId
@@ -24588,7 +24609,10 @@ final class ChatViewModel {
     }
 
     private static func safeAssistantDisplayContent(_ text: String) -> String {
-        let withoutLocalToolEcho = cleanedLocalAlpineMissingToolEchoes(text)
+        let withoutNativeToolEcho = LocalNativeToolService.containsNativeToolBlock(text)
+            ? LocalNativeToolService.visibleContent(from: text)
+            : text
+        let withoutLocalToolEcho = cleanedLocalAlpineMissingToolEchoes(withoutNativeToolEcho)
         if shouldShowInlineImageReceiveState(for: withoutLocalToolEcho) {
             return cleanedAssistantInlineImagePayloads(withoutLocalToolEcho)
         }
@@ -24708,6 +24732,8 @@ final class ChatViewModel {
             || normalized.contains("[current model capability]")
             || normalized.contains("dsml")
             || normalized.contains("tool_calls")
+            || normalized.contains("tool_call>")
+            || normalized.contains("<tool_call")
             || normalized.contains("invoke name=")
             || normalized.contains("parameter name=") else {
             return false
@@ -24738,6 +24764,8 @@ final class ChatViewModel {
             "dsml",
             "invoke name=",
             "parameter name=",
+            "<tool_call",
+            "tool_call>",
             "tool_calls>"
         ]
         return strongMarkers.contains { normalized.contains($0) }
@@ -24770,6 +24798,8 @@ final class ChatViewModel {
         let lowerCleaned = cleaned.lowercased()
         if lowerCleaned.contains("dsml")
             || lowerCleaned.contains("tool_calls>")
+            || lowerCleaned.contains("tool_call>")
+            || lowerCleaned.contains("<tool_call")
             || lowerCleaned.contains("invoke name=")
             || lowerCleaned.contains("parameter name=") {
             let truncationPatterns = [

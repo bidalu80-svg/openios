@@ -18,6 +18,12 @@ final class BrowserWebSearchService: NSObject {
     private var browserHumanVerificationSeenTabs: Set<Int> = []
     private var browserHumanVerificationCompletedAtByTab: [Int: Date] = [:]
     private var browserHumanVerificationCompletedURLByTab: [Int: URL] = [:]
+    private var browserLastUserInteractionAt = Date.distantPast
+    private var browserLastUserInteractionKind = ""
+    private var browserLivePreviewLastPublishedAt = Date.distantPast
+    private var browserLivePreviewRevision = 0
+    private var browserLivePreviewTask: Task<Void, Never>?
+    private var browserLivePreviewFileURL: URL?
     private var lastBrowserNavigationReusedExistingPage = false
     private let humanVerificationPageReuseWindow: TimeInterval = 10 * 60
     private var navigationContinuation: CheckedContinuation<Bool, Never>?
@@ -129,6 +135,15 @@ final class BrowserWebSearchService: NSObject {
         let action = rawAction
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+        let publishesLivePreview = Self.browserActionPublishesLivePreview(action)
+        if publishesLivePreview {
+            scheduleLiveBrowserPreview(reason: "before_\(action)", minimumInterval: 0.35)
+        }
+        defer {
+            if publishesLivePreview {
+                scheduleLiveBrowserPreview(reason: "after_\(action)", minimumInterval: 0.9)
+            }
+        }
         switch action {
         case "web.search", "web_search", "search_web", "browser.search", "browser_search":
             return await executeNativeSearch(call)
@@ -191,6 +206,20 @@ final class BrowserWebSearchService: NSObject {
                 "error": "Unsupported browser action"
             ]
         }
+    }
+
+    private static func browserActionPublishesLivePreview(_ action: String) -> Bool {
+        if action.hasPrefix("browser.") || action.hasPrefix("browser_") {
+            return action != "browser.search" && action != "browser_search"
+        }
+        return [
+            "open", "navigate", "read_webpage", "get_readable",
+            "observe", "get_state", "inspect", "page_inspect",
+            "click", "type", "hover", "scroll", "scroll_and_collect",
+            "find_elements", "get_backbone", "execute_js", "eval_js",
+            "wait_for_dom_stable", "wait_for_image", "screenshot",
+            "new_tab", "close_tab", "list_tabs", "set_viewport"
+        ].contains(action)
     }
 
     private func executeNativeBrowserUse(_ call: [String: Any]) async -> [String: Any] {
@@ -937,10 +966,17 @@ final class BrowserWebSearchService: NSObject {
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
             const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
-            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
-            const completed = Boolean(tokenLength > 0 || successState);
+            const actionNodes = [];
+            for (const root of allRoots()) {
+              try { actionNodes.push(...Array.from(root.querySelectorAll(clickableSelector)).slice(0, 120)); } catch (_) {}
+            }
+            const actionReady = actionNodes.some(node => visible(node) && !Boolean(node.disabled || node.getAttribute && node.getAttribute('aria-disabled') === 'true' || node.closest && node.closest('[disabled],[aria-disabled="true"]')));
+            const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
+            const detected = hasChallengeWidget || (textDetected && !actionReady);
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
+            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady && !hasChallengeWidget));
             return {
-              detected: Boolean(provider),
+              detected,
               provider,
               token_length: tokenLength,
               completed,
@@ -1273,10 +1309,17 @@ final class BrowserWebSearchService: NSObject {
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
             const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
-            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
-            const completed = Boolean(tokenLength > 0 || successState);
+            const editableNodes = [];
+            for (const root of allRoots()) {
+              try { editableNodes.push(...Array.from(root.querySelectorAll(editableSelector)).slice(0, 80)); } catch (_) {}
+            }
+            const actionReady = editableNodes.some(node => visible(node) && !Boolean(node.disabled || attr(node, 'aria-disabled') === 'true' || node.closest && node.closest('[disabled],[aria-disabled="true"]')));
+            const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
+            const detected = hasChallengeWidget || (textDetected && !actionReady);
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
+            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady && !hasChallengeWidget));
             return {
-              detected: Boolean(provider),
+              detected,
               provider,
               token_length: tokenLength,
               completed,
@@ -1429,7 +1472,7 @@ final class BrowserWebSearchService: NSObject {
            continuationCall["includeVisual"] == nil {
             continuationCall["visual_observation"] = true
         }
-        let maxLoops = min(max(Self.intValue(call["max_loops"] ?? call["maxLoops"] ?? call["retries"]) ?? 2, 1), 4)
+        let maxLoops = min(max(Self.intValue(call["max_loops"] ?? call["maxLoops"] ?? call["retries"]) ?? 6, 1), 12)
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
         let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? (text != nil)
         var imageBaselineSources: [String] = []
@@ -1468,6 +1511,11 @@ final class BrowserWebSearchService: NSObject {
         func generationFailedStopIfNeeded(_ payload: [String: Any]) -> [String: Any]? {
             let state = (payload["generation_state"] as? String ?? "").lowercased()
             guard ["failed", "retry"].contains(state) else { return nil }
+            let retryVisible = Self.boolValue(payload["retry_visible"]) == true
+            let generateEnabled = Self.boolValue(payload["generate_button_enabled"]) == true
+            if retryVisible || generateEnabled || state == "retry" {
+                return nil
+            }
             let failure = payload["failure_text"] as? String
             let failureText = failure ?? ""
             let summary = !failureText.isEmpty
@@ -1746,32 +1794,90 @@ final class BrowserWebSearchService: NSObject {
         }
 
         if shouldWaitForImage {
-            var waitCall = continuationCall
-            if waitCall["timeout"] == nil {
-                waitCall["timeout"] = 60
+            var lastImage: [String: Any]?
+            var lastState: [String: Any]?
+            for waitAttempt in 0..<maxLoops {
+                var waitCall = continuationCall
+                if waitCall["timeout"] == nil {
+                    waitCall["timeout"] = waitAttempt == 0 ? 90 : 60
+                }
+                if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    waitCall["query"] = text
+                    waitCall["expected_prompt"] = text
+                }
+                if !imageBaselineSources.isEmpty {
+                    waitCall["exclude_sources"] = imageBaselineSources
+                }
+                let image = await executeNativeWaitForImage(waitCall)
+                appendStep(waitAttempt == 0 ? "browser.wait_for_image" : "browser.wait_for_image.retry_\(waitAttempt)", image)
+                lastImage = image
+                let afterImageWait = await executeNativeObserve(continuationCall)
+                appendStep(waitAttempt == 0 ? "browser.observe.after_wait_for_image" : "browser.observe.after_wait_for_image_retry_\(waitAttempt)", afterImageWait)
+                if let stop = verificationStopIfNeeded(image) {
+                    return stop
+                }
+                if let stop = verificationStopIfNeeded(afterImageWait) {
+                    return stop
+                }
+                if Self.boolValue(image["ok"]) == true {
+                    return Self.workflowPayload(
+                        ok: true,
+                        steps: steps,
+                        fileURL: image["file_url"] as? String,
+                        summary: image["summary"] as? String ?? "自动浏览器流程已完成。"
+                    )
+                }
+
+                let state = await probeWorkflowState(name: waitAttempt == 0 ? "browser.workflow_state.after_wait_for_image" : "browser.workflow_state.after_wait_for_image_retry_\(waitAttempt)")
+                lastState = state
+                if let stop = verificationStopIfNeeded(state) {
+                    return stop
+                }
+                if let stop = generationFailedStopIfNeeded(state) {
+                    return stop
+                }
+                guard waitAttempt + 1 < maxLoops else { break }
+
+                let retryVisible = Self.boolValue(state["retry_visible"]) == true
+                let generateEnabled = Self.boolValue(state["generate_button_enabled"]) == true
+                let generationState = (state["generation_state"] as? String ?? "").lowercased()
+                guard retryVisible || generateEnabled || ["ready", "retry", "failed", "unknown", "idle"].contains(generationState) else {
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    continue
+                }
+
+                var retryClickCall = continuationCall
+                let retryLabel = retryVisible
+                    ? "点击重试 重试 try again retry"
+                    : (buttonLabel ?? "generate create submit send start run continue next 免费生成 生成图片 立即生成 开始生成")
+                retryClickCall["label"] = retryLabel
+                retryClickCall["button_text"] = retryLabel
+                retryClickCall["visual_fallback"] = false
+                if let rect = state["generate_button_rect"] as? [String: Any],
+                   let coordinateCall = await browserCoordinateCall(from: ["rect": rect], baseCall: retryClickCall) {
+                    retryClickCall = coordinateCall
+                }
+                let retryClick = await executeNativeClick(retryClickCall)
+                appendStep("browser.click.retry_generation_\(waitAttempt + 1)", retryClick)
+                if let stop = verificationStopIfNeeded(retryClick) {
+                    return stop
+                }
+                try? await Task.sleep(nanoseconds: 900_000_000)
+                let retryObserve = await executeNativeObserve(continuationCall)
+                appendStep("browser.observe.retry_generation_\(waitAttempt + 1)", retryObserve)
+                if let stop = verificationStopIfNeeded(retryObserve) {
+                    return stop
+                }
             }
-            if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                waitCall["query"] = text
-                waitCall["expected_prompt"] = text
-            }
-            if !imageBaselineSources.isEmpty {
-                waitCall["exclude_sources"] = imageBaselineSources
-            }
-            let image = await executeNativeWaitForImage(waitCall)
-            appendStep("browser.wait_for_image", image)
-            let afterImageWait = await executeNativeObserve(continuationCall)
-            appendStep("browser.observe.after_wait_for_image", afterImageWait)
-            if let stop = verificationStopIfNeeded(image) {
-                return stop
-            }
-            if let stop = verificationStopIfNeeded(afterImageWait) {
-                return stop
-            }
+
+            let summary = lastImage?["summary"] as? String
+                ?? lastImage?["error"] as? String
+                ?? lastState?["summary"] as? String
+                ?? "自动流程已持续尝试，但还没有拿到最终图片结果。"
             return Self.workflowPayload(
-                ok: Self.boolValue(image["ok"]) == true,
+                ok: false,
                 steps: steps,
-                fileURL: image["file_url"] as? String,
-                summary: image["summary"] as? String ?? image["error"] as? String ?? "自动浏览器流程已完成。"
+                summary: summary
             )
         }
 
@@ -3753,8 +3859,15 @@ final class BrowserWebSearchService: NSObject {
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
             const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
-            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
-            return { detected: Boolean(provider), provider, token_length: tokenLength, completed: Boolean(tokenLength > 0 || successState) };
+            const actionNodes = [];
+            for (const root of allRoots()) {
+              try { actionNodes.push(...Array.from(root.querySelectorAll(clickableSelector)).slice(0, 120)); } catch (_) {}
+            }
+            const actionReady = actionNodes.some(node => visible(node) && !Boolean(node.disabled || node.getAttribute && node.getAttribute('aria-disabled') === 'true' || node.closest && node.closest('[disabled],[aria-disabled="true"]')));
+            const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
+            const detected = hasChallengeWidget || (textDetected && !actionReady);
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
+            return { detected, provider, token_length: tokenLength, completed: Boolean(tokenLength > 0 || successState || (textDetected && actionReady && !hasChallengeWidget)) };
           }
           const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
           if (!node) {
@@ -3908,9 +4021,13 @@ final class BrowserWebSearchService: NSObject {
             const bodyText = norm(document.body && document.body.innerText || '');
             const textDetected = /prove you are human|verify you are human|checking if the site connection is secure|captcha|turnstile|recaptcha|人机验证|验证您是真人|请验证您是真人|正在检查/.test(bodyText);
             const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
-            const provider = recaptcha ? 'recaptcha' : ((frameDetected || textDetected || turnstile) ? 'human_verification' : '');
             const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
-            return { detected: Boolean(provider), provider, completed: successState };
+            const inputNodes = Array.from(document.querySelectorAll('input, textarea, select, [contenteditable], [role="textbox"]')).slice(0, 120);
+            const actionReady = inputNodes.some(node => visible(node) && !Boolean(node.disabled || attr(node, 'aria-disabled') === 'true' || node.closest('[disabled],[aria-disabled="true"]')));
+            const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
+            const detected = hasChallengeWidget || (textDetected && !actionReady);
+            const provider = recaptcha ? 'recaptcha' : (turnstile ? 'cloudflare_turnstile' : (detected ? 'human_verification' : ''));
+            return { detected, provider, completed: Boolean(successState || (textDetected && actionReady && !hasChallengeWidget)) };
           }
           const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
           if (!node) {
@@ -4092,10 +4209,12 @@ final class BrowserWebSearchService: NSObject {
             const actionReady = findElements('button, a[href], input[type="submit"], input[type="button"], [role="button"], [onclick], [tabindex]')
               .slice(0, 240)
               .some(node => visible(node) && !disabledState(node) && actionPattern.test(accessibleText(node)));
-            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (frameDetected || textDetected ? 'human_verification' : ''));
-            const completed = Boolean(tokenLength > 0 || successState);
+            const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
+            const detected = hasChallengeWidget || (textDetected && !actionReady);
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
+            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady && !hasChallengeWidget));
             return {
-              detected: Boolean(provider),
+              detected,
               provider,
               token_length: tokenLength,
               completed,
@@ -4763,11 +4882,29 @@ final class BrowserWebSearchService: NSObject {
         }
     }
 
+    func recordAutomationBrowserUserInteraction(kind: String) {
+        browserLastUserInteractionAt = Date()
+        browserLastUserInteractionKind = kind
+        scheduleLiveBrowserPreview(reason: "user_\(kind)", minimumInterval: 0.25)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 220_000_000)
+            guard let self,
+                  let probe = await self.evaluateJSONObject(Self.visibleChallengeProbeScript()) else {
+                return
+            }
+            var enrichedProbe = probe
+            enrichedProbe["user_interaction_kind"] = kind
+            enrichedProbe["user_interaction_at"] = ISO8601DateFormatter().string(from: self.browserLastUserInteractionAt)
+            self.notifyHumanVerificationState(enrichedProbe)
+        }
+    }
+
     func browserWebViewDidFinishNavigation(_ source: WKWebView) {
         guard isKnownBrowserWebView(source) else { return }
         resolveNavigation(true)
         notifyActiveBrowserDidChange()
         notifyHumanVerificationStateIfNeeded(from: source)
+        scheduleLiveBrowserPreview(reason: "navigation_finished", minimumInterval: 0.25)
     }
 
     func browserWebViewDidFailNavigation(_ source: WKWebView) {
@@ -4775,17 +4912,22 @@ final class BrowserWebSearchService: NSObject {
         resolveNavigation(false)
         notifyActiveBrowserDidChange()
         notifyHumanVerificationStateIfNeeded(from: source)
+        scheduleLiveBrowserPreview(reason: "navigation_failed", minimumInterval: 0.25)
     }
 
     func currentAutomationBrowserURL() -> URL {
         webView?.url ?? URL(string: "about:blank")!
     }
 
-    func waitForVisibleHumanVerificationCompletion(timeout: TimeInterval = 300) async -> Bool {
+    func waitForVisibleHumanVerificationCompletion(
+        timeout: TimeInterval = 300,
+        onUserInteraction: ((String) -> Void)? = nil
+    ) async -> Bool {
         var sawChallenge = false
         var completedSamples = 0
         var clearSamples = 0
         var lastScrollAt = Date.distantPast
+        var lastSeenUserInteractionAt = browserLastUserInteractionAt
         _ = await scrollToVisibleHumanVerification()
         lastScrollAt = Date()
         let deadline = Date().addingTimeInterval(timeout)
@@ -4830,9 +4972,29 @@ final class BrowserWebSearchService: NSObject {
 
                 notifyHumanVerificationState(probe)
             }
-            try? await Task.sleep(nanoseconds: 900_000_000)
+            let sawNewUserInteraction = browserLastUserInteractionAt > lastSeenUserInteractionAt
+            if sawNewUserInteraction {
+                lastSeenUserInteractionAt = browserLastUserInteractionAt
+                onUserInteraction?(browserLastUserInteractionKind)
+                try? await Task.sleep(nanoseconds: 240_000_000)
+            } else {
+                await waitForAutomationBrowserUserInteractionOrDelay(nanoseconds: 900_000_000)
+            }
         }
         return false
+    }
+
+    private func waitForAutomationBrowserUserInteractionOrDelay(nanoseconds: UInt64) async {
+        let startedAt = browserLastUserInteractionAt
+        let slice: UInt64 = 300_000_000
+        var elapsed: UInt64 = 0
+        while elapsed < nanoseconds {
+            try? await Task.sleep(nanoseconds: min(slice, nanoseconds - elapsed))
+            if browserLastUserInteractionAt > startedAt {
+                return
+            }
+            elapsed += slice
+        }
     }
 
     private func resolveBrowserTab(for tabID: Int? = nil, createIfMissing: Bool = true) -> WKWebView {
@@ -4904,6 +5066,89 @@ final class BrowserWebSearchService: NSObject {
                 }
             }
         }
+    }
+
+    private func scheduleLiveBrowserPreview(reason: String, minimumInterval: TimeInterval = 1.0) {
+        guard webView != nil else { return }
+        guard browserLivePreviewTask == nil else { return }
+        let delay = max(0, minimumInterval - Date().timeIntervalSince(browserLivePreviewLastPublishedAt))
+        browserLivePreviewTask = Task { @MainActor [weak self] in
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            guard let self else { return }
+            await self.publishLiveBrowserPreview(reason: reason)
+            self.browserLivePreviewTask = nil
+        }
+    }
+
+    private func publishLiveBrowserPreview(reason: String) async {
+        guard let wv = webView else { return }
+        let visibleInAutomationBrowser = isAutomationBrowserVisible(wv)
+        let width = visibleInAutomationBrowser ? max(wv.bounds.width, 1) : browserViewportSize.width
+        let height = visibleInAutomationBrowser ? max(wv.bounds.height, 1) : browserViewportSize.height
+        wv.isHidden = false
+        wv.alpha = 1
+        if !visibleInAutomationBrowser {
+            wv.frame = CGRect(x: -10_000, y: -10_000, width: width, height: height)
+        }
+        wv.setNeedsLayout()
+        wv.layoutIfNeeded()
+        wv.scrollView.layoutIfNeeded()
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        guard let image = await captureVisibleWebViewImage(width: width, height: height),
+              let data = Self.liveBrowserPreviewImageData(from: image) else {
+            return
+        }
+
+        do {
+            let folder = try browserOutputDirectory()
+            let revision = browserLivePreviewRevision + 1
+            let fileURL = folder.appendingPathComponent("browser_live_\(activeBrowserTabID)_\(revision).jpg")
+            try data.write(to: fileURL, options: [.atomic])
+            if let previous = browserLivePreviewFileURL, previous != fileURL {
+                try? FileManager.default.removeItem(at: previous)
+            }
+            browserLivePreviewRevision = revision
+            browserLivePreviewLastPublishedAt = Date()
+            browserLivePreviewFileURL = fileURL
+            NotificationCenter.default.post(
+                name: .browserWebSearchServiceLivePreviewDidChange,
+                object: wv,
+                userInfo: [
+                    "thumbnail_url": fileURL.absoluteString,
+                    "thumbnail_path": fileURL.path,
+                    "revision": revision,
+                    "reason": reason,
+                    "tab_id": activeBrowserTabID,
+                    "url": wv.url?.absoluteString ?? "",
+                    "title": wv.title ?? ""
+                ]
+            )
+        } catch {
+            logger.debug("Browser live preview write failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private static func liveBrowserPreviewImageData(from image: UIImage) -> Data? {
+        let maxSide: CGFloat = 520
+        let longestSide = max(image.size.width, image.size.height)
+        let scale = min(1, maxSide / max(longestSide, 1))
+        let targetSize = CGSize(
+            width: max(1, floor(image.size.width * scale)),
+            height: max(1, floor(image.size.height * scale))
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        let rendered = renderer.image { context in
+            context.cgContext.setFillColor(UIColor.white.cgColor)
+            context.cgContext.fill(CGRect(origin: .zero, size: targetSize))
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return rendered.jpegData(compressionQuality: 0.58)
     }
 
     private func captureViewportScreenshot(prefix: String, scrollY: Int? = nil) async -> URL? {
@@ -5086,6 +5331,7 @@ final class BrowserWebSearchService: NSObject {
     private nonisolated static func pruneTemporaryBrowserOutputFiles(in root: URL) throws {
         let fileManager = FileManager.default
         let tempPrefixes = [
+            "browser_live_",
             "browser_observe_",
             "browser_scan_",
             "browser_click_miss_",
@@ -6042,6 +6288,8 @@ final class BrowserWebSearchService: NSObject {
                 "detected": detected,
                 "completed": completed,
                 "failed_state": Self.boolValue(probe["failed_state"]) == true,
+                "user_interaction_kind": probe["user_interaction_kind"] as? String ?? "",
+                "user_interaction_at": probe["user_interaction_at"] as? String ?? "",
                 "url": webView?.url?.absoluteString ?? "",
                 "title": webView?.title ?? ""
             ]
@@ -6210,16 +6458,17 @@ final class BrowserWebSearchService: NSObject {
             });
           }
           const actionReady = enabledActionButtonPresent();
-          const challengeDetected = Boolean(
+          const hasChallengeWidget = Boolean(
             turnstile ||
             recaptcha ||
-            /turnstile|captcha|recaptcha|challenge/.test(frames) ||
-            /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|故障排除|验证失败|验证您是真人|请验证您是真人|正在检查|troubleshooting|verification failed/.test(bodyText)
+            /turnstile|captcha|recaptcha|challenge/.test(frames)
           );
+          const textChallenge = /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|故障排除|验证失败|验证您是真人|请验证您是真人|正在检查|troubleshooting|verification failed/.test(bodyText);
+          const challengeDetected = hasChallengeWidget || (textChallenge && !actionReady);
           const failedState = /故障排除|验证失败|troubleshooting|verification failed/.test(bodyText);
           const successState = /verified|验证成功|已验证/.test(bodyText)
             || (/成功|success/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText));
-          const completedState = tokenLength > 0 || successState;
+          const completedState = tokenLength > 0 || successState || (textChallenge && actionReady && !hasChallengeWidget);
           return JSON.stringify({
             detected: challengeDetected,
             completed: completedState,
@@ -6251,6 +6500,7 @@ final class BrowserWebSearchService: NSObject {
                 "title": webView?.title ?? ""
             ]
         )
+        scheduleLiveBrowserPreview(reason: "active_browser_changed", minimumInterval: 0.45)
     }
 
     private func loadInitialAutomationURL(_ url: URL, in webView: WKWebView) {
@@ -6916,4 +7166,6 @@ extension Notification.Name {
         Notification.Name("BrowserWebSearchServiceActiveBrowserDidChange")
     static let browserWebSearchServiceHumanVerificationStateDidChange =
         Notification.Name("BrowserWebSearchServiceHumanVerificationStateDidChange")
+    static let browserWebSearchServiceLivePreviewDidChange =
+        Notification.Name("BrowserWebSearchServiceLivePreviewDidChange")
 }

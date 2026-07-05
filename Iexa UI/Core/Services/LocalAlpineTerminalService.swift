@@ -250,6 +250,103 @@ struct LocalAlpineStatus: Sendable {
     let workspacePath: String
 }
 
+enum LocalAlpineMirrorKind: String, Codable, Sendable {
+    case apk
+    case pip
+    case npm
+}
+
+struct LocalAlpineMirrorOption: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    let name: String
+    let region: String
+    let url: String
+    let isOfficial: Bool
+}
+
+struct LocalAlpineMirrorSettings: Codable, Equatable, Sendable {
+    var apkMirrorsEnabled: Bool = true
+    var pipMirrorsEnabled: Bool = true
+    var npmMirrorsEnabled: Bool = true
+    var selectedAPKMirrorID: String = "alibaba"
+    var selectedPipMirrorID: String = "alibaba"
+    var selectedNpmMirrorID: String = "npmmirror"
+}
+
+struct LocalAlpineRootFSManagementStatus: Sendable {
+    let isRuntimeLinked: Bool
+    let isRootFSBundled: Bool
+    let isRuntimeRootFSInstalled: Bool
+    let rootFSSizeBytes: Int64
+    let rootFSDisplayPath: String
+    let apkMirrorName: String
+    let pipMirrorName: String
+    let apkMirrorURL: String
+    let pipMirrorURL: String
+    let npmMirrorName: String
+    let npmMirrorURL: String
+}
+
+enum LocalAlpineMirrorStore {
+    private static let storageKey = "localAlpine.mirrorSettings.v1"
+
+    static let apkMirrors: [LocalAlpineMirrorOption] = [
+        LocalAlpineMirrorOption(id: "official", name: "Official CDN", region: "Global", url: "https://dl-cdn.alpinelinux.org/alpine/", isOfficial: true),
+        LocalAlpineMirrorOption(id: "tsinghua", name: "Tsinghua TUNA", region: "China", url: "https://mirrors.tuna.tsinghua.edu.cn/alpine/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "alibaba", name: "Alibaba", region: "China", url: "https://mirrors.aliyun.com/alpine/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "ustc", name: "USTC", region: "China", url: "https://mirrors.ustc.edu.cn/alpine/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "huawei", name: "Huawei", region: "China", url: "https://repo.huaweicloud.com/alpine/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "tencent", name: "Tencent", region: "China", url: "https://mirrors.cloud.tencent.com/alpine/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "leaseweb-uk", name: "LEASEWEB UK", region: "Europe", url: "https://mirror.leaseweb.com/alpine/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "rwth", name: "RWTH Germany", region: "Europe", url: "https://ftp.halifax.rwth-aachen.de/alpine/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "jaist", name: "JAIST Japan", region: "Asia", url: "https://ftp.jaist.ac.jp/pub/Linux/alpine/", isOfficial: false)
+    ]
+
+    static let pipMirrors: [LocalAlpineMirrorOption] = [
+        LocalAlpineMirrorOption(id: "official", name: "Official PyPI", region: "Global", url: "https://pypi.org/simple/", isOfficial: true),
+        LocalAlpineMirrorOption(id: "tsinghua", name: "Tsinghua TUNA", region: "China", url: "https://pypi.tuna.tsinghua.edu.cn/simple/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "alibaba", name: "Alibaba", region: "China", url: "https://mirrors.aliyun.com/pypi/simple/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "ustc", name: "USTC", region: "China", url: "https://mirrors.ustc.edu.cn/pypi/web/simple/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "huawei", name: "Huawei", region: "China", url: "https://repo.huaweicloud.com/repository/pypi/simple/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "tencent", name: "Tencent", region: "China", url: "https://mirrors.cloud.tencent.com/pypi/simple/", isOfficial: false)
+    ]
+
+    static let npmMirrors: [LocalAlpineMirrorOption] = [
+        LocalAlpineMirrorOption(id: "official", name: "Official npm", region: "Global", url: "https://registry.npmjs.org/", isOfficial: true),
+        LocalAlpineMirrorOption(id: "npmmirror", name: "npmmirror", region: "China", url: "https://registry.npmmirror.com/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "tencent", name: "Tencent", region: "China", url: "https://mirrors.cloud.tencent.com/npm/", isOfficial: false),
+        LocalAlpineMirrorOption(id: "huawei", name: "Huawei", region: "China", url: "https://repo.huaweicloud.com/repository/npm/", isOfficial: false)
+    ]
+
+    static func load() -> LocalAlpineMirrorSettings {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let settings = try? JSONDecoder().decode(LocalAlpineMirrorSettings.self, from: data) else {
+            return LocalAlpineMirrorSettings()
+        }
+        return settings
+    }
+
+    static func save(_ settings: LocalAlpineMirrorSettings) {
+        guard let data = try? JSONEncoder().encode(settings) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
+
+    static func selectedAPKMirror(settings: LocalAlpineMirrorSettings = load()) -> LocalAlpineMirrorOption {
+        guard settings.apkMirrorsEnabled else { return apkMirrors[0] }
+        return apkMirrors.first(where: { $0.id == settings.selectedAPKMirrorID }) ?? apkMirrors[0]
+    }
+
+    static func selectedPipMirror(settings: LocalAlpineMirrorSettings = load()) -> LocalAlpineMirrorOption {
+        guard settings.pipMirrorsEnabled else { return pipMirrors[0] }
+        return pipMirrors.first(where: { $0.id == settings.selectedPipMirrorID }) ?? pipMirrors[0]
+    }
+
+    static func selectedNpmMirror(settings: LocalAlpineMirrorSettings = load()) -> LocalAlpineMirrorOption {
+        guard settings.npmMirrorsEnabled else { return npmMirrors[0] }
+        return npmMirrors.first(where: { $0.id == settings.selectedNpmMirrorID }) ?? npmMirrors[0]
+    }
+}
+
 struct LocalAlpineCommandResult: Sendable {
     let command: String
     let output: String
@@ -629,6 +726,68 @@ actor LocalAlpineTerminalService {
         )
     }
 
+    func rootFSManagementStatus() throws -> LocalAlpineRootFSManagementStatus {
+        let workspaceURL = try ensureWorkspaceDirectory()
+        let runtimeRootFSURL = workspaceURL.appendingPathComponent("rootfs.fakefs", isDirectory: true)
+        let rootFSInstalled = fileManager.fileExists(atPath: runtimeRootFSURL.appendingPathComponent("data", isDirectory: true).path)
+            && fileManager.fileExists(atPath: runtimeRootFSURL.appendingPathComponent("meta.db").path)
+        let settings = LocalAlpineMirrorStore.load()
+        let apkMirror = LocalAlpineMirrorStore.selectedAPKMirror(settings: settings)
+        let pipMirror = LocalAlpineMirrorStore.selectedPipMirror(settings: settings)
+        let npmMirror = LocalAlpineMirrorStore.selectedNpmMirror(settings: settings)
+        return LocalAlpineRootFSManagementStatus(
+            isRuntimeLinked: LocalAlpineNativeRuntime.shared.isLinked,
+            isRootFSBundled: bundledRootFSURL() != nil,
+            isRuntimeRootFSInstalled: rootFSInstalled,
+            rootFSSizeBytes: rootFSInstalled ? directorySize(at: runtimeRootFSURL) : 0,
+            rootFSDisplayPath: "Documents/\(workspaceFolderName)/rootfs.fakefs",
+            apkMirrorName: apkMirror.name,
+            pipMirrorName: pipMirror.name,
+            apkMirrorURL: apkMirror.url,
+            pipMirrorURL: pipMirror.url,
+            npmMirrorName: npmMirror.name,
+            npmMirrorURL: npmMirror.url
+        )
+    }
+
+    func applyMirrorSettings(_ settings: LocalAlpineMirrorSettings) async throws {
+        LocalAlpineMirrorStore.save(settings)
+        guard let rootArchiveURL = bundledRootFSURL() else {
+            throw LocalAlpineError.commandFailed("Local Alpine rootfs is missing from the app bundle: \(rootArchiveName)")
+        }
+        let workspaceURL = try ensureWorkspaceDirectory()
+        let runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
+        try ensureMirrorConfiguration(in: runtimeRootFSURL, settings: settings)
+    }
+
+    func testMirror(_ mirror: LocalAlpineMirrorOption, kind: LocalAlpineMirrorKind) async -> TimeInterval? {
+        let targetURLString: String
+        switch kind {
+        case .apk:
+            targetURLString = Self.normalizedMirrorBaseURL(mirror.url)
+                + "\(Self.alpineRepositoryBranch(from: bundledRootFSVersion))/main/APKINDEX.tar.gz"
+        case .pip:
+            targetURLString = mirror.url
+        case .npm:
+            targetURLString = mirror.url
+        }
+        guard let url = URL(string: targetURLString) else { return nil }
+        var request = URLRequest(url: url, timeoutInterval: 4)
+        request.httpMethod = "HEAD"
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        let startedAt = Date()
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<400).contains(http.statusCode) else {
+                return nil
+            }
+            return Date().timeIntervalSince(startedAt)
+        } catch {
+            return nil
+        }
+    }
+
     nonisolated func interruptRunningCommand() -> Bool {
         LocalAlpineNativeRuntime.shared.interrupt()
     }
@@ -685,6 +844,7 @@ actor LocalAlpineTerminalService {
             runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
             try ensureResolverConfiguration(in: runtimeRootFSURL)
             try ensureOpenBridgeConfiguration(in: runtimeRootFSURL)
+            try ensureMirrorConfiguration(in: runtimeRootFSURL)
         } catch {
             return LocalAlpineSessionStartResult(
                 sessionID: nil,
@@ -1111,6 +1271,7 @@ actor LocalAlpineTerminalService {
             runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
             try ensureResolverConfiguration(in: runtimeRootFSURL)
             try ensureOpenBridgeConfiguration(in: runtimeRootFSURL)
+            try ensureMirrorConfiguration(in: runtimeRootFSURL)
         } catch {
             return LocalAlpineCommandResult(
                 command: trimmed,
@@ -1446,6 +1607,7 @@ actor LocalAlpineTerminalService {
             runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
             try ensureResolverConfiguration(in: runtimeRootFSURL)
             try ensureOpenBridgeConfiguration(in: runtimeRootFSURL)
+            try ensureMirrorConfiguration(in: runtimeRootFSURL)
         } catch {
             return LocalAlpineCommandResult(
                 command: trimmed,
@@ -1591,6 +1753,25 @@ actor LocalAlpineTerminalService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func directorySize(at url: URL) -> Int64 {
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return 0
+        }
+        var total: Int64 = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                  values.isRegularFile == true else {
+                continue
+            }
+            total += Int64(values.fileSize ?? 0)
+        }
+        return total
+    }
+
     private func ensureResolverConfiguration(in runtimeRootFSURL: URL) throws {
         guard runtimeRootFSURL.pathExtension == "fakefs" else { return }
 
@@ -1611,6 +1792,96 @@ actor LocalAlpineTerminalService {
 
         try fileManager.createDirectory(at: etcURL, withIntermediateDirectories: true)
         try resolver.write(to: resolvURL, atomically: true, encoding: .utf8)
+    }
+
+    private func ensureMirrorConfiguration(
+        in runtimeRootFSURL: URL,
+        settings: LocalAlpineMirrorSettings = LocalAlpineMirrorStore.load()
+    ) throws {
+        guard runtimeRootFSURL.pathExtension == "fakefs" else { return }
+
+        let dataURL = runtimeRootFSURL.appendingPathComponent("data", isDirectory: true)
+        let apkMirror = LocalAlpineMirrorStore.selectedAPKMirror(settings: settings)
+        let pipMirror = LocalAlpineMirrorStore.selectedPipMirror(settings: settings)
+        let npmMirror = LocalAlpineMirrorStore.selectedNpmMirror(settings: settings)
+        let branch = Self.alpineRepositoryBranch(from: bundledRootFSVersion)
+        let apkBase = Self.normalizedMirrorBaseURL(apkMirror.url)
+        let repositories = """
+        \(apkBase)\(branch)/main
+        \(apkBase)\(branch)/community
+
+        """
+
+        let apkURL = dataURL
+            .appendingPathComponent("etc", isDirectory: true)
+            .appendingPathComponent("apk", isDirectory: true)
+        try fileManager.createDirectory(at: apkURL, withIntermediateDirectories: true)
+        try repositories.write(
+            to: apkURL.appendingPathComponent("repositories"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let pipConfig = """
+        [global]
+        index-url = \(pipMirror.url)
+        timeout = 15
+        retries = 2
+
+        """
+        let rootPipURL = dataURL
+            .appendingPathComponent("root", isDirectory: true)
+            .appendingPathComponent(".config", isDirectory: true)
+            .appendingPathComponent("pip", isDirectory: true)
+        try fileManager.createDirectory(at: rootPipURL, withIntermediateDirectories: true)
+        try pipConfig.write(
+            to: rootPipURL.appendingPathComponent("pip.conf"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let etcURL = dataURL.appendingPathComponent("etc", isDirectory: true)
+        try fileManager.createDirectory(at: etcURL, withIntermediateDirectories: true)
+        try pipConfig.write(
+            to: etcURL.appendingPathComponent("pip.conf"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let npmConfig = """
+        registry=\(npmMirror.url)
+        fetch-timeout=15000
+        fetch-retries=2
+
+        """
+        try npmConfig.write(
+            to: etcURL.appendingPathComponent("npmrc"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let rootURL = dataURL.appendingPathComponent("root", isDirectory: true)
+        try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+        try npmConfig.write(
+            to: rootURL.appendingPathComponent(".npmrc"),
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    private static func normalizedMirrorBaseURL(_ rawURL: String) -> String {
+        let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasSuffix("/") ? trimmed : "\(trimmed)/"
+    }
+
+    private static func alpineRepositoryBranch(from version: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: #"(\d+)\.(\d+)"#),
+              let match = regex.firstMatch(in: version, range: NSRange(version.startIndex..., in: version)),
+              match.numberOfRanges >= 3,
+              let majorRange = Range(match.range(at: 1), in: version),
+              let minorRange = Range(match.range(at: 2), in: version) else {
+            return "v3.19"
+        }
+        return "v\(version[majorRange]).\(version[minorRange])"
     }
 
     private func ensureOpenBridgeConfiguration(in runtimeRootFSURL: URL) throws {

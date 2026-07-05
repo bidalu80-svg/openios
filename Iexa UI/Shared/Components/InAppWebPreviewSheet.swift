@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import UIKit
 import AVKit
 import AVFoundation
 
@@ -36,6 +37,7 @@ struct InAppWebPreviewSheet: View {
     @State private var downloadedMedia: WebPreviewDownloadedMedia?
     @State private var resolvedDouyinSourceID = ""
     @State private var resolvedXiaohongshuSourceID = ""
+    @State private var automationControlState: AutomationBrowserControlState = .browsing
     @FocusState private var addressFocused: Bool
 
     var body: some View {
@@ -53,6 +55,14 @@ struct InAppWebPreviewSheet: View {
                         .progressViewStyle(.linear)
                         .tint(theme.brandPrimary)
                         .frame(maxWidth: .infinity)
+                }
+
+                if usesAutomationBrowser {
+                    automationControlPill
+                        .padding(.top, 10)
+                        .padding(.horizontal, 16)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .zIndex(2)
                 }
 
                 if shouldShowDouyinControls {
@@ -120,12 +130,14 @@ struct InAppWebPreviewSheet: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .browserWebSearchServiceHumanVerificationStateDidChange)) { notification in
-            guard dismissWhenHumanVerificationCompletes,
-                  usesAutomationBrowser,
-                  (notification.userInfo?["completed"] as? Bool) == true else {
+            guard usesAutomationBrowser else {
                 return
             }
-            dismiss()
+            updateAutomationControlState(from: notification)
+            if dismissWhenHumanVerificationCompletes,
+               (notification.userInfo?["completed"] as? Bool) == true {
+                dismiss()
+            }
         }
         .sheet(item: $playingVideo) { item in
             WebPreviewVideoPlayerSheet(url: item.url, refererURL: activeURL)
@@ -195,6 +207,72 @@ struct InAppWebPreviewSheet: View {
             Rectangle()
                 .fill(theme.divider.opacity(0.7))
                 .frame(height: 0.5)
+        }
+    }
+
+    private var automationControlPill: some View {
+        HStack(spacing: 9) {
+            Image(systemName: automationControlState.systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(automationControlState.tint)
+
+            Text(automationControlState.title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+
+            Button {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                    automationControlState = .userControlling
+                }
+                BrowserWebSearchService.shared.recordAutomationBrowserUserInteraction(kind: "takeover")
+            } label: {
+                Text(automationControlState.buttonTitle)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(theme.brandPrimary))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 6)
+        .padding(.vertical, 6)
+        .background(
+            Capsule()
+                .fill(Color(.systemBackground).opacity(0.94))
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(theme.cardBorder.opacity(0.65), lineWidth: 0.75)
+        )
+        .shadow(color: .black.opacity(theme.isDark ? 0.24 : 0.14), radius: 12, y: 4)
+    }
+
+    private func updateAutomationControlState(from notification: Notification) {
+        let info = notification.userInfo ?? [:]
+        let detected = (info["detected"] as? Bool) == true
+        let completed = (info["completed"] as? Bool) == true
+        let failed = (info["failed_state"] as? Bool) == true
+        let interactionKind = (info["user_interaction_kind"] as? String) ?? ""
+        let hasRecentUserInteraction = !interactionKind.isEmpty || info["user_interaction_at"] != nil
+
+        let nextState: AutomationBrowserControlState
+        if completed {
+            nextState = .checking
+        } else if hasRecentUserInteraction {
+            nextState = .userControlling
+        } else if detected || failed {
+            nextState = .needsUser
+        } else {
+            nextState = .browsing
+        }
+
+        guard automationControlState != nextState else { return }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+            automationControlState = nextState
         }
     }
 
@@ -675,6 +753,61 @@ final class InAppWebPreviewState {
     weak var webView: WKWebView?
 }
 
+private enum AutomationBrowserControlState: Equatable {
+    case browsing
+    case needsUser
+    case userControlling
+    case checking
+
+    var title: String {
+        switch self {
+        case .browsing:
+            return "Iexa 正在浏览"
+        case .needsUser:
+            return "需要你接管验证"
+        case .userControlling:
+            return "你已接管，完成后我会继续检查"
+        case .checking:
+            return "正在检查网页状态"
+        }
+    }
+
+    var buttonTitle: String {
+        switch self {
+        case .userControlling:
+            return "已接管"
+        default:
+            return "接管"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .browsing:
+            return "sparkle.magnifyingglass"
+        case .needsUser:
+            return "person.crop.circle.badge.exclamationmark"
+        case .userControlling:
+            return "hand.tap.fill"
+        case .checking:
+            return "arrow.triangle.2.circlepath"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .browsing:
+            return .blue
+        case .needsUser:
+            return .orange
+        case .userControlling:
+            return .green
+        case .checking:
+            return .purple
+        }
+    }
+}
+
 private struct WebPreviewVideoItem: Identifiable {
     let url: URL
     var id: String { url.absoluteString }
@@ -751,6 +884,7 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
             context.coordinator.usesAutomationBrowser = true
             state.webView = webView
             context.coordinator.addProgressObserver(to: webView)
+            context.coordinator.installAutomationBrowserInteractionTracking(on: container)
             context.coordinator.syncState(from: webView)
             return container
         }
@@ -800,7 +934,7 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
         coordinator.removeProgressObserver()
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, UIGestureRecognizerDelegate {
         let state: InAppWebPreviewState
         weak var webView: WKWebView?
         weak var observedWebView: WKWebView?
@@ -837,6 +971,49 @@ private struct InAppWebPreviewRepresentable: UIViewRepresentable {
             guard let observedWebView else { return }
             observedWebView.removeObserver(self, forKeyPath: #keyPath(WKWebView.estimatedProgress))
             self.observedWebView = nil
+        }
+
+        func installAutomationBrowserInteractionTracking(on container: UIView) {
+            let tap = UITapGestureRecognizer(target: self, action: #selector(handleAutomationBrowserTap(_:)))
+            tap.cancelsTouchesInView = false
+            tap.delaysTouchesBegan = false
+            tap.delaysTouchesEnded = false
+            tap.delegate = self
+            container.addGestureRecognizer(tap)
+
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(handleAutomationBrowserPan(_:)))
+            pan.cancelsTouchesInView = false
+            pan.delaysTouchesBegan = false
+            pan.delaysTouchesEnded = false
+            pan.delegate = self
+            container.addGestureRecognizer(pan)
+
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleAutomationBrowserLongPress(_:)))
+            longPress.cancelsTouchesInView = false
+            longPress.delaysTouchesBegan = false
+            longPress.delaysTouchesEnded = false
+            longPress.minimumPressDuration = 0.35
+            longPress.delegate = self
+            container.addGestureRecognizer(longPress)
+        }
+
+        @objc private func handleAutomationBrowserTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended else { return }
+            BrowserWebSearchService.shared.recordAutomationBrowserUserInteraction(kind: "tap")
+        }
+
+        @objc private func handleAutomationBrowserPan(_ recognizer: UIPanGestureRecognizer) {
+            guard recognizer.state == .began || recognizer.state == .ended else { return }
+            BrowserWebSearchService.shared.recordAutomationBrowserUserInteraction(kind: "pan")
+        }
+
+        @objc private func handleAutomationBrowserLongPress(_ recognizer: UILongPressGestureRecognizer) {
+            guard recognizer.state == .began || recognizer.state == .ended else { return }
+            BrowserWebSearchService.shared.recordAutomationBrowserUserInteraction(kind: "long_press")
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
         }
 
         func syncState(from webView: WKWebView?) {

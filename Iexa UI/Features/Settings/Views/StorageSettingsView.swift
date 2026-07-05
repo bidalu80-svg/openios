@@ -238,6 +238,25 @@ struct StorageSettingsView: View {
                 }
             }
 
+            NavigationLink {
+                LocalAlpineRootFSManagementView()
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Rootfs 管理")
+                            .scaledFont(size: 15, weight: .medium)
+                            .foregroundStyle(theme.textPrimary)
+                        Text("查看 Local Alpine 状态，配置 APK 与 Python pip 镜像")
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                } icon: {
+                    Image(systemName: "shippingbox.fill")
+                        .scaledFont(size: 20)
+                        .foregroundStyle(.blue)
+                }
+            }
+
             // Delete Hub cache (only show if hub cache exists)
             if hasHubCache {
                 Button {
@@ -619,6 +638,441 @@ struct StorageSettingsView: View {
         case "sqlite", "db":                              return .teal
         default:                                          return .secondary
         }
+    }
+}
+
+private struct LocalAlpineRootFSManagementView: View {
+    @Environment(\.theme) private var theme
+
+    @State private var settings = LocalAlpineMirrorStore.load()
+    @State private var status: LocalAlpineRootFSManagementStatus?
+    @State private var isLoading = true
+    @State private var isApplying = false
+    @State private var feedback: String?
+
+    var body: some View {
+        List {
+            statusSection
+            mirrorSection
+        }
+        .navigationTitle("Rootfs 管理")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if isLoading || isApplying {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button {
+                        Task { await loadStatus() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+            }
+        }
+        .task { await loadStatus() }
+        .overlay(alignment: .bottom) {
+            if let feedback {
+                Text(feedback)
+                    .scaledFont(size: 13, weight: .semibold)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(Color.black.opacity(0.82), in: Capsule(style: .continuous))
+                    .padding(.bottom, 14)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+    }
+
+    private var statusSection: some View {
+        Section("状态") {
+            statusRow(
+                title: "已安装",
+                value: status?.isRuntimeRootFSInstalled == true ? "是" : "尚未初始化",
+                icon: "checkmark.circle.fill",
+                color: status?.isRuntimeRootFSInstalled == true ? .green : .orange
+            )
+            statusRow(
+                title: "大小",
+                value: ByteCountFormatter.string(
+                    fromByteCount: status?.rootFSSizeBytes ?? 0,
+                    countStyle: .file
+                ),
+                icon: "internaldrive.fill",
+                color: .blue
+            )
+            statusRow(
+                title: "路径",
+                value: status?.rootFSDisplayPath ?? "Documents/Iexa Alpine/rootfs.fakefs",
+                icon: "folder.fill",
+                color: .gray
+            )
+            statusRow(
+                title: "运行时",
+                value: status?.isRuntimeLinked == true ? "已链接 iSH" : "未链接",
+                icon: "terminal.fill",
+                color: status?.isRuntimeLinked == true ? .green : .orange
+            )
+        }
+    }
+
+    private var mirrorSection: some View {
+        Section("镜像") {
+            Button {
+                Task { await detectFastMirrors() }
+            } label: {
+                Label {
+                    Text("检测快速镜像")
+                        .scaledFont(size: 15, weight: .semibold)
+                        .foregroundStyle(theme.brandPrimary)
+                } icon: {
+                    Image(systemName: "bolt.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+            .disabled(isApplying)
+
+            NavigationLink {
+                LocalAlpineMirrorPickerView(
+                    title: "Alpine APK",
+                    kind: .apk,
+                    options: LocalAlpineMirrorStore.apkMirrors,
+                    settings: settings,
+                    onSettingsChanged: applySettings
+                )
+            } label: {
+                mirrorRow(
+                    icon: "mountain.2.fill",
+                    iconColor: .blue,
+                    title: "Alpine APK",
+                    subtitle: LocalAlpineMirrorStore.selectedAPKMirror(settings: settings).name
+                )
+            }
+
+            NavigationLink {
+                LocalAlpineMirrorPickerView(
+                    title: "Python pip",
+                    kind: .pip,
+                    options: LocalAlpineMirrorStore.pipMirrors,
+                    settings: settings,
+                    onSettingsChanged: applySettings
+                )
+            } label: {
+                mirrorRow(
+                    icon: "cube.box.fill",
+                    iconColor: .green,
+                    title: "Python pip",
+                    subtitle: LocalAlpineMirrorStore.selectedPipMirror(settings: settings).name
+                )
+            }
+
+            NavigationLink {
+                LocalAlpineMirrorPickerView(
+                    title: "Node.js npm",
+                    kind: .npm,
+                    options: LocalAlpineMirrorStore.npmMirrors,
+                    settings: settings,
+                    onSettingsChanged: applySettings
+                )
+            } label: {
+                mirrorRow(
+                    icon: "cube.transparent.fill",
+                    iconColor: .red,
+                    title: "Node.js npm",
+                    subtitle: LocalAlpineMirrorStore.selectedNpmMirror(settings: settings).name
+                )
+            }
+        } footer: {
+            Text("镜像会写入当前 Local Alpine rootfs：APK 使用 /etc/apk/repositories，pip 使用 pip.conf，npm 使用 npmrc。")
+        }
+    }
+
+    private func statusRow(title: String, value: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .scaledFont(size: 16, weight: .semibold)
+                .foregroundStyle(color)
+                .frame(width: 28, height: 28)
+                .background(color.opacity(0.12), in: Circle())
+            Text(title)
+                .scaledFont(size: 15, weight: .semibold)
+                .foregroundStyle(theme.textPrimary)
+            Spacer(minLength: 12)
+            Text(value)
+                .scaledFont(size: 13, weight: .medium)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    private func mirrorRow(icon: String, iconColor: Color, title: String, subtitle: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .scaledFont(size: 16, weight: .semibold)
+                .foregroundStyle(iconColor)
+                .frame(width: 28, height: 28)
+                .background(iconColor.opacity(0.12), in: Circle())
+            Text(title)
+                .scaledFont(size: 15, weight: .semibold)
+                .foregroundStyle(theme.textPrimary)
+            Spacer()
+            Text(subtitle)
+                .scaledFont(size: 13, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+                .lineLimit(1)
+        }
+    }
+
+    @MainActor
+    private func loadStatus() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            status = try await LocalAlpineTerminalService.shared.rootFSManagementStatus()
+        } catch {
+            showFeedback("Rootfs 状态读取失败：\(error.localizedDescription)")
+        }
+    }
+
+    @MainActor
+    private func applySettings(_ next: LocalAlpineMirrorSettings) {
+        settings = next
+        isApplying = true
+        Task {
+            do {
+                try await LocalAlpineTerminalService.shared.applyMirrorSettings(next)
+                await MainActor.run {
+                    showFeedback("镜像配置已应用")
+                    isApplying = false
+                }
+                await loadStatus()
+            } catch {
+                await MainActor.run {
+                    showFeedback("镜像配置失败：\(error.localizedDescription)")
+                    isApplying = false
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func detectFastMirrors() async {
+        isApplying = true
+        let fastestAPK = await fastestMirror(
+            options: LocalAlpineMirrorStore.apkMirrors.filter { !$0.isOfficial },
+            kind: .apk
+        )
+        let fastestPip = await fastestMirror(
+            options: LocalAlpineMirrorStore.pipMirrors.filter { !$0.isOfficial },
+            kind: .pip
+        )
+        let fastestNpm = await fastestMirror(
+            options: LocalAlpineMirrorStore.npmMirrors.filter { !$0.isOfficial },
+            kind: .npm
+        )
+
+        var next = settings
+        if let apk = fastestAPK {
+            next.apkMirrorsEnabled = true
+            next.selectedAPKMirrorID = apk.id
+        }
+        if let pip = fastestPip {
+            next.pipMirrorsEnabled = true
+            next.selectedPipMirrorID = pip.id
+        }
+        if let npm = fastestNpm {
+            next.npmMirrorsEnabled = true
+            next.selectedNpmMirrorID = npm.id
+        }
+        applySettings(next)
+    }
+
+    private func fastestMirror(
+        options: [LocalAlpineMirrorOption],
+        kind: LocalAlpineMirrorKind
+    ) async -> LocalAlpineMirrorOption? {
+        var best: (option: LocalAlpineMirrorOption, elapsed: TimeInterval)?
+        for option in options {
+            guard let elapsed = await LocalAlpineTerminalService.shared.testMirror(option, kind: kind) else {
+                continue
+            }
+            if best == nil || elapsed < best!.elapsed {
+                best = (option, elapsed)
+            }
+        }
+        return best?.option
+    }
+
+    @MainActor
+    private func showFeedback(_ text: String) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            feedback = text
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: 1_700_000_000)
+            await MainActor.run {
+                withAnimation(.easeIn(duration: 0.18)) {
+                    if feedback == text {
+                        feedback = nil
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct LocalAlpineMirrorPickerView: View {
+    let title: String
+    let kind: LocalAlpineMirrorKind
+    let options: [LocalAlpineMirrorOption]
+    let settings: LocalAlpineMirrorSettings
+    let onSettingsChanged: @MainActor (LocalAlpineMirrorSettings) -> Void
+
+    @Environment(\.theme) private var theme
+    @State private var speedResults: [String: TimeInterval] = [:]
+    @State private var isTesting = false
+
+    private var mirrorsEnabled: Bool {
+        switch kind {
+        case .apk:
+            return settings.apkMirrorsEnabled
+        case .pip:
+            return settings.pipMirrorsEnabled
+        case .npm:
+            return settings.npmMirrorsEnabled
+        }
+    }
+
+    private var selectedID: String {
+        switch kind {
+        case .apk:
+            return settings.apkMirrorsEnabled ? settings.selectedAPKMirrorID : "official"
+        case .pip:
+            return settings.pipMirrorsEnabled ? settings.selectedPipMirrorID : "official"
+        case .npm:
+            return settings.npmMirrorsEnabled ? settings.selectedNpmMirrorID : "official"
+        }
+    }
+
+    private var selectedOption: LocalAlpineMirrorOption {
+        options.first(where: { $0.id == selectedID }) ?? options[0]
+    }
+
+    var body: some View {
+        List {
+            Section("当前") {
+                Toggle("使用镜像", isOn: Binding(
+                    get: { mirrorsEnabled },
+                    set: { enabled in
+                        var next = settings
+                        switch kind {
+                        case .apk:
+                            next.apkMirrorsEnabled = enabled
+                        case .pip:
+                            next.pipMirrorsEnabled = enabled
+                        case .npm:
+                            next.npmMirrorsEnabled = enabled
+                        }
+                        onSettingsChanged(next)
+                    }
+                ))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(selectedOption.name)
+                        .scaledFont(size: 17, weight: .bold)
+                    Text(selectedOption.url)
+                        .scaledFont(size: 13, weight: .medium)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(2)
+                }
+                .padding(.vertical, 4)
+            }
+
+            Section("镜像") {
+                ForEach(options) { option in
+                    Button {
+                        var next = settings
+                        switch kind {
+                        case .apk:
+                            next.apkMirrorsEnabled = !option.isOfficial
+                            next.selectedAPKMirrorID = option.id
+                        case .pip:
+                            next.pipMirrorsEnabled = !option.isOfficial
+                            next.selectedPipMirrorID = option.id
+                        case .npm:
+                            next.npmMirrorsEnabled = !option.isOfficial
+                            next.selectedNpmMirrorID = option.id
+                        }
+                        onSettingsChanged(next)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: selectedID == option.id ? "checkmark.circle.fill" : "circle")
+                                .scaledFont(size: 20, weight: .semibold)
+                                .foregroundStyle(selectedID == option.id ? theme.brandPrimary : theme.textTertiary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(option.name)
+                                        .scaledFont(size: 16, weight: .bold)
+                                        .foregroundStyle(theme.textPrimary)
+                                    if option.isOfficial {
+                                        Text("官方")
+                                            .scaledFont(size: 11, weight: .bold)
+                                            .foregroundStyle(theme.textTertiary)
+                                    }
+                                    Text(option.region)
+                                        .scaledFont(size: 12, weight: .medium)
+                                        .foregroundStyle(theme.textTertiary)
+                                }
+                                Text(option.url)
+                                    .scaledFont(size: 12, weight: .medium)
+                                    .foregroundStyle(theme.textSecondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            Spacer()
+                            if let elapsed = speedResults[option.id] {
+                                Text(String(format: "%.0f ms", elapsed * 1_000))
+                                    .scaledFont(size: 12, weight: .semibold)
+                                    .foregroundStyle(theme.textTertiary)
+                                    .monospacedDigit()
+                            }
+                        }
+                        .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task { await testSpeeds() }
+                } label: {
+                    if isTesting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "bolt.fill")
+                    }
+                }
+                .disabled(isTesting)
+            }
+        }
+    }
+
+    @MainActor
+    private func testSpeeds() async {
+        isTesting = true
+        defer { isTesting = false }
+        var results: [String: TimeInterval] = [:]
+        for option in options {
+            if let elapsed = await LocalAlpineTerminalService.shared.testMirror(option, kind: kind) {
+                results[option.id] = elapsed
+            }
+        }
+        speedResults = results
     }
 }
 
