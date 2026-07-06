@@ -260,7 +260,9 @@ final class StreamingContentStore {
         if let idx = streamingStatusHistory.firstIndex(
             where: { $0.action == status.action && $0.done != true }
         ) {
-            streamingStatusHistory[idx] = status
+            var replacement = status
+            replacement.occurredAt = streamingStatusHistory[idx].occurredAt ?? replacement.occurredAt
+            streamingStatusHistory[idx] = replacement
         } else {
             let isDuplicate = streamingStatusHistory.contains(where: {
                 $0.action == status.action && $0.done == true && status.done == true

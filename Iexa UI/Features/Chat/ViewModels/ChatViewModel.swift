@@ -568,7 +568,7 @@ final class ChatViewModel {
     @ObservationIgnored private var localAlpinePendingToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
     @ObservationIgnored private var localAlpineToolEventFlushTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var localAlpineLastToolEventFlushAtByMessageId: [String: Date] = [:]
-    private let localAlpineAgentMaxSteps = 36
+    private let localAlpineAgentMaxSteps = 120
     private let localAlpineNoProgressRepeatLimit = 4
     private let localAlpineToolEventFlushInterval: TimeInterval = 0.45
     private let localAlpineLiveToolPreviewLimit = 260
@@ -6957,8 +6957,14 @@ final class ChatViewModel {
             && Self.looksLikeDirectImageGenerationRequest(modelPromptText)
             ? userMessage.id
             : nil
+        let shouldPrioritizeImageRoute = shouldPrioritizeImageGenerationRoute(
+            modelId: modelId,
+            text: modelPromptText
+        )
         let useLocalAlpineNativeToolsForThisTurn =
-            localAlpineModeForThisTurn && shouldUseLocalAlpineNativeTools(for: modelId)
+            localAlpineModeForThisTurn
+            && !shouldPrioritizeImageRoute
+            && shouldUseLocalAlpineNativeTools(for: modelId)
         let apiMessages = await buildAPIMessagesAsync(
             imageCanvasInstructionMessageId: imageCanvasInstructionMessageId,
             preferLocalAlpineNativeTools: useLocalAlpineNativeToolsForThisTurn
@@ -7637,6 +7643,32 @@ final class ChatViewModel {
             return true
         }
         return shouldUseDirectVideoGeneration(modelId: modelId)
+    }
+
+    private func shouldPrioritizeImageGenerationRoute(modelId: String?, text: String?) -> Bool {
+        let effectiveModelId = (modelId ?? selectedModelId ?? conversation?.model ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedText = (text ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        if !normalizedText.isEmpty, Self.hasStrongLocalAlpineIntent(normalizedText) {
+            return false
+        }
+
+        if !effectiveModelId.isEmpty,
+           shouldUseDirectImageGeneration(modelId: effectiveModelId)
+            || shouldPreferChatNativeImageGeneration(modelId: effectiveModelId) {
+            return true
+        }
+
+        guard imageGenerationEnabled,
+              canUseDirectImageEndpointProvider,
+              !normalizedText.isEmpty,
+              Self.looksLikeDirectImageGenerationRequest(normalizedText) else {
+            return false
+        }
+        return true
     }
 
     private enum LocalAlpineUserIntent: Equatable {
@@ -12575,6 +12607,7 @@ final class ChatViewModel {
             canvasSize: requestedCanvasSize,
             endpointSize: requestedImageSize
         )
+        let editImages = editableImagesFromLatestUserMessage()
         let prompts = Self.imageVariantPrompts(
             basePrompt: promptForAPI,
             requestedCount: requestedCount
@@ -12609,7 +12642,7 @@ final class ChatViewModel {
                 modelId: selectedModelId ?? conversation?.model ?? call.name,
                 requestedImageSize: requestedImageSize,
                 requestedCanvasSize: requestedCanvasSize,
-                editImages: [],
+                editImages: editImages,
                 manager: manager,
                 originalPromptWasEmpty: false,
                 preferServerDefaultModel: true
@@ -16330,11 +16363,25 @@ final class ChatViewModel {
         let filterIds = selectedModel?.filterIds ?? []
         if !filterIds.isEmpty { request.filterIds = filterIds }
 
-        // Always send the full features object with explicit true/false values
-        request.features = buildChatFeatures()
-
         // Await any pending model config fetch (ensures functionCallingMode is populated)
         await modelConfigTask?.value
+        let latestUserTextForLocalNativeTools = latestUserTextForLocalNativeToolDecision()
+        let shouldPrioritizeImageRoute = shouldPrioritizeImageGenerationRoute(
+            modelId: request.model,
+            text: latestUserTextForLocalNativeTools
+        )
+
+        // Always send the full features object with explicit true/false values
+        var features = buildChatFeatures()
+        if shouldPrioritizeImageRoute {
+            features.imageGeneration = imageGenerationEnabled
+            features.codeInterpreter = false
+            features.webSearch = false
+            request.toolIds = []
+            request.toolServers = []
+            request.terminalId = nil
+        }
+        request.features = features
 
         // Build request params: chat-level overrides + system prompt + function_calling
         var params: [String: Any] = [:]
@@ -16349,7 +16396,9 @@ final class ChatViewModel {
         if let sp = effectiveSP, !sp.trimmingCharacters(in: .whitespaces).isEmpty {
             params["system"] = sp
         }
-        let localAlpineClientSideTask = terminalEnabled && selectedTerminalIsLocalAlpine
+        let localAlpineClientSideTask = terminalEnabled
+            && selectedTerminalIsLocalAlpine
+            && !shouldPrioritizeImageRoute
 
         if localAlpineClientSideTask {
             params.removeValue(forKey: "function_calling")
@@ -16382,18 +16431,22 @@ final class ChatViewModel {
         let nativeToolsDisabled = request.toolChoice?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() == "none"
-        let latestUserTextForLocalNativeTools = latestUserTextForLocalNativeToolDecision()
-        let shouldExposeImageTools = shouldExposeLocalImageNativeTools(for: latestUserTextForLocalNativeTools)
-        let shouldExposeBrowserTools = shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalNativeTools)
-        let shouldExposeMemoryTools = shouldExposeLocalMemoryNativeTools(for: latestUserTextForLocalNativeTools)
+        let shouldExposeImageTools = shouldPrioritizeImageRoute
+            && shouldExposeLocalImageNativeTools(for: latestUserTextForLocalNativeTools)
+        let shouldExposeBrowserTools = !shouldPrioritizeImageRoute
+            && shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalNativeTools)
+        let shouldExposeMemoryTools = !shouldPrioritizeImageRoute
+            && shouldExposeLocalMemoryNativeTools(for: latestUserTextForLocalNativeTools)
         let localOfficeContextForNativeTools = localOfficeEnabled
+            && !shouldPrioritizeImageRoute
             ? latestUserTextForLocalNativeTools.flatMap { localOfficeNativeSystemContext(for: $0) }
             : nil
-        let shouldExposeOfficeTools = shouldExposeLocalOfficeNativeTools(
-            for: latestUserTextForLocalNativeTools,
-            officeRevisionContext: localOfficeContextForNativeTools
-        )
-        let shouldExposeShortcutsTools = shortcutsEnabled
+        let shouldExposeOfficeTools = !shouldPrioritizeImageRoute
+            && shouldExposeLocalOfficeNativeTools(
+                for: latestUserTextForLocalNativeTools,
+                officeRevisionContext: localOfficeContextForNativeTools
+            )
+        let shouldExposeShortcutsTools = shortcutsEnabled && !shouldPrioritizeImageRoute
         let shouldExposeLocalNativeTools = shouldExposeImageTools
             || shouldExposeBrowserTools
             || shouldExposeMemoryTools
@@ -16575,13 +16628,28 @@ final class ChatViewModel {
         guard request.tools?.isEmpty != false else { return }
 
         var tools: [[String: Any]] = []
+        let latestUserText = Self.lastUserText(in: request.messages)
+        let shouldPrioritizeImageRoute = shouldPrioritizeImageGenerationRoute(
+            modelId: request.model,
+            text: latestUserText
+        )
 
         // Web search is handled by the local WKWebView browser pipeline so the
         // app can show clickable source cards and thumbnails consistently.
 
         if shouldEnableOpenAIResponsesImageGenerationTool(modelId: request.model),
-           Self.looksLikeDirectImageGenerationRequest(Self.lastUserText(in: request.messages)) {
+           Self.looksLikeDirectImageGenerationRequest(latestUserText) {
             tools.append(["type": "image_generation"])
+        }
+
+        if shouldPrioritizeImageRoute {
+            guard !tools.isEmpty else { return }
+            request.responsesTools = tools
+            if request.responsesToolChoice == nil {
+                request.responsesToolChoice = "auto"
+            }
+            request.parallelToolCalls = false
+            return
         }
 
         if codeInterpreterEnabled {
@@ -16596,7 +16664,7 @@ final class ChatViewModel {
         if request.responsesToolChoice == nil {
             request.responsesToolChoice = "auto"
         }
-        request.parallelToolCalls = true
+        request.parallelToolCalls = tools.count > 1
     }
 
     private func shouldEnableOpenAIResponsesImageGenerationTool(modelId: String) -> Bool {
@@ -16817,6 +16885,31 @@ final class ChatViewModel {
                 let prepared = FileAttachmentService.prepareImageForUpload(data: data, originalName: attachment.name)
                 images.append(ImageEditSource(data: prepared.data, fileName: prepared.fileName))
             }
+            if images.count >= limit {
+                break
+            }
+        }
+        return images
+    }
+
+    private func editableImagesFromLatestUserMessage(limit: Int = 16) -> [ImageEditSource] {
+        guard let message = conversation?.messages.last(where: { $0.role == .user }) else {
+            return []
+        }
+
+        var images: [ImageEditSource] = []
+        for file in message.files where Self.isImageFile(file) {
+            let candidates = [file.displayURL, file.url]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            guard let data = candidates.lazy.compactMap({ Self.imageData(fromImageReference: $0) }).first else {
+                continue
+            }
+            let prepared = FileAttachmentService.prepareImageForUpload(
+                data: data,
+                originalName: file.name ?? "image.png"
+            )
+            images.append(ImageEditSource(data: prepared.data, fileName: prepared.fileName))
             if images.count >= limit {
                 break
             }
@@ -20037,6 +20130,10 @@ final class ChatViewModel {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
         })?.content
         let localAlpineModelId = selectedModelId ?? conversation.model ?? ""
+        let shouldPrioritizeImageRoute = shouldPrioritizeImageGenerationRoute(
+            modelId: localAlpineModelId,
+            text: latestUserTextForLocalAlpine
+        )
         let localAlpineTerminalApplies = terminalEnabled && selectedTerminalIsLocalAlpine
             && !(latestUserTextForLocalAlpine.map {
                 shouldKeepMediaGenerationRequestOffLocalAlpine($0, modelId: localAlpineModelId)
@@ -20073,19 +20170,24 @@ final class ChatViewModel {
         let localSkillsContext = LocalSkillsService.shared.contextPrompt()
         let localNativeToolContext: String? = {
             guard let latestUserTextForLocalAlpine else { return nil }
-            let officeContext = localOfficeEnabled
+            let officeContext = localOfficeEnabled && !shouldPrioritizeImageRoute
                 ? localOfficeNativeSystemContext(for: latestUserTextForLocalAlpine)
                 : nil
-            let shouldExposeBrowserTools = shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalAlpine)
-            let shouldExposeImageTools = shouldUseLocalNativeFunctionTools(for: localAlpineModelId)
+            let shouldExposeBrowserTools = !shouldPrioritizeImageRoute
+                && shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalAlpine)
+            let shouldExposeImageTools = shouldPrioritizeImageRoute
+                && shouldUseLocalNativeFunctionTools(for: localAlpineModelId)
                 && shouldExposeLocalImageNativeTools(for: latestUserTextForLocalAlpine)
-            let shouldExposeMemoryTools = shouldExposeLocalMemoryNativeTools(for: latestUserTextForLocalAlpine)
-            let shouldExposeOfficeTools = shouldExposeLocalOfficeNativeTools(
-                for: latestUserTextForLocalAlpine,
-                officeRevisionContext: officeContext
-            )
-            let shouldExposeShortcutsTools = shortcutsEnabled
-            let shouldExposeDeviceTools = Self.shouldExposeLocalDeviceNativeTools(latestUserTextForLocalAlpine)
+            let shouldExposeMemoryTools = !shouldPrioritizeImageRoute
+                && shouldExposeLocalMemoryNativeTools(for: latestUserTextForLocalAlpine)
+            let shouldExposeOfficeTools = !shouldPrioritizeImageRoute
+                && shouldExposeLocalOfficeNativeTools(
+                    for: latestUserTextForLocalAlpine,
+                    officeRevisionContext: officeContext
+                )
+            let shouldExposeShortcutsTools = shortcutsEnabled && !shouldPrioritizeImageRoute
+            let shouldExposeDeviceTools = !shouldPrioritizeImageRoute
+                && Self.shouldExposeLocalDeviceNativeTools(latestUserTextForLocalAlpine)
             let shouldExpose = shouldExposeDeviceTools
                 || shouldExposeImageTools
                 || shouldExposeBrowserTools
@@ -20111,7 +20213,8 @@ final class ChatViewModel {
         let modelCapabilityContext = Self.modelCapabilitySystemContext(
             model: selectedModel,
             modelId: selectedModelId ?? conversation.model,
-            appSideImageGenerationAvailable: shouldUseLocalNativeFunctionTools(for: localAlpineModelId)
+            appSideImageGenerationAvailable: shouldPrioritizeImageRoute
+                && shouldUseLocalNativeFunctionTools(for: localAlpineModelId)
                 && shouldExposeLocalImageNativeTools(for: latestUserTextForLocalAlpine)
         )
         let feedbackPreferenceContext = AssistantFeedbackPreferenceStore.systemContext()
@@ -21399,22 +21502,49 @@ final class ChatViewModel {
                 || action == "local_office_agent"
                 || action == "local_native_tool"
         }
-        let incomingAction = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        if !incomingAction.isEmpty, status.done == true {
-            for index in history.indices where
-                localBrowserStatusBelongsToSameStep(history[index], status)
-                && history[index].done != true {
-                history[index].done = true
-            }
+        history = appendingToolStatus(status, to: history)
+        return Array(history.suffix(12))
+    }
+
+    private static func toolStatusHistory(
+        replacingWith statuses: [ChatStatusUpdate],
+        preservingStartsFrom existing: [ChatStatusUpdate]
+    ) -> [ChatStatusUpdate] {
+        var merged: [ChatStatusUpdate] = []
+        for status in statuses {
+            merged = appendingToolStatus(status, to: merged, preservingStartsFrom: existing)
+        }
+        return merged
+    }
+
+    private static func appendingToolStatus(
+        _ status: ChatStatusUpdate,
+        to existing: [ChatStatusUpdate],
+        preservingStartsFrom startHistory: [ChatStatusUpdate]? = nil
+    ) -> [ChatStatusUpdate] {
+        var history = existing
+        var incomingStatus = status
+        let referenceHistory = startHistory ?? existing
+
+        if let firstMatch = referenceHistory.first(where: { toolStatusBelongsToSameBlock($0, incomingStatus) }),
+           let startedAt = firstMatch.occurredAt {
+            incomingStatus.occurredAt = startedAt
         }
 
-        if let lastIndex = history.indices.last,
-           localBrowserStatusBelongsToSameStep(history[lastIndex], status) {
-            history[lastIndex] = status
+        if let index = history.lastIndex(where: { toolStatusBelongsToSameBlock($0, incomingStatus) }) {
+            incomingStatus.occurredAt = history[index].occurredAt ?? incomingStatus.occurredAt
+            history[index] = incomingStatus
         } else {
-            history.append(status)
+            history.append(incomingStatus)
         }
-        return Array(history.suffix(12))
+        return history
+    }
+
+    private static func toolStatusBelongsToSameBlock(
+        _ lhs: ChatStatusUpdate,
+        _ rhs: ChatStatusUpdate
+    ) -> Bool {
+        localBrowserStatusBelongsToSameStep(lhs, rhs)
     }
 
     private static func localBrowserStatusBelongsToSameStep(
@@ -21802,10 +21932,15 @@ final class ChatViewModel {
         var metadata = conversation?.messages[index].metadata ?? [:]
         metadata["iexa_local_office_document"] = "true"
         metadata["iexa_local_native_tool_parent"] = "true"
+        let existingStatusHistory = conversation?.messages[index].statusHistory ?? []
+        let mergedStatusHistory = Self.toolStatusHistory(
+            replacingWith: statusHistory,
+            preservingStartsFrom: existingStatusHistory
+        )
 
         conversation?.messages[index].content = content
         conversation?.messages[index].isStreaming = isStreaming
-        conversation?.messages[index].statusHistory = statusHistory
+        conversation?.messages[index].statusHistory = mergedStatusHistory
         conversation?.messages[index].metadata = metadata
         if !files.isEmpty {
             conversation?.messages[index].files = files
@@ -21813,7 +21948,7 @@ final class ChatViewModel {
         conversation?.history.updateNode(id: messageId) { node in
             node.content = content
             node.done = !isStreaming
-            node.statusHistory = statusHistory
+            node.statusHistory = mergedStatusHistory
             node.metadata = metadata
             if !files.isEmpty {
                 node.files = files
@@ -21821,7 +21956,7 @@ final class ChatViewModel {
         }
         if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
             streamingStore.updateContent(content, displayContent: content)
-            streamingStore.setStatusHistory(statusHistory)
+            streamingStore.setStatusHistory(mergedStatusHistory)
         }
         conversation?.history.currentId = messageId
     }
@@ -23749,11 +23884,51 @@ final class ChatViewModel {
            ) {
             return true
         }
+        if let latestUserText,
+           localAlpineResultShouldLetModelDecideNextStep(
+               latestUserText: latestUserText,
+               normalizedResult: normalized,
+               commandResults: commandResults,
+               toolCalls: toolCalls
+           ) {
+            return true
+        }
         if containsSuccessfulLocalAlpineExit(normalized)
             && !containsCriticalLocalAlpineFailureMarker(normalized) {
             return false
         }
         return containsLocalAlpineFailureMarker(normalized)
+    }
+
+    private static func localAlpineResultShouldLetModelDecideNextStep(
+        latestUserText: String,
+        normalizedResult: String,
+        commandResults: [LocalAlpineAgentCommandResult],
+        toolCalls: [LocalAlpineToolCall]
+    ) -> Bool {
+        if normalizedResult.contains("iexa_agent_task_complete")
+            || normalizedResult.contains("iexa_auto_repair_verified_success") {
+            return false
+        }
+        if isLocalAlpineExplanationOnlyRequest(latestUserText)
+            || localAlpineUserRequestIsInspectionOnly(latestUserText) {
+            return false
+        }
+        guard isLocalAlpineGoalActionRequest(latestUserText)
+            || localAlpineUserRequestNeedsNonInspectionFollowUp(latestUserText) else {
+            return false
+        }
+        if localAlpineToolCallsShowCompletedGoal(
+            toolCalls,
+            commandResults: commandResults,
+            latestUserText: latestUserText
+        ) {
+            return false
+        }
+
+        let completedTool = toolCalls.contains { $0.phase == .result && !$0.failed }
+        let completedCommand = commandResults.contains { !$0.failed }
+        return completedTool || completedCommand
     }
 
     private static func localAlpineToolCallsShowCompletedGoal(
@@ -24419,7 +24594,11 @@ final class ChatViewModel {
             streamingStore.updateContent(content, displayContent: renderedDisplayContent)
             if let sources { streamingStore.appendSources(sources) }
             if let statusHistory = effectiveStatusHistory {
-                for s in statusHistory { streamingStore.appendStatus(s) }
+                var mergedStatusHistory = streamingStore.streamingStatusHistory
+                for status in statusHistory {
+                    mergedStatusHistory = Self.appendingToolStatus(status, to: mergedStatusHistory)
+                }
+                streamingStore.setStatusHistory(mergedStatusHistory)
             }
             if let error { streamingStore.setError(error) }
         } else {
@@ -24996,26 +25175,20 @@ final class ChatViewModel {
     private func appendStatusUpdate(id: String, status: ChatStatusUpdate) {
         guard let index = conversation?.messages.firstIndex(where: { $0.id == id }) else { return }
 
-        // Deduplicate: update existing in-progress status with same action
-        if let existingIdx = conversation?.messages[index].statusHistory.firstIndex(
-            where: { $0.action == status.action && $0.done != true }
-        ) {
-            conversation?.messages[index].statusHistory[existingIdx] = status
-        } else {
-            // Don't add duplicate done statuses with the same action
-            let isDuplicate = conversation?.messages[index].statusHistory.contains(where: {
-                $0.action == status.action && $0.done == true && status.done == true
-            }) ?? false
-            if !isDuplicate {
-                conversation?.messages[index].statusHistory.append(status)
-            }
+        let statusHistory = Self.appendingToolStatus(
+            status,
+            to: conversation?.messages[index].statusHistory ?? []
+        )
+        conversation?.messages[index].statusHistory = statusHistory
+        conversation?.history.updateNode(id: id) { node in
+            node.statusHistory = statusHistory
         }
 
         // Also write to the streaming store so the isolated streaming status
         // view sees the update in real-time (it reads from streamingStore,
         // not conversation.messages, during active streaming).
         if streamingStore.streamingMessageId == id && streamingStore.isActive {
-            streamingStore.appendStatus(status)
+            streamingStore.setStatusHistory(statusHistory)
         }
         if let description = status.description {
             Task {

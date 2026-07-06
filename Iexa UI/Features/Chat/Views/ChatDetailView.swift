@@ -131,6 +131,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
             "browser.open", "browser.navigate", "browser.find_elements",
             "browser.click", "browser.type", "browser.hover", "browser.scroll",
             "browser.scroll_and_collect", "browser.get_backbone", "browser.get_page_info",
+            "browser.info", "browser.inspect",
             "browser.observe", "browser.get_state",
             "browser.screenshot", "browser.wait_for_dom_stable", "browser.wait_for_image",
             "browser.execute_js", "browser.fetch", "browser.new_tab", "browser.close_tab",
@@ -658,7 +659,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let concreteSteps = steps.filter { step in
             switch step.kind {
             case .status:
-                return step.hasInspectablePayload && !step.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                return step.isRunning
+                    || step.isInteractiveBrowserStatusStep
+                    || (step.hasInspectablePayload && !step.outputPreview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             case .tool:
                 return true
             case .file, .command:
@@ -747,7 +750,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
             }
             return action.contains("web_search")
                 || action.contains("browser_web_search")
+                || action == "browser_use"
+                || action.hasPrefix("browser.")
                 || action.contains("code_interpreter")
+                || action.contains("image_generation")
                 || action.contains("get_readable")
                 || action.contains("readable")
                 || action.contains("local_native_tool")
@@ -771,6 +777,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let previewURL = statusOpenURL(for: group.statuses, action: action)
             let previewFile = action.contains("local_office_agent") ? officeDocumentFiles.first : nil
             let isRunning = status.done != true
+            let duration = durationText(for: group.statuses, isRunning: isRunning)
             return AgentActivityStep(
                 id: "status-\(group.startIndex)-\(group.key)",
                 kind: .status,
@@ -787,7 +794,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 filePaths: [],
                 command: nil,
                 cwd: nil,
-                durationText: nil,
+                durationText: duration,
                 previewThumbnailReference: previewThumbnail,
                 previewOpenURL: previewURL,
                 previewFile: previewFile
@@ -811,12 +818,14 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let detail = status.description?.trimmingCharacters(in: .whitespacesAndNewlines)
                 ?? status.status?.trimmingCharacters(in: .whitespacesAndNewlines)
                 ?? title
+            let isRunning = status.done != true
+            let duration = durationText(for: group.statuses, isRunning: isRunning)
             return AgentActivityStep(
                 id: "local-status-\(group.startIndex)-\(group.key)",
                 kind: .status,
                 title: title,
                 detail: detail == title ? "" : detail,
-                isRunning: status.done != true,
+                isRunning: isRunning,
                 failed: false,
                 outputPreview: detail,
                 fullOutput: detail,
@@ -827,12 +836,27 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 filePaths: [],
                 command: nil,
                 cwd: nil,
-                durationText: nil,
+                durationText: duration,
                 previewThumbnailReference: nil,
                 previewOpenURL: nil,
                 previewFile: nil
             )
         }
+    }
+
+    private static func durationText(for statuses: [ChatStatusUpdate], isRunning: Bool) -> String? {
+        let timestamps = statuses.compactMap(\.occurredAt)
+        guard let startedAt = timestamps.first else { return nil }
+
+        let endedAt: Date
+        if isRunning {
+            endedAt = Date()
+        } else {
+            guard let last = timestamps.last, last > startedAt else { return nil }
+            endedAt = last
+        }
+
+        return durationText(seconds: endedAt.timeIntervalSince(startedAt))
     }
 
     private static func durationText(for call: LocalAlpineToolCall) -> String? {
@@ -842,6 +866,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return nil
         }
         let seconds = Double(completedAtMs - call.startedAtMs) / 1_000
+        return durationText(seconds: seconds)
+    }
+
+    private static func durationText(seconds: TimeInterval) -> String? {
         guard seconds >= 0.05 else { return nil }
         if seconds < 10 {
             return String(format: "%.1fs", seconds)
@@ -850,7 +878,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return "\(Int(seconds.rounded()))s"
         }
         let total = Int(seconds.rounded())
-        return "\(total / 60)m \(total % 60)s"
+        return "\(total / 60)m \(String(format: "%02d", total % 60))s"
     }
 
     private static func isConcreteLocalStatus(_ status: ChatStatusUpdate, action: String) -> Bool {
@@ -934,10 +962,16 @@ private struct AgentActivityItem: Identifiable, Hashable {
             .lowercased() ?? ""
         for suffix in [
             ".start",
+            ".running",
+            ".in_progress",
+            ".waiting",
             ".waiting_verification",
             ".verification_completed",
             ".reading_results",
-            ".completed"
+            ".success",
+            ".completed",
+            ".failed",
+            ".error"
         ] where key.hasSuffix(suffix) {
             key.removeLast(suffix.count)
             break
@@ -1106,6 +1140,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             }
             return status.query?.isEmpty == false ? "搜索 \(status.query!)" : "搜索网页"
         }
+        if action.contains("image_generation") { return "生成图片" }
         if action.contains("code_interpreter") { return "运行代码" }
         return description.isEmpty ? "运行工具" : description
     }
@@ -1743,6 +1778,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
     static func isActivityMessage(_ message: ChatMessage) -> Bool {
         if message.metadata?["iexa_local_alpine_result"] == "true"
             || message.metadata?["iexa_local_alpine_tool_calls"] != nil
+            || message.metadata?["iexa_local_browser_tool"] == "true"
+            || message.metadata?["iexa_local_native_tool_parent"] == "true"
+            || message.metadata?["iexa_local_native_hidden_tool_parent"] == "true"
             || message.content.hasPrefix("Local Alpine 执行结果")
             || message.model == "Local Alpine"
             || message.model == "Local Alpine Agent" {
@@ -1758,7 +1796,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
             guard !Self.isReasoningOrThinkingStatus(status) else { return false }
             return action.contains("web_search")
                 || action.contains("browser_web_search")
+                || action == "browser_use"
+                || action.hasPrefix("browser.")
                 || action.contains("code_interpreter")
+                || action.contains("image_generation")
                 || action.contains("get_readable")
                 || action.contains("readable")
                 || action.contains("local_native_tool")
@@ -2578,7 +2619,7 @@ struct ChatDetailView: View {
         guard let item = cachedItem ?? agentActivity(for: message), item.hasConcreteSteps else {
             return false
         }
-        return !item.hasOnlyWebSearchStatusSteps
+        return true
     }
 
     private func shouldSuppressAssistantBubbleForActivityParent(_ message: ChatMessage, activityItem: AgentActivityItem? = nil) -> Bool {
@@ -3255,15 +3296,125 @@ struct ChatDetailView: View {
             || action.contains("readable")
     }
 
+    private func orderedAgentTranscriptBlocks(
+        for message: ChatMessage,
+        activityItem: AgentActivityItem?
+    ) -> [OrderedAgentTranscriptBlock]? {
+        guard message.role == .assistant,
+              let activityItem,
+              activityItem.hasConcreteSteps else {
+            return nil
+        }
+
+        if let orderedLocalBlocks = orderedLocalAlpineTranscriptBlocks(
+            for: message,
+            activityItem: activityItem
+        ) {
+            return orderedLocalBlocks
+        }
+
+        let visible = stripNativeToolProtocolBlocks(
+            from: LocalAlpineAgentService.visibleContent(from: message.content)
+        )
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        var blocks: [OrderedAgentTranscriptBlock] = []
+        if isLocalAlpineResultMessage(message) {
+            blocks.append(
+                OrderedAgentTranscriptBlock(
+                    id: "\(message.id)-agent-steps",
+                    content: .steps(activityItem)
+                )
+            )
+            if !visible.isEmpty,
+               !shouldHideProcessOnlyAgentText(
+                    message,
+                    visibleText: visible,
+                    activityItem: activityItem
+               ) {
+                blocks.append(
+                    OrderedAgentTranscriptBlock(
+                        id: "\(message.id)-agent-text",
+                        content: .text(visible)
+                    )
+                )
+            }
+            return blocks
+        }
+
+        if !visible.isEmpty,
+           !shouldHideProcessOnlyAgentText(
+                message,
+                visibleText: visible,
+                activityItem: activityItem
+           ) {
+            blocks.append(
+                OrderedAgentTranscriptBlock(
+                    id: "\(message.id)-agent-text",
+                    content: .text(visible)
+                )
+            )
+        }
+
+        blocks.append(
+            OrderedAgentTranscriptBlock(
+                id: "\(message.id)-agent-steps",
+                content: .steps(activityItem)
+            )
+        )
+        return blocks
+    }
+
+    private func shouldHideProcessOnlyAgentText(
+        _ message: ChatMessage,
+        visibleText: String,
+        activityItem: AgentActivityItem
+    ) -> Bool {
+        if visibleText == "正在准备本地执行，结果会自动回来。" {
+            return true
+        }
+
+        let metadata = message.metadata ?? [:]
+        let isToolProcessParent = metadata["iexa_local_browser_tool"] == "true"
+            || metadata["iexa_local_native_tool_parent"] == "true"
+            || metadata["iexa_local_native_hidden_tool_parent"] == "true"
+            || metadata["iexa_local_alpine_hidden_tool_parent"] == "true"
+        guard isToolProcessParent else { return false }
+
+        let normalizedVisible = normalizedProcessText(visibleText)
+        guard !normalizedVisible.isEmpty else { return true }
+
+        let candidateTexts = ([activityItem.summary, activityItem.currentStepTitle, activityItem.currentStepDetail]
+            + activityItem.steps.flatMap { [$0.title, $0.detail] })
+            .map { normalizedProcessText($0) }
+            .filter { !$0.isEmpty }
+        if candidateTexts.contains(normalizedVisible) {
+            return true
+        }
+
+        let processMarkers = [
+            "正在", "等待", "检测到", "继续操作", "人机验证",
+            "网页操作暂停", "网页搜索完成", "网页操作完成", "网页已打开",
+            "searching", "loading", "waiting", "completed"
+        ]
+        return normalizedVisible.count <= 120
+            && processMarkers.contains { normalizedVisible.localizedCaseInsensitiveContains($0) }
+    }
+
+    private func normalizedProcessText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".。…!！:： "))
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "  ", with: " ")
+    }
+
     private func orderedLocalAlpineTranscriptBlocks(
         for message: ChatMessage,
         activityItem: AgentActivityItem?
     ) -> [OrderedAgentTranscriptBlock]? {
         guard message.role == .assistant,
-              !isLocalAlpineResultMessage(message),
               let activityItem,
-              activityItem.hasConcreteSteps,
-              !activityItem.hasOnlyWebSearchStatusSteps else {
+              activityItem.hasConcreteSteps else {
             return nil
         }
 
@@ -5186,9 +5337,9 @@ struct ChatDetailView: View {
         let userTextIsEmpty = message.role == .user
             && activeUserDisplayContent(for: message).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let waitingUIIsDelayed = shouldDelayWaitingUI(for: message)
-        let rowAgentActivity = AgentActivityItem.isActivityMessage(message) ? agentActivity(for: message) : nil
+        let rowAgentActivity = message.role == .assistant ? agentActivity(for: message) : nil
         let suppressAssistantBubble = shouldSuppressAssistantBubbleForActivityParent(message, activityItem: rowAgentActivity)
-        let orderedAgentBlocks = orderedLocalAlpineTranscriptBlocks(
+        let orderedAgentBlocks = orderedAgentTranscriptBlocks(
             for: message,
             activityItem: rowAgentActivity
         )
@@ -5566,7 +5717,7 @@ struct ChatDetailView: View {
         guard let item = activityItem ?? agentActivity(for: message), item.hasConcreteSteps else {
             return false
         }
-        return !item.hasOnlyWebSearchStatusSteps
+        return true
     }
 
     @ViewBuilder
@@ -5574,8 +5725,7 @@ struct ChatDetailView: View {
         let fallbackItem = fallbackItem ?? agentActivity(for: message)
         if isLocalAlpineResultMessage(message) || fallbackItem?.hasConcreteSteps == true {
             if let fallbackItem,
-               fallbackItem.hasConcreteSteps,
-               !fallbackItem.hasOnlyWebSearchStatusSteps {
+               fallbackItem.hasConcreteSteps {
                 AgentInlineStepsView(
                     item: fallbackItem,
                     onStopRunningStep: { viewModel.stopStreaming() }
