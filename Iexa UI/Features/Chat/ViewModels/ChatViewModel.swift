@@ -14062,7 +14062,11 @@ final class ChatViewModel {
         if ok && action == "browser.open" && fullPage {
             return true
         }
-        if ok && action == "browser.auto" {
+        if ok && action == "browser.auto" && (
+            toolContent.localizedCaseInsensitiveContains("\"file_url\"")
+                || toolContent.localizedCaseInsensitiveContains("\"generation_state\" : \"success\"")
+                || toolContent.localizedCaseInsensitiveContains("\"generation_state\":\"success\"")
+        ) {
             return true
         }
 
@@ -14133,6 +14137,11 @@ final class ChatViewModel {
         if (firstJSONIntValue(in: toolContent, key: "count") ?? 0) > 0,
            action == "browser.find_elements",
            hasExplicitInteractionArgument || promptLooksInteractive {
+            return true
+        }
+        if action == "browser.find_elements",
+           (hasExplicitInteractionArgument || promptLooksInteractive),
+           lowerContent.contains("\"visual_viewports\"") {
             return true
         }
 
@@ -14276,7 +14285,7 @@ final class ChatViewModel {
             arguments["scan_page"] = true
             arguments["full_page"] = true
             arguments["screenshot"] = false
-            arguments["capture_visuals"] = false
+            arguments["capture_visuals"] = true
             arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 18, 18)
             if let prompt, !prompt.isEmpty {
                 arguments["target"] = prompt
@@ -14480,25 +14489,76 @@ final class ChatViewModel {
 
     private static func localNativeBrowserVisualContextMessage(from toolContent: String) -> [String: Any]? {
         guard let data = toolContent.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              let reference = firstLocalNativeBrowserVisualReference(in: object),
-              let dataURL = browserVisualDataURL(from: reference) else {
+              let object = try? JSONSerialization.jsonObject(with: data) else {
             return nil
         }
 
+        let references = localNativeBrowserVisualReferences(in: object, limit: 4)
+        let imageParts = references.compactMap { reference -> [String: Any]? in
+            guard let dataURL = browserVisualDataURL(from: reference) else { return nil }
+            return [
+                "type": "image_url",
+                "image_url": ["url": dataURL]
+            ]
+        }
+        guard !imageParts.isEmpty else { return nil }
+
+        let content: [[String: Any]] = [
+            [
+                "type": "text",
+                "text": "Hidden browser visual observation. These tool-only screenshot(s) show the current page or sampled scroll positions from the shared browser. Use them as the primary evidence for the next browser_use coordinate, scroll, verification-area, or click/type action. Do not show or mention these screenshots unless the user explicitly asks."
+            ]
+        ] + imageParts
+
         return [
             "role": "user",
-            "content": [
-                [
-                    "type": "text",
-                    "text": "Hidden browser visual observation. Use this tool-only screenshot only to choose the next browser_use coordinate, scroll, or verification-area action. Do not show or mention this screenshot unless the user explicitly asks."
-                ],
-                [
-                    "type": "image_url",
-                    "image_url": ["url": dataURL]
-                ]
-            ]
+            "content": content
         ]
+    }
+
+    private static func localNativeBrowserVisualReferences(in value: Any, limit: Int) -> [String] {
+        var references: [String] = []
+        var seen = Set<String>()
+
+        func append(_ reference: String?) {
+            guard references.count < limit,
+                  let trimmed = reference?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty,
+                  seen.insert(trimmed).inserted else {
+                return
+            }
+            references.append(trimmed)
+        }
+
+        func visit(_ value: Any) {
+            guard references.count < limit else { return }
+            if let dictionary = value as? [String: Any] {
+                if let visual = dictionary["visual_observation"] as? [String: Any],
+                   nativeToolBoolValue(visual["tool_only"]) == true {
+                    append(firstBrowserVisualFileReference(in: visual))
+                }
+                if nativeToolBoolValue(dictionary["needs_visual_coordinates"]) == true {
+                    append(firstBrowserVisualFileReference(in: dictionary))
+                }
+                if let viewports = dictionary["visual_viewports"] as? [[String: Any]] {
+                    for viewport in viewports {
+                        append(firstBrowserVisualFileReference(in: viewport))
+                    }
+                }
+                for rawValue in dictionary.values {
+                    visit(rawValue)
+                    if references.count >= limit { break }
+                }
+            } else if let array = value as? [Any] {
+                for item in array {
+                    visit(item)
+                    if references.count >= limit { break }
+                }
+            }
+        }
+
+        visit(value)
+        return references
     }
 
     private static func firstLocalNativeBrowserVisualReference(in value: Any) -> String? {

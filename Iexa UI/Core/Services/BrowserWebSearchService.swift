@@ -1575,7 +1575,11 @@ final class BrowserWebSearchService: NSObject {
             scanCall["full_page"] = true
             scanCall["limit"] = limit
             scanCall["max_scrolls"] = Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 18
-            scanCall["capture_visuals"] = Self.browserMultiViewportVisualSamplingEnabled(in: call)
+            if Self.browserMultiViewportVisualSamplingEnabled(in: call) {
+                scanCall["capture_visuals"] = true
+            } else {
+                scanCall.removeValue(forKey: "capture_visuals")
+            }
             scanCall["screenshot"] = false
             if let intent, !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 scanCall["target"] = intent
@@ -2502,15 +2506,51 @@ final class BrowserWebSearchService: NSObject {
               return null;
             }
           }
+          function visibleBox(node) {
+            if (!node || !node.getBoundingClientRect) return null;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) return null;
+            const rect = node.getBoundingClientRect();
+            const width = Math.max(0, Math.min(rect.right, innerWidth) - Math.max(rect.left, 0));
+            const height = Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0));
+            if (width < 8 || height < 8) return null;
+            return { width, height, centerY: rect.top + rect.height / 2 };
+          }
           function bestScrollable() {
-            const nodes = Array.from(document.querySelectorAll('*'));
-            for (const node of nodes) {
-              const style = window.getComputedStyle(node);
-              const scrollableY = /(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 20;
-              const scrollableX = /(auto|scroll)/.test(style.overflowX) && node.scrollWidth > node.clientWidth + 20;
-              if (scrollableY || scrollableX) return node;
+            const doc = document.scrollingElement || document.documentElement || document.body;
+            const documentScrollHeight = Math.max(
+              document.documentElement.scrollHeight || 0,
+              document.body ? document.body.scrollHeight || 0 : 0
+            );
+            const documentClientHeight = Math.max(
+              window.innerHeight || 0,
+              document.documentElement.clientHeight || 0,
+              document.body ? document.body.clientHeight || 0 : 0
+            );
+            if (doc && documentScrollHeight > documentClientHeight + 20) {
+              return doc;
             }
-            return document.scrollingElement || document.documentElement;
+            let best = null;
+            let bestScore = -1;
+            const nodes = Array.from(document.querySelectorAll('*')).slice(0, 2000);
+            for (const node of nodes) {
+              if (node === document.documentElement || node === document.body) continue;
+              const style = window.getComputedStyle(node);
+              const scrollableY = /(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 20;
+              const scrollableX = /(auto|scroll)/.test(style.overflowX) && node.scrollWidth > node.clientWidth + 20;
+              if (!scrollableY && !scrollableX) continue;
+              const box = visibleBox(node);
+              if (!box) continue;
+              const scrollRange = Math.max(node.scrollHeight - node.clientHeight, node.scrollWidth - node.clientWidth, 0);
+              const visibleArea = box.width * box.height;
+              const centerPenalty = Math.abs(box.centerY - (innerHeight / 2)) / 8;
+              const score = scrollRange + visibleArea / 20 - centerPenalty;
+              if (score > bestScore) {
+                best = node;
+                bestScore = score;
+              }
+            }
+            return best || doc || document.documentElement;
           }
           const node = findNode(selector) || bestScrollable();
           const delta = direction === 'up' ? -amount : amount;
@@ -2528,8 +2568,11 @@ final class BrowserWebSearchService: NSObject {
             selector: selector || '',
             direction,
             amount,
+            target_kind: (node === document.scrollingElement || node === document.documentElement || node === document.body) ? 'document' : 'scroll_container',
+            target_tag: (node && (node.tagName || node.nodeName) || '').toLowerCase(),
             scrollY: Math.round(window.scrollY || 0),
             scrollX: Math.round(window.scrollX || 0),
+            target_scroll_top: Math.round(node && node.scrollTop || 0),
             page: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
             viewport: { width: window.innerWidth, height: window.innerHeight }
           });
@@ -2642,7 +2685,7 @@ final class BrowserWebSearchService: NSObject {
         let limit = min(max(Self.intValue(call["limit"] ?? call["max_results"]) ?? 30, 1), 100)
         let intent = Self.findElementsIntent(in: call)
         let scanPage = Self.boolValue(call["scan_page"] ?? call["scanPage"] ?? call["full_page"] ?? call["fullPage"]) ?? true
-        var captureVisuals = false
+        var captureVisuals = intent?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         for key in [
             "capture_visuals", "captureVisuals",
             "with_screenshots", "withScreenshots",
@@ -2739,19 +2782,33 @@ final class BrowserWebSearchService: NSObject {
         var humanVerification: [String: Any]?
         let viewportCount = max(scrollOffsets.count, 1)
         let perViewportLimit = max(6, min(24, ((limit + viewportCount - 1) / viewportCount) + 4))
-        let visualStride = max(1, Int(ceil(Double(viewportCount) / 6.0)))
+        let visualSampleLimit = min(4, viewportCount)
+        let visualSampleIndexes: Set<Int> = {
+            guard captureVisuals, viewportCount > 0 else { return [] }
+            guard visualSampleLimit > 1 else { return [0] }
+            let lastIndex = viewportCount - 1
+            var indexes = Set<Int>()
+            for index in 0..<visualSampleLimit {
+                let rawIndex = Double(index) * Double(lastIndex) / Double(visualSampleLimit - 1)
+                indexes.insert(min(max(Int(rawIndex.rounded()), 0), lastIndex))
+            }
+            return indexes
+        }()
 
         for (viewportIndex, offset) in scrollOffsets.enumerated() {
             _ = await evaluateJSONObject(Self.scrollToPageYScript(offset))
             try? await Task.sleep(nanoseconds: viewportIndex == 0 ? 180_000_000 : 300_000_000)
 
-            if captureVisuals && (viewportIndex == 0 || viewportIndex == viewportCount - 1 || viewportIndex % visualStride == 0) {
+            if captureVisuals && visualSampleIndexes.contains(viewportIndex) {
                 if let screenshot = await captureViewportScreenshot(prefix: "browser_scan_\(viewportIndex)", scrollY: offset) {
                     visualViewports.append([
                         "viewport_index": viewportIndex,
                         "scroll_y": offset,
                         "screenshot_url": screenshot.absoluteString,
-                        "file_url": screenshot.absoluteString
+                        "file_url": screenshot.absoluteString,
+                        "file_path": screenshot.path,
+                        "tool_only": true,
+                        "note": "Tool-only viewport sample from full-page scan. Use with DOM/text samples to choose the next browser action."
                     ])
                 }
             }
