@@ -2976,7 +2976,7 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": "browser_use",
-                        "description": "Interactive browser tool backed by the iOS WKWebView. Supports up to 3 tabs and actions: inspect, auto, observe, navigate, screenshot, click, type, hover, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, wait_for_image, new_tab, close_tab, list_tabs, set_user_agent, set_viewport, get_cookies, wait_for_dom_stable, execute_js. For real page operation, use observe/action/observe loops and treat the hidden current viewport screenshot as the primary state; DOM/text is auxiliary. Use inspect for full-page reading or summarization, and auto only for clearly bounded open/type/click/wait workflows such as image generation. Treat click/type/scroll/find success as intermediate, not as page-task completion.",
+                        "description": "Interactive browser tool backed by the iOS WKWebView. Supports up to 3 tabs and actions: inspect, auto, observe, navigate, screenshot, click, type, hover, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, wait_for_image, new_tab, close_tab, list_tabs, set_user_agent, set_viewport, get_cookies, wait_for_dom_stable, execute_js. Use auto for bounded page tasks that require opening a site, typing/searching/submitting, waiting briefly, and reading the final page. Use inspect/get_text/get_readable for full-page reading, and wait_for_image only for image-generation results. Treat click/type/scroll/find success as intermediate, not as page-task completion.",
                         "parameters": [
                             "type": "object",
                             "properties": [
@@ -13312,14 +13312,47 @@ final class ChatViewModel {
         guard toolName == "browser_use" else { return call }
 
         let userPrompt = latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard userPromptLooksLikeImageGeneration(userPrompt) else { return call }
-
         var arguments = localAlpineNativeToolArguments(for: call)
         let action = firstNonEmptyString(
             in: arguments,
             keys: ["action", "browser_action", "browser_use_action", "operation", "op", "type"]
         )?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         let urlString = normalizedBrowserAutomationURLString(firstBrowserURLCandidate(in: arguments))
+        if let searchIntent = browserSearchIntent(from: userPrompt, arguments: arguments),
+           searchIntent.query.isEmpty == false {
+            let passiveActions: Set<String> = [
+                "", "browser_use", "browser.use",
+                "open", "navigate", "goto", "go", "browser.open", "browser.navigate",
+                "readable", "get_readable", "browser.readable",
+                "observe", "get_state", "state", "browser.observe", "browser.get_state",
+                "info", "get_page_info", "browser.info", "text", "get_text", "browser.text"
+            ]
+            let hasExplicitActionTarget = firstNonEmptyString(
+                in: arguments,
+                keys: ["selector", "coordinate_x", "coordinate_y"]
+            ) != nil
+            if passiveActions.contains(action) && !hasExplicitActionTarget {
+                arguments["action"] = "auto"
+                arguments["url"] = urlString ?? searchIntent.url
+                arguments["text"] = searchIntent.query
+                arguments["wait_for_image"] = false
+                arguments["force_reload"] = false
+                arguments["forceReload"] = false
+                arguments["reload"] = false
+                arguments["field_hint"] = arguments["field_hint"] ?? arguments["fieldHint"] ?? "搜索 search query 输入"
+                arguments["button_text"] = arguments["button_text"] ?? arguments["buttonText"] ?? searchIntent.buttonText
+                arguments["max_loops"] = max(Self.nativeToolIntValue(arguments["max_loops"] ?? arguments["maxLoops"]) ?? 6, 6)
+                let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
+                return LocalAlpineNativeToolCall(
+                    id: call.id,
+                    name: "browser_use",
+                    arguments: String(data: data, encoding: .utf8) ?? call.arguments
+                )
+            }
+        }
+
+        guard userPromptLooksLikeImageGeneration(userPrompt) else { return call }
+
         let lowerTarget = [
             urlString,
             firstNonEmptyString(in: arguments, keys: ["target", "query", "q", "keywords", "keyword"])
@@ -13454,6 +13487,77 @@ final class ChatViewModel {
         let generateWords = ["生成", "生图", "画一", "做一", "给我", "create", "generate", "make"]
         return imageWords.contains { lower.contains($0) }
             && generateWords.contains { lower.contains($0) }
+    }
+
+    private struct BrowserSearchIntent {
+        let url: String
+        let query: String
+        let buttonText: String
+    }
+
+    private static func browserSearchIntent(
+        from prompt: String,
+        arguments: [String: Any]
+    ) -> BrowserSearchIntent? {
+        let promptText = prompt
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = promptText.lowercased()
+        let explicitQuery = firstNonEmptyString(
+            in: arguments,
+            keys: ["text", "value", "input", "content", "message", "prompt", "query", "q", "keyword", "keywords"]
+        )
+        let rawURL = normalizedBrowserAutomationURLString(firstBrowserURLCandidate(in: arguments))
+        let host = rawURL.flatMap { URL(string: $0)?.host?.lowercased() } ?? ""
+
+        let url: String
+        let buttonText: String
+        if host.contains("baidu") || lower.contains("百度") || lower.contains("baidu") {
+            url = rawURL ?? "https://www.baidu.com/"
+            buttonText = "百度一下 搜索 搜一下 search submit go"
+        } else if host.contains("bing") || lower.contains("必应") || lower.contains("bing") {
+            url = rawURL ?? "https://www.bing.com/"
+            buttonText = "搜索 search submit go"
+        } else if host.contains("google") || lower.contains("谷歌") || lower.contains("google") {
+            url = rawURL ?? "https://www.google.com/"
+            buttonText = "Google Search 搜索 search submit go"
+        } else if host.contains("sogou") || lower.contains("搜狗") || lower.contains("sogou") {
+            url = rawURL ?? "https://www.sogou.com/"
+            buttonText = "搜狗搜索 搜索 search submit go"
+        } else if lower.contains("搜索") || lower.contains("搜一下") || lower.contains("查找") || lower.contains("search") {
+            url = rawURL ?? "https://www.baidu.com/"
+            buttonText = "百度一下 搜索 搜一下 search submit go"
+        } else {
+            return nil
+        }
+
+        let query = explicitQuery ?? browserSearchQuery(from: promptText, removingURL: rawURL)
+        let cleanedQuery = query
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanedQuery.isEmpty else { return nil }
+        return BrowserSearchIntent(url: url, query: cleanedQuery, buttonText: buttonText)
+    }
+
+    private static func browserSearchQuery(from prompt: String, removingURL urlString: String?) -> String {
+        var cleaned = prompt
+            .replacingOccurrences(of: #"https?://\S+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"(?i)\b(open|go to|navigate to|search for|search)\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"打开|进入|访问|去|网页|网站|用|在|帮我|给我|请|一下|查找"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"百度搜索|百度一下|百度|必应搜索|必应|谷歌搜索|谷歌|搜狗搜索|搜狗|搜索|搜一下"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let urlString, !urlString.isEmpty {
+            cleaned = cleaned
+                .replacingOccurrences(of: urlString, with: " ")
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if cleaned.hasPrefix("搜") {
+            cleaned.removeFirst()
+            cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return cleaned
     }
 
     private static func browserAutomationPrompt(from prompt: String, removing urlString: String) -> String {
@@ -14066,6 +14170,8 @@ final class ChatViewModel {
             toolContent.localizedCaseInsensitiveContains("\"file_url\"")
                 || toolContent.localizedCaseInsensitiveContains("\"generation_state\" : \"success\"")
                 || toolContent.localizedCaseInsensitiveContains("\"generation_state\":\"success\"")
+                || toolContent.localizedCaseInsensitiveContains("自动搜索流程已完成")
+                || toolContent.localizedCaseInsensitiveContains("自动浏览器流程已完成")
         ) {
             return true
         }
@@ -14329,7 +14435,7 @@ final class ChatViewModel {
             return true
         }
         let action = localAlpineBrowserActionName(from: call)
-        if action == "browser.auto" || action == "browser.wait_for_image" {
+        if action == "browser.wait_for_image" {
             return true
         }
         if userPromptLooksLikeImageGeneration(latestUserPrompt ?? ""),

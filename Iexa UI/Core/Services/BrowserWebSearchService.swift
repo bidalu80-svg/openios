@@ -1578,6 +1578,16 @@ final class BrowserWebSearchService: NSObject {
             for (const event of events) {
               try { node.dispatchEvent(event); } catch (_) {}
             }
+            try {
+              const form = node.form || (node.closest && node.closest('form'));
+              if (form) {
+                const submitter = Array.from(form.querySelectorAll('button, input[type="submit"], input[type="image"], [role="button"]'))
+                  .find(candidate => visible(candidate) && !Boolean(candidate.disabled || attr(candidate, 'aria-disabled') === 'true'));
+                if (submitter && typeof submitter.click === 'function') submitter.click();
+                else if (typeof form.requestSubmit === 'function') form.requestSubmit();
+                else if (typeof form.submit === 'function') form.submit();
+              }
+            } catch (_) {}
           }
           try { node.dispatchEvent(new FocusEvent('blur', { bubbles: false, cancelable: false, composed: true })); } catch (_) {}
           try { node.dispatchEvent(new FocusEvent('focusout', { bubbles: true, cancelable: false, composed: true })); } catch (_) {}
@@ -1650,7 +1660,9 @@ final class BrowserWebSearchService: NSObject {
         }
         let maxLoops = min(max(Self.intValue(call["max_loops"] ?? call["maxLoops"] ?? call["retries"]) ?? 6, 1), 12)
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
-        let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? (text != nil)
+        let isImageWorkflow = Self.browserAutoWorkflowLooksLikeImageGeneration(call: call, text: text)
+        let isSearchWorkflow = Self.browserAutoWorkflowLooksLikeSearch(call: call, text: text)
+        let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? isImageWorkflow
         var imageBaselineSources: [String] = []
 
         func appendStep(_ name: String, _ payload: [String: Any]) {
@@ -1813,6 +1825,7 @@ final class BrowserWebSearchService: NSObject {
         recordImageBaseline(from: initialState)
 
         var inputScan: [String: Any]?
+        var searchResultDetectedAfterTyping = false
         if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let inputIntent = Self.firstString(in: call, keys: ["field_hint", "fieldHint", "input_hint", "inputHint", "target", "field_label", "fieldLabel"])
                 ?? "prompt description text input textarea"
@@ -1829,6 +1842,12 @@ final class BrowserWebSearchService: NSObject {
             }
             var typeCall = continuationCall
             typeCall["text"] = text
+            if isSearchWorkflow,
+               typeCall["press_enter"] == nil,
+               typeCall["enter"] == nil,
+               typeCall["submit"] == nil {
+                typeCall["press_enter"] = true
+            }
             if typeCall["label"] == nil,
                typeCall["field_label"] == nil,
                typeCall["placeholder"] == nil,
@@ -1849,6 +1868,23 @@ final class BrowserWebSearchService: NSObject {
                 lastTyped = typed
                 if let stop = verificationStopIfNeeded(typed) {
                     return stop
+                }
+                if isSearchWorkflow,
+                   Self.boolValue(typed["ok"]) == true {
+                    let stableAfterSubmit = await executeNativeWaitForDOMStable(continuationCall)
+                    appendStep(attempt == 0 ? "browser.wait_for_dom_stable.after_search_enter" : "browser.wait_for_dom_stable.after_search_enter_retry_\(attempt)", stableAfterSubmit)
+                    if let stop = verificationStopIfNeeded(stableAfterSubmit) {
+                        return stop
+                    }
+                    if await browserCurrentPageLooksLikeSearchResult(text: text) {
+                        appendStep(attempt == 0 ? "browser.search_result.after_type" : "browser.search_result.after_type_retry_\(attempt)", [
+                            "ok": true,
+                            "summary": "输入并提交后已进入搜索结果页。"
+                        ])
+                        searchResultDetectedAfterTyping = true
+                        typedOK = true
+                        break
+                    }
                 }
                 let afterType = await executeNativeObserve(continuationCall)
                 appendStep(attempt == 0 ? "browser.observe.after_type" : "browser.observe.after_type_retry_\(attempt)", afterType)
@@ -1886,10 +1922,20 @@ final class BrowserWebSearchService: NSObject {
             }
         }
 
-        let buttonLabel = Self.firstString(in: call, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"])
-            ?? (text == nil
-                ? Self.firstString(in: call, keys: ["target", "label"])
-                : "generate create submit send search start run continue next 免费生成 生成图片")
+        var buttonLabel = isSearchWorkflow && searchResultDetectedAfterTyping
+            ? nil
+            : Self.firstString(in: call, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"])
+        if buttonLabel == nil && !(isSearchWorkflow && searchResultDetectedAfterTyping) {
+            if text == nil {
+                buttonLabel = Self.firstString(in: call, keys: ["target", "label"])
+            } else if isImageWorkflow {
+                buttonLabel = "generate create submit send start run continue next 免费生成 生成图片 立即生成 开始生成"
+            } else if isSearchWorkflow {
+                buttonLabel = "百度一下 搜索 搜一下 search submit go 确定"
+            } else {
+                buttonLabel = "submit send search start run continue next 提交 搜索 确定 继续 下一步 发送"
+            }
+        }
         if let buttonLabel {
             var clickScan = await scanPage(intent: buttonLabel, name: "browser.find_elements.before_click")
             if let stop = verificationStopIfNeeded(clickScan) {
@@ -1901,11 +1947,13 @@ final class BrowserWebSearchService: NSObject {
             }
             recordImageBaseline(from: beforeClickState)
             if text != nil && !promptVerified(beforeClickState) {
-                return Self.workflowPayload(
-                    ok: false,
-                    steps: steps,
-                    summary: "自动流程没有验证到提示词已进入网页输入框，已停止，避免误点生成。"
-                )
+                if isImageWorkflow {
+                    return Self.workflowPayload(
+                        ok: false,
+                        steps: steps,
+                        summary: "自动流程没有验证到提示词已进入网页输入框，已停止，避免误点生成。"
+                    )
+                }
             }
             let beforeClick = await executeNativeObserve(continuationCall)
             appendStep("browser.observe.before_click", beforeClick)
@@ -1963,13 +2011,21 @@ final class BrowserWebSearchService: NSObject {
                 }
             }
             if !clickedOK {
-                return Self.workflowPayload(
-                    ok: false,
-                    steps: steps,
-                    summary: shouldWaitForImage
-                        ? "点击后没有验证到生成已开始或出现新结果，自动流程已停止。"
-                        : (lastClicked?["error"] as? String ?? lastClicked?["summary"] as? String ?? "自动流程未能点击目标按钮。")
-                )
+                if isSearchWorkflow,
+                   await browserCurrentPageLooksLikeSearchResult(text: text) {
+                    appendStep("browser.search_result.detected_after_type", [
+                        "ok": true,
+                        "summary": "输入后页面已进入搜索结果状态，跳过额外点击。"
+                    ])
+                } else {
+                    return Self.workflowPayload(
+                        ok: false,
+                        steps: steps,
+                        summary: shouldWaitForImage
+                            ? "点击后没有验证到生成已开始或出现新结果，自动流程已停止。"
+                            : (lastClicked?["error"] as? String ?? lastClicked?["summary"] as? String ?? "自动流程未能点击目标按钮。")
+                    )
+                }
             }
         }
 
@@ -2071,11 +2127,96 @@ final class BrowserWebSearchService: NSObject {
         if let stop = verificationStopIfNeeded(finalObserve) {
             return stop
         }
-        return Self.workflowPayload(
+        var textCall = continuationCall
+        textCall["max_length"] = Self.intValue(call["max_length"] ?? call["limit"]) ?? 12_000
+        textCall["max_scrolls"] = Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 14
+        let finalText = await executeNativeText(textCall)
+        appendStep("browser.text.final", finalText)
+        if let stop = verificationStopIfNeeded(finalText) {
+            return stop
+        }
+
+        var payload = Self.workflowPayload(
             ok: true,
             steps: steps,
-            summary: "自动浏览器流程已完成。"
+            summary: isSearchWorkflow
+                ? "自动搜索流程已完成，并已滚动读取结果页。"
+                : "自动浏览器流程已完成，并已滚动读取最终页面。"
         )
+        let title = finalText["title"] as? String ?? finalObserve["title"] as? String ?? ""
+        let url = finalText["url"] as? String ?? finalObserve["url"] as? String ?? ""
+        let pageText = finalText["text"] as? String ?? finalObserve["visible_text"] as? String ?? ""
+        payload["title"] = title
+        payload["url"] = url
+        payload["text"] = pageText
+        payload["full_page"] = Self.boolValue(finalText["full_page"]) ?? true
+        payload["text_truncated"] = Self.boolValue(finalText["text_truncated"]) ?? false
+        payload["attach_file"] = false
+        payload["preview_images"] = []
+        if !title.isEmpty || !url.isEmpty || !pageText.isEmpty {
+            payload["items"] = [[
+                "title": title.isEmpty ? "网页自动化结果" : title,
+                "link": url,
+                "snippet": String(pageText.prefix(360))
+            ]]
+        }
+        return payload
+    }
+
+    private static func browserAutoWorkflowLooksLikeImageGeneration(call: [String: Any], text: String?) -> Bool {
+        if Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) == true {
+            return true
+        }
+        let joined = [
+            text,
+            Self.firstString(in: call, keys: ["target", "label", "button_text", "buttonText", "submit_label", "submitLabel", "click_label", "clickLabel"]),
+            Self.firstString(in: call, keys: ["url", "link", "href", "page_url", "source", "input_url"])
+        ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+        let imageWords = ["生图", "生成图片", "图片生成", "画图", "出图", "image generation", "generate image", "text to image", "imagefree", "image-free"]
+        let imageButtonWords = ["generate", "生成", "立即生成", "免费生成", "开始生成"]
+        return imageWords.contains { joined.contains($0) }
+            || (joined.contains("image") && imageButtonWords.contains { joined.contains($0) })
+    }
+
+    private static func browserAutoWorkflowLooksLikeSearch(call: [String: Any], text: String?) -> Bool {
+        guard text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return false
+        }
+        if browserAutoWorkflowLooksLikeImageGeneration(call: call, text: text) {
+            return false
+        }
+        let joined = [
+            Self.firstString(in: call, keys: ["target", "label", "button_text", "buttonText", "submit_label", "submitLabel", "click_label", "clickLabel"]),
+            Self.firstString(in: call, keys: ["field_hint", "fieldHint", "input_hint", "inputHint"]),
+            Self.firstString(in: call, keys: ["url", "link", "href", "page_url", "source", "input_url"])
+        ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+        if joined.contains("baidu")
+            || joined.contains("bing")
+            || joined.contains("google")
+            || joined.contains("sogou")
+            || joined.contains("so.com")
+            || joined.contains("duckduckgo")
+            || joined.contains("搜索")
+            || joined.contains("搜一下")
+            || joined.contains("百度一下")
+            || joined.contains("search")
+            || joined.contains("query") {
+            return true
+        }
+        return Self.firstString(in: call, keys: ["query", "q", "keyword", "keywords"]) != nil
+    }
+
+    private func browserCurrentPageLooksLikeSearchResult(text: String?) async -> Bool {
+        guard let object = await evaluateJSONObject(Self.searchResultStateScript(expectedText: text)) else {
+            return false
+        }
+        return Self.boolValue(object["looks_like_search_result"]) == true
     }
 
     private static func browserContinuationCall(from call: [String: Any]) -> [String: Any] {
@@ -3674,7 +3815,7 @@ final class BrowserWebSearchService: NSObject {
         case "", "browser_use", "browser.use":
             if wantsSave { return "browser.fetch" }
             if hasScript { return "browser.execute_js" }
-            if hasURL && hasTypedText { return "browser.inspect" }
+            if hasURL && hasTypedText { return "browser.auto" }
             if hasTypedText && (hasSelector || hasLabel || hasCoordinates) { return "browser.type" }
             if hasLabel || hasCoordinates { return "browser.click" }
             if hasSelector && wantsScreenshot { return "browser.screenshot" }
@@ -3685,6 +3826,7 @@ final class BrowserWebSearchService: NSObject {
         case "observe", "get_state", "state", "browser.observe", "browser.get_state":
             return "browser.observe"
         case "navigate", "open", "goto", "go", "go_to", "go_to_url", "browser.navigate", "browser.open":
+            if hasURL && hasTypedText { return "browser.auto" }
             return "browser.navigate"
         case "readable", "get_readable", "read_webpage", "browser.readable":
             return "browser.readable"
@@ -3734,6 +3876,7 @@ final class BrowserWebSearchService: NSObject {
             return "browser.list_tabs"
         default:
             if wantsSave { return "browser.fetch" }
+            if hasURL && hasTypedText { return "browser.auto" }
             if hasURL { return "browser.navigate" }
             return normalized.isEmpty ? "browser.info" : normalized
         }
@@ -5006,6 +5149,38 @@ final class BrowserWebSearchService: NSObject {
                     : generationState === 'blocked_verification'
                       ? '页面需要人机验证。'
                       : '已读取当前网页流程状态。'
+          });
+        })();
+        """
+    }
+
+    private static func searchResultStateScript(expectedText: String?) -> String {
+        """
+        (() => {
+          const expected = \(Self.javascriptString(expectedText ?? ""));
+          const bodyText = ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          const href = location.href.toLowerCase();
+          const title = (document.title || '').toLowerCase();
+          const expectedNorm = String(expected || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+          const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 120);
+          const resultLinks = links.filter(a => {
+            const text = ((a.innerText || a.textContent || '') + ' ' + (a.href || '')).replace(/\\s+/g, ' ').trim().toLowerCase();
+            if (!text) return false;
+            if (/意见反馈|用户反馈|登录|注册|隐私|服务协议|设置|图片|视频|地图|贴吧/.test(text)) return false;
+            return a.href && /^https?:/i.test(a.href) && text.length >= 4;
+          });
+          const searchURL = /[?&](q|wd|word|query|keyword)=/.test(href) ||
+            /\\/s\\?|\\/search\\?|\\/web\\?|\\/html\\?/.test(href);
+          const searchText = /搜索结果|百度为您找到|相关搜索|全部结果|网页结果|search results|results for/.test(bodyText + ' ' + title);
+          const encodedExpected = expectedNorm ? encodeURIComponent(expectedNorm).toLowerCase() : '';
+          const expectedVisible = expectedNorm.length === 0 || bodyText.includes(expectedNorm) || title.includes(expectedNorm) || (encodedExpected && href.includes(encodedExpected));
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            looks_like_search_result: Boolean(expectedVisible && (searchURL || searchText || resultLinks.length >= 3)),
+            result_link_count: resultLinks.length,
+            expected_visible: expectedVisible
           });
         })();
         """
