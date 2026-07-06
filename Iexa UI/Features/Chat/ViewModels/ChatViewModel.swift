@@ -574,13 +574,13 @@ final class ChatViewModel {
     private let localAlpineLiveToolPreviewLimit = 260
     private let localAlpineLiveToolDetailLimit = 180
     private let localAlpineLiveToolCommandLimit = 420
-    private static let localNativeFunctionMaxSteps = 36
-    private static let localNativeBrowserRepeatedSignatureLimit = 10
-    private static let localNativeBrowserToolSoftLimit = 36
+    private static let localNativeFunctionMaxSteps = 48
+    private static let localNativeBrowserRepeatedSignatureLimit = 14
+    private static let localNativeBrowserToolSoftLimit = 56
     private static let localNativeBrowserSearchSoftLimit = 5
     private static let localNativeBrowserReadableSoftLimit = 5
     private static let localBrowserVerificationContinuationLimit = 12
-    private static let localNativeBrowserForcedContinuationLimit = 16
+    private static let localNativeBrowserForcedContinuationLimit = 24
     private static let localAlpineBrowserFailureSoftLimit = 5
     private static let localAlpineBrowserToolSoftLimit = 36
     private static let localAlpineBrowserSearchSoftLimit = 5
@@ -2600,8 +2600,8 @@ final class ChatViewModel {
         ),
         LocalAlpineToolCapability(
             name: "browser_use",
-            description: "Operate the shared iOS browser session: navigate, inspect, screenshot, click, type, scroll, run JS, fetch/download, wait for generated images, and continue from verified browser workflow state.",
-            arguments: ["action inspect/auto/observe/navigate/screenshot/click/type/get_text/get_readable/scroll/find_elements/fetch/wait_for_image/execute_js", "url?", "selector?", "label/button_text?", "text?", "coordinate_x/y?", "scan_page?", "max_scrolls?", "full_page?", "attach_preview?", "save_to?", "screenshot?", "aliases: web_fetch/fetch_url/open_url"]
+            description: "Operate the shared iOS browser session with the full Minis-style primitive browser toolset.",
+            arguments: ["action navigate/screenshot/click/type/get_text/scroll/get_page_info/execute_js/find_elements/hover/get_readable/set_user_agent/set_viewport/get_backbone/fetch/new_tab/close_tab/list_tabs/get_cookies/scroll_and_collect/wait_for_dom_stable", "url?", "selector?", "label/button_text?", "text?", "coordinate_x/y?", "direction?", "amount?", "item_selector?", "scroll_count?", "keywords?", "fuzzy?", "tab_id?", "viewport_width/height?", "reset?", "full_page?", "attach_preview?", "save_to?", "timeout?", "aliases: web_fetch/fetch_url/open_url"]
         ),
         LocalAlpineToolCapability(
             name: "web_search",
@@ -2758,7 +2758,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "browser_use",
-                    "description": "Interactive browser automation backed by the shared iOS WKWebView session. For real page operation, use observe/action/observe loops and treat the tool-only current viewport screenshot as the primary state; DOM/text is auxiliary. Use inspect for full-page reading or summarization, and auto only for clearly bounded open/type/click/wait workflows such as image generation.",
+                    "description": "Minis-style browser automation backed by the shared iOS WKWebView session. Use primitive navigate/screenshot/action/screenshot loops; the tool-only screenshot is primary visual state and DOM/text is auxiliary.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2766,38 +2766,46 @@ final class ChatViewModel {
                             "action": [
                                 "type": "string",
                                 "enum": [
-                                    "inspect", "auto", "observe", "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
+                                    "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
                                     "scroll", "scroll_and_collect", "find_elements", "get_page_info",
-                                    "get_backbone", "fetch", "wait_for_image", "new_tab", "close_tab", "list_tabs",
+                                    "get_backbone", "fetch", "new_tab", "close_tab", "list_tabs",
                                     "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "execute_js"
                                 ],
                                 "description": "Browser action to perform."
                             ],
                             "url": ["type": "string", "description": "HTTP, HTTPS, or file URL. Required for navigate/fetch or when loading a page before another action."],
-                                "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
-                                "label": ["type": "string", "description": "Visible control text, field label, accessible label, placeholder, name, or target hint for click/type/hover when no selector is known."],
-                                "field_label": ["type": "string", "description": "For type: visible label or placeholder of the input field."],
-                                "button_text": ["type": "string", "description": "For click: compatibility alias for label."],
-                                "aria_label": ["type": "string", "description": "For click/type: aria-label text to match."],
-                                "placeholder": ["type": "string", "description": "For type/find_elements: input placeholder to match."],
-                                "target": ["type": "string", "description": "Natural-language target hint for the page element to find, click, or type into."],
-                                "text": ["type": "string", "description": "Text to type into the selected element."],
-                                "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click/type/hover fallback."],
-                                "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click/type/hover fallback."],
-                                "direction": ["type": "string", "enum": ["up", "down"], "description": "Scroll direction."],
-                                "amount": ["type": "integer", "description": "Scroll distance in pixels."],
-                                "scan_page": ["type": "boolean", "description": "For find_elements: scroll the full page and merge controls. Defaults to true."],
-                                "max_scrolls": ["type": "integer", "description": "For find_elements: maximum viewport positions to scan."],
-                                "full_page": ["type": "boolean", "description": "For screenshot: capture the full scrollable page instead of the current viewport."],
-                                "attach_preview": ["type": "boolean", "description": "For screenshot: attach the image to chat. Defaults to false for browser observation screenshots."],
-                                "script": ["type": "string", "description": "JavaScript body for execute_js."],
+                            "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
+                            "label": ["type": "string", "description": "Visible control text, field label, accessible label, placeholder, name, or target hint for click/type/hover when no selector is known."],
+                            "field_label": ["type": "string", "description": "For type: visible label or placeholder of the input field."],
+                            "button_text": ["type": "string", "description": "For click: compatibility alias for label."],
+                            "aria_label": ["type": "string", "description": "For click/type: aria-label text to match."],
+                            "placeholder": ["type": "string", "description": "For type/find_elements: input placeholder to match."],
+                            "target": ["type": "string", "description": "Natural-language target hint for the page element to find, click, or type into."],
+                            "text": ["type": "string", "description": "Text to type into the selected element."],
+                            "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click/type/hover fallback."],
+                            "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click/type/hover fallback."],
+                            "direction": ["type": "string", "enum": ["up", "down"], "description": "Scroll direction."],
+                            "amount": ["type": "integer", "description": "Scroll distance in pixels."],
+                            "scan_page": ["type": "boolean", "description": "For find_elements: scroll the full page and merge controls. Defaults to true."],
+                            "max_scrolls": ["type": "integer", "description": "For find_elements: maximum viewport positions to scan."],
+                            "full_page": ["type": "boolean", "description": "For screenshot: capture the full scrollable page instead of the current viewport."],
+                            "attach_preview": ["type": "boolean", "description": "For screenshot: attach the image to chat. Defaults to false for browser observation screenshots."],
+                            "script": ["type": "string", "description": "JavaScript body for execute_js."],
+                            "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile."],
+                            "max_depth": ["type": "integer", "description": "DOM backbone depth."],
+                            "scroll_count": ["type": "integer", "description": "Number of scroll/collect iterations."],
+                            "item_selector": ["type": "string", "description": "Selector for scroll_and_collect items."],
+                            "tab_id": ["type": "integer", "description": "Target browser tab id."],
+                            "keywords": ["type": "string", "description": "Cookie name keywords."],
+                            "fuzzy": ["type": "boolean", "description": "Fuzzy cookie keyword matching."],
+                            "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport."],
+                            "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport."],
+                            "reset": ["type": "boolean", "description": "Reset viewport to default."],
                             "save_to": ["type": "string", "description": "Optional output path/name for fetch/download compatibility."],
                             "output": ["type": "string", "description": "Compatibility alias for save_to."],
                             "path": ["type": "string", "description": "Compatibility alias for save_to when action is fetch."],
                             "screenshot": ["type": "boolean", "description": "Capture a screenshot/thumbnail when visual evidence helps."],
                             "max_length": ["type": "integer", "description": "Maximum readable text length."],
-                            "min_width": ["type": "integer", "description": "For wait_for_image: minimum generated image width."],
-                            "min_height": ["type": "integer", "description": "For wait_for_image: minimum generated image height."],
                             "timeout": ["type": "integer", "description": "Timeout in seconds."]
                         ],
                         "required": ["tool_title", "action"]
@@ -2859,10 +2867,10 @@ final class ChatViewModel {
         - RootFS Management in Iexa has already written the selected mirrors into the active Alpine rootfs: `/etc/apk/repositories`, `/etc/pip.conf`, `/root/.config/pip/pip.conf`, `/etc/npmrc`, and `/root/.npmrc`. Trust those settings and install packages normally with `apk add --no-cache <pkg>`, `python3 -m pip install ...`, and `npm install ...`; if a package install is slow or fails, inspect those config files or suggest changing mirrors/resetting RootFS Management instead of guessing a different OS.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
-        - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
-        - Browser override: for interactive websites, call `browser_use` with `action:"observe"` first and use the hidden tool-only current viewport screenshot as the primary state for deciding clicks, typing, scrolling, and verification-area positioning. DOM/text is auxiliary and may be stale or incomplete on Canvas, lazy-loaded, Cloudflare, or generated-result pages. Use `inspect` for full-page reading/summarization, not as the main driver for visual interaction. Use `auto` only for clearly bounded generated-image or simple submit workflows.
-        - Browser interaction: use `browser_use` action `auto` for website tasks that involve opening a page, filling text, clicking a submit/generate button, and waiting for a result; `auto` first inspects the real page logic (visible state, prompt field, action button, verification, loading/failure/result signals), then runs an observe/action/observe loop inside the shared browser and returns workflow-state steps such as `prompt_value_verified`, `generate_button_enabled`, `generation_state`, `new_candidate_count`, and saved `file_url`. Treat click/type/scroll/find success as intermediate only. For generated-image workflows, do not claim completion unless `wait_for_image` saved a file or `generation_state` is `success`; if `generation_state` is `failed`, `retry`, `blocked_verification`, or no-progress, report that blocking state instead of inventing success. Use `observe` before choosing the next browser step and after every important click/type/scroll/wait action; each observation/action result includes a lightweight hidden current-viewport screenshot for visual decisions. Use `find_elements` to scan the page for inputs/buttons when selectors are unknown. It scrolls the page by default and returns text/DOM/control samples; set `capture_visuals:true` only when visual layout is needed or DOM matching misses a visible target. Use `scan_page:true`/`max_scrolls` when a target may be below the first viewport. Do not request full-page screenshots or multi-viewport visual sampling unless truly needed; current-viewport screenshots are the low-latency default. A missing DOM/accessibility match does not prove a visible button is absent. Inspect the observation/full-page scan and retry with `coordinate_x`/`coordinate_y` when the button is visible but text matching failed. Use `screenshot` with `full_page:true` only when visual layout matters; observation screenshots are tool-only by default and should not be presented as the final user-facing result. Do not set `attach_preview`, `show_in_chat`, or `attach_file` for browser observation screenshots unless the user explicitly asks to save, download, or show the screenshot. Before summarizing a webpage or saying what a page contains, use a full-page text/readable result (`browser.readable`, `browser.text`, or `browser.open` after it reports `full_page:true`); do not conclude from only `browser.info`, `observe`, `screenshot`, or the first viewport. For clicks/type, the browser tool will automatically scan the full page when the first viewport misses; do not stop and ask the user to scroll for normal offscreen controls. For clicks, prefer a stable selector when available; otherwise use `label`, `button_text`, or `aria_label` from `find_elements`; use screenshot coordinates after the target is in the current viewport or when the result says `needs_visual_coordinates:true`. For website workflows, keep using `browser_use` for bounded micro-actions in the same turn until the requested page task is actually complete; a successful observe/scroll/find/click/type step is only intermediate progress, not the final answer. Human-verification words visible on the page are not a failure and must not scare you into stopping; pause only when the tool explicitly returns `requires_user_verification:true`, then the app surfaces the shared browser on the same page and `observe` scrolls to the verification area. After the user completes verification, continue from the current page using the next hidden viewport observation; do not call `browser.open`, `browser.readable`, or navigate to the same URL again after verification unless a forced reload is explicitly required. Do not retry the same failed selector.
-        - For image-generation websites, after entering the prompt and clicking generate/download, use `browser_use` action `wait_for_image` to poll for the generated image and save it as an attachment. Do not repeatedly call generic screenshot/read actions once `wait_for_image` returns a saved file.
+        - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
+        - Browser override: use `browser_use` like Minis: navigate/open the page, use `screenshot` to see the real viewport, decide the next primitive action, then call `click`, `type`, `scroll`, `find_elements`, `get_text`, `get_readable`, `get_backbone`, `scroll_and_collect`, or `wait_for_dom_stable`, and screenshot/read again. DOM/text is auxiliary; the hidden tool-only screenshot is the primary state for visual interaction. Do not use browser automation as an image-generation state machine.
+        - Browser interaction: treat click/type/scroll/find success as intermediate only. Continue bounded primitive `browser_use` steps in the same turn until the user's page task is complete, a final file/result is available, or the tool explicitly returns `requires_user_verification:true`. Use `find_elements` with `scan_page:true` to discover controls across the full page; if DOM matching misses a visible control, scroll it into view and click by viewport coordinates from the screenshot. Use `get_readable`, `get_text`, or `scroll_and_collect` before summarizing long pages; do not conclude from the first viewport. Screenshots are tool-only by default; do not set `attach_preview`, `show_in_chat`, or `attach_file` unless the user asks to save/download/show a screenshot. Human-verification words visible on the page are not a failure; pause only when the tool explicitly returns `requires_user_verification:true`. After the user completes verification, continue from the same shared page using the next screenshot/read result; do not reopen or reload the same URL unless required.
+        - For image generation requests, use the app image-generation tool when available instead of turning `browser_use` into a generated-image-only workflow.
         - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
         - One meaningful step per decision. A write plus one direct verification may share a step when validating the same change. Stop when the tool result completes the user goal.
@@ -2976,16 +2984,17 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": "browser_use",
-                        "description": "Interactive browser tool backed by the iOS WKWebView. Supports up to 3 tabs and actions: inspect, auto, observe, navigate, screenshot, click, type, hover, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, wait_for_image, new_tab, close_tab, list_tabs, set_user_agent, set_viewport, get_cookies, wait_for_dom_stable, execute_js. Use auto for bounded page tasks that require opening a site, typing/searching/submitting, waiting briefly, and reading the final page. Use inspect/get_text/get_readable for full-page reading, and wait_for_image only for image-generation results. Treat click/type/scroll/find success as intermediate, not as page-task completion.",
+                        "description": "Minis-style interactive browser tool backed by the shared iOS WKWebView. Supports up to 3 tabs and primitive actions: navigate, screenshot, click, type, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, get_cookies, wait_for_dom_stable, execute_js, set_user_agent, and set_viewport. Use screenshot to see the real page, then click/type/scroll/find/read, then screenshot/read again. Treat click/type/scroll/find success as intermediate, not as page-task completion.",
                         "parameters": [
                             "type": "object",
                             "properties": [
+                                "tool_title": ["type": "string", "description": "Short user-facing title for this browser step."],
                                 "action": [
                                     "type": "string",
                                     "enum": [
-                                        "inspect", "auto", "observe", "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
+                                        "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
                                         "scroll", "scroll_and_collect", "find_elements", "get_page_info",
-                                        "get_backbone", "fetch", "wait_for_image", "new_tab", "close_tab", "list_tabs",
+                                        "get_backbone", "fetch", "new_tab", "close_tab", "list_tabs",
                                         "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "execute_js"
                                     ],
                                     "description": "Browser action to perform."
@@ -3013,13 +3022,11 @@ final class ChatViewModel {
                                 "keywords": ["type": "string", "description": "Cookie name keywords."],
                                 "fuzzy": ["type": "boolean", "description": "Fuzzy cookie keyword matching."],
                                 "timeout": ["type": "integer", "description": "Timeout in seconds."],
-                                "min_width": ["type": "integer", "description": "For wait_for_image: minimum generated image width."],
-                                "min_height": ["type": "integer", "description": "For wait_for_image: minimum generated image height."],
                                 "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport."],
                                 "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport."],
                                 "reset": ["type": "boolean", "description": "Reset viewport to default."]
                             ],
-                            "required": ["action"]
+                            "required": ["tool_title", "action"]
                         ]
                     ]
                 ]
@@ -13081,15 +13088,13 @@ final class ChatViewModel {
             .lowercased()
             .replacingOccurrences(of: "_", with: ".")
         switch action {
-        case "auto", "browser.auto",
-            "navigate", "browser.navigate",
-            "inspect", "browser.inspect", "page.inspect", "inspect.page", "page.state", "browser.page.state",
-            "observe", "browser.observe", "get.state", "browser.get.state",
+        case "navigate", "browser.navigate",
             "scroll", "browser.scroll",
             "click", "browser.click",
             "type", "browser.type",
             "find.elements", "browser.find.elements",
             "get.page.info", "browser.get.page.info",
+            "get.backbone", "browser.get.backbone",
             "screenshot", "browser.screenshot",
             "execute.js", "browser.execute.js":
             return true
@@ -13278,20 +13283,7 @@ final class ChatViewModel {
         redirected["force_reload"] = false
         redirected["reload"] = false
 
-        let userPrompt = latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if userPromptLooksLikeImageGeneration(userPrompt) {
-            redirected["action"] = "auto"
-            redirected["text"] = firstNonEmptyString(
-                in: redirected,
-                keys: ["text", "value", "input", "content", "message", "prompt"]
-            ) ?? browserAutomationPrompt(from: userPrompt, removing: urlString)
-            redirected["wait_for_image"] = true
-            if redirected["button_text"] == nil && redirected["buttonText"] == nil {
-                redirected["button_text"] = "generate create submit send start run 免费生成 生成图片"
-            }
-        } else {
-            redirected["action"] = "get_readable"
-        }
+        redirected["action"] = "get_readable"
 
         let data = (try? JSONSerialization.data(withJSONObject: redirected, options: [.sortedKeys])) ?? Data()
         return LocalAlpineNativeToolCall(
@@ -13309,95 +13301,7 @@ final class ChatViewModel {
         if toolName == "web_search" {
             return redirectURLSearchToBrowserUseIfNeeded(call, latestUserPrompt: latestUserPrompt)
         }
-        guard toolName == "browser_use" else { return call }
-
-        let userPrompt = latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        var arguments = localAlpineNativeToolArguments(for: call)
-        let action = firstNonEmptyString(
-            in: arguments,
-            keys: ["action", "browser_action", "browser_use_action", "operation", "op", "type"]
-        )?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        let urlString = normalizedBrowserAutomationURLString(firstBrowserURLCandidate(in: arguments))
-        if let searchIntent = browserSearchIntent(from: userPrompt, arguments: arguments),
-           searchIntent.query.isEmpty == false {
-            let passiveActions: Set<String> = [
-                "", "browser_use", "browser.use",
-                "open", "navigate", "goto", "go", "browser.open", "browser.navigate",
-                "readable", "get_readable", "browser.readable",
-                "observe", "get_state", "state", "browser.observe", "browser.get_state",
-                "info", "get_page_info", "browser.info", "text", "get_text", "browser.text"
-            ]
-            let hasExplicitActionTarget = firstNonEmptyString(
-                in: arguments,
-                keys: ["selector", "coordinate_x", "coordinate_y"]
-            ) != nil
-            if passiveActions.contains(action) && !hasExplicitActionTarget {
-                arguments["action"] = "auto"
-                arguments["url"] = urlString ?? searchIntent.url
-                arguments["text"] = searchIntent.query
-                arguments["wait_for_image"] = false
-                arguments["force_reload"] = false
-                arguments["forceReload"] = false
-                arguments["reload"] = false
-                arguments["field_hint"] = arguments["field_hint"] ?? arguments["fieldHint"] ?? "搜索 search query 输入"
-                arguments["button_text"] = arguments["button_text"] ?? arguments["buttonText"] ?? searchIntent.buttonText
-                arguments["max_loops"] = max(Self.nativeToolIntValue(arguments["max_loops"] ?? arguments["maxLoops"]) ?? 6, 6)
-                let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
-                return LocalAlpineNativeToolCall(
-                    id: call.id,
-                    name: "browser_use",
-                    arguments: String(data: data, encoding: .utf8) ?? call.arguments
-                )
-            }
-        }
-
-        guard userPromptLooksLikeImageGeneration(userPrompt) else { return call }
-
-        let lowerTarget = [
-            urlString,
-            firstNonEmptyString(in: arguments, keys: ["target", "query", "q", "keywords", "keyword"])
-        ]
-            .compactMap { $0?.lowercased() }
-            .joined(separator: " ")
-        let imageSiteHinted = lowerTarget.contains("imagefree")
-            || lowerTarget.contains("image-free")
-            || lowerTarget.contains("image generator")
-            || lowerTarget.contains("generate image")
-
-        let passiveActions: Set<String> = [
-            "", "browser_use", "browser.use",
-            "open", "navigate", "goto", "go", "browser.open", "browser.navigate",
-            "readable", "get_readable", "browser.readable",
-            "observe", "get_state", "state", "browser.observe", "browser.get_state",
-            "info", "get_page_info", "browser.info", "text", "get_text", "browser.text"
-        ]
-        guard passiveActions.contains(action), urlString != nil || imageSiteHinted else {
-            return call
-        }
-
-        arguments["action"] = "auto"
-        if let urlString {
-            arguments["url"] = urlString
-        }
-        arguments["text"] = firstNonEmptyString(
-            in: arguments,
-            keys: ["text", "value", "input", "content", "message", "prompt"]
-        ) ?? browserAutomationPrompt(from: userPrompt, removing: urlString ?? "")
-        arguments["wait_for_image"] = true
-        arguments["force_reload"] = false
-        arguments["forceReload"] = false
-        arguments["reload"] = false
-        arguments["max_loops"] = max(Self.nativeToolIntValue(arguments["max_loops"] ?? arguments["maxLoops"]) ?? 3, 3)
-        if arguments["button_text"] == nil && arguments["buttonText"] == nil {
-            arguments["button_text"] = "generate create submit send start run continue next 免费生成 生成图片 立即生成 开始生成"
-        }
-
-        let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
-        return LocalAlpineNativeToolCall(
-            id: call.id,
-            name: "browser_use",
-            arguments: String(data: data, encoding: .utf8) ?? call.arguments
-        )
+        return call
     }
 
     private static func normalizedBrowserAutomationURLString(_ raw: String?) -> String? {
@@ -13479,97 +13383,6 @@ final class ChatViewModel {
             return nil
         }
         return url.absoluteString
-    }
-
-    private static func userPromptLooksLikeImageGeneration(_ prompt: String) -> Bool {
-        let lower = prompt.lowercased()
-        let imageWords = ["图", "图片", "照片", "画", "image", "photo", "picture"]
-        let generateWords = ["生成", "生图", "画一", "做一", "给我", "create", "generate", "make"]
-        return imageWords.contains { lower.contains($0) }
-            && generateWords.contains { lower.contains($0) }
-    }
-
-    private struct BrowserSearchIntent {
-        let url: String
-        let query: String
-        let buttonText: String
-    }
-
-    private static func browserSearchIntent(
-        from prompt: String,
-        arguments: [String: Any]
-    ) -> BrowserSearchIntent? {
-        let promptText = prompt
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = promptText.lowercased()
-        let explicitQuery = firstNonEmptyString(
-            in: arguments,
-            keys: ["text", "value", "input", "content", "message", "prompt", "query", "q", "keyword", "keywords"]
-        )
-        let rawURL = normalizedBrowserAutomationURLString(firstBrowserURLCandidate(in: arguments))
-        let host = rawURL.flatMap { URL(string: $0)?.host?.lowercased() } ?? ""
-
-        let url: String
-        let buttonText: String
-        if host.contains("baidu") || lower.contains("百度") || lower.contains("baidu") {
-            url = rawURL ?? "https://www.baidu.com/"
-            buttonText = "百度一下 搜索 搜一下 search submit go"
-        } else if host.contains("bing") || lower.contains("必应") || lower.contains("bing") {
-            url = rawURL ?? "https://www.bing.com/"
-            buttonText = "搜索 search submit go"
-        } else if host.contains("google") || lower.contains("谷歌") || lower.contains("google") {
-            url = rawURL ?? "https://www.google.com/"
-            buttonText = "Google Search 搜索 search submit go"
-        } else if host.contains("sogou") || lower.contains("搜狗") || lower.contains("sogou") {
-            url = rawURL ?? "https://www.sogou.com/"
-            buttonText = "搜狗搜索 搜索 search submit go"
-        } else if lower.contains("搜索") || lower.contains("搜一下") || lower.contains("查找") || lower.contains("search") {
-            url = rawURL ?? "https://www.baidu.com/"
-            buttonText = "百度一下 搜索 搜一下 search submit go"
-        } else {
-            return nil
-        }
-
-        let query = explicitQuery ?? browserSearchQuery(from: promptText, removingURL: rawURL)
-        let cleanedQuery = query
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanedQuery.isEmpty else { return nil }
-        return BrowserSearchIntent(url: url, query: cleanedQuery, buttonText: buttonText)
-    }
-
-    private static func browserSearchQuery(from prompt: String, removingURL urlString: String?) -> String {
-        var cleaned = prompt
-            .replacingOccurrences(of: #"https?://\S+"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"(?i)\b(open|go to|navigate to|search for|search)\b"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"打开|进入|访问|去|网页|网站|用|在|帮我|给我|请|一下|查找"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"百度搜索|百度一下|百度|必应搜索|必应|谷歌搜索|谷歌|搜狗搜索|搜狗|搜索|搜一下"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let urlString, !urlString.isEmpty {
-            cleaned = cleaned
-                .replacingOccurrences(of: urlString, with: " ")
-                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if cleaned.hasPrefix("搜") {
-            cleaned.removeFirst()
-            cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return cleaned
-    }
-
-    private static func browserAutomationPrompt(from prompt: String, removing urlString: String) -> String {
-        var cleaned = prompt
-            .replacingOccurrences(of: urlString, with: " ")
-            .replacingOccurrences(of: #"https?://\S+"#, with: " ", options: .regularExpression)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleaned.isEmpty {
-            cleaned = "生成一张图片"
-        }
-        return cleaned
     }
 
     private static func firstNonEmptyString(
@@ -13778,9 +13591,7 @@ final class ChatViewModel {
         if terminalActions.contains(action) {
             return true
         }
-        let hasSavedFile = result.summary.localizedCaseInsensitiveContains("\"file_url\"")
-            || result.summary.localizedCaseInsensitiveContains("已等待到网页生成图片")
-            || result.summary.localizedCaseInsensitiveContains("已下载网页资源")
+        let hasSavedFile = result.summary.localizedCaseInsensitiveContains("已下载网页资源")
         let hasImagePreviewResult = action == "browser.wait_for_image"
             && result.summary.localizedCaseInsensitiveContains("\"preview_images\"")
         if hasSavedFile || hasImagePreviewResult {
@@ -13794,12 +13605,12 @@ final class ChatViewModel {
         result: LocalAlpineAgentResult? = nil
     ) -> String {
         let args = localAlpineNativeToolArguments(for: call)
-        let raw = (args["browser_use_action"] as? String)
+        let raw = result.flatMap { firstJSONStringValue(in: $0.summary, key: "browser_action") }
+            ?? (args["browser_use_action"] as? String)
             ?? (args["browser_action"] as? String)
             ?? (args["operation"] as? String)
             ?? (args["op"] as? String)
             ?? (args["action"] as? String)
-            ?? result.flatMap { firstJSONStringValue(in: $0.summary, key: "browser_action") }
             ?? result.flatMap { firstJSONStringValue(in: $0.summary, key: "action") }
             ?? ""
         let normalized = raw
@@ -13817,6 +13628,8 @@ final class ChatViewModel {
             return "browser.fetch"
         case "wait.for.image", "wait.image", "image.result", "browser.wait.for.image":
             return "browser.wait_for_image"
+        case "wait.for.dom.stable", "browser.wait.for.dom.stable":
+            return "browser.wait_for_dom_stable"
         case "get.page.info", "info", "browser.get.page.info":
             return "browser.get_page_info"
         case "inspect", "page.inspect", "inspect.page", "page.state", "browser.inspect", "browser.page.state":
@@ -13827,6 +13640,20 @@ final class ChatViewModel {
             return "browser.get_backbone"
         case "scroll.and.collect", "browser.scroll.and.collect":
             return "browser.scroll_and_collect"
+        case "hover", "browser.hover":
+            return "browser.hover"
+        case "execute.js", "browser.execute.js":
+            return "browser.execute_js"
+        case "set.user.agent", "browser.set.user.agent":
+            return "browser.set_user_agent"
+        case "set.viewport", "browser.set.viewport":
+            return "browser.set_viewport"
+        case "get.cookies", "browser.get.cookies":
+            return "browser.get_cookies"
+        case "new.tab", "browser.new.tab":
+            return "browser.new_tab"
+        case "close.tab", "browser.close.tab":
+            return "browser.close_tab"
         case "list.tabs", "browser.list.tabs":
             return "browser.list_tabs"
         default:
@@ -13840,12 +13667,14 @@ final class ChatViewModel {
     ) -> String {
         let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if name == "browser_use" || name == "web_search" {
+            let browserAction = localAlpineBrowserActionName(from: call, result: result)
             if let summary = firstJSONStringValue(in: result.summary, key: "summary"),
                !summary.isEmpty {
                 return summary
             }
             if let fileURL = firstJSONStringValue(in: result.summary, key: "file_url"),
-               !fileURL.isEmpty {
+               !fileURL.isEmpty,
+               browserAction == "browser.fetch" || browserAction == "browser.wait_for_image" {
                 return "已完成网页操作，并保存了生成结果：\(fileURL)"
             }
             if let error = firstJSONStringValue(in: result.summary, key: "error"),
@@ -14090,7 +13919,7 @@ final class ChatViewModel {
             "role": "system",
             "content": """
             The previous browser result was an intermediate page-operation state, but the assistant did not issue the next browser tool call. The app is continuing the same shared browser session automatically.
-            Treat the previous prose as premature. Continue with the browser result after this forced tool call. Do not navigate/reload the same URL unless explicitly required. Stop only after the user's page task is complete, a final file/result exists, or the tool explicitly reports requires_user_verification.
+            Treat the previous prose as premature. Continue from the current screenshot/read result after this forced tool call. Do not navigate/reload the same URL unless explicitly required. Stop only after the user's page task is complete, a final file/result exists, or the tool explicitly reports requires_user_verification.
             """
         ]
     }
@@ -14103,16 +13932,24 @@ final class ChatViewModel {
         switch normalized {
         case "auto", "complete.task", "browser.complete.task", "browser.auto":
             return "browser.auto"
+        case "browser.use", "browser.use.browser.use", "browser_use":
+            return "browser_use"
         case "find.elements", "browser.find.elements":
             return "browser.find_elements"
         case "scroll.and.collect", "browser.scroll.and.collect":
             return "browser.scroll_and_collect"
         case "wait.for.image", "wait.image", "image.result", "browser.wait.for.image":
             return "browser.wait_for_image"
+        case "wait.for.dom.stable", "browser.wait.for.dom.stable":
+            return "browser.wait_for_dom_stable"
         case "readable", "get.readable", "get.readable.webpage", "browser.readable":
             return "browser.readable"
         case "text", "get.text", "browser.text":
             return "browser.text"
+        case "get.page.info", "info", "browser.info", "browser.get.page.info":
+            return "browser.get_page_info"
+        case "get.backbone", "backbone", "browser.get.backbone":
+            return "browser.get_backbone"
         case "open", "navigate", "browser.open", "browser.navigate":
             return "browser.open"
         case "inspect", "page.inspect", "browser.inspect":
@@ -14125,6 +13962,22 @@ final class ChatViewModel {
             return "browser.type"
         case "scroll", "browser.scroll":
             return "browser.scroll"
+        case "hover", "browser.hover":
+            return "browser.hover"
+        case "execute.js", "browser.execute.js":
+            return "browser.execute_js"
+        case "set.user.agent", "browser.set.user.agent":
+            return "browser.set_user_agent"
+        case "set.viewport", "browser.set.viewport":
+            return "browser.set_viewport"
+        case "get.cookies", "browser.get.cookies":
+            return "browser.get_cookies"
+        case "new.tab", "browser.new.tab":
+            return "browser.new_tab"
+        case "close.tab", "browser.close.tab":
+            return "browser.close_tab"
+        case "list.tabs", "browser.list.tabs":
+            return "browser.list_tabs"
         case "fetch", "download", "browser.fetch":
             return "browser.fetch"
         default:
@@ -14136,6 +13989,10 @@ final class ChatViewModel {
         from call: LocalAlpineNativeToolCall,
         toolContent: String
     ) -> String {
+        if let browserAction = firstJSONStringValue(in: toolContent, key: "browser_action"),
+           !browserAction.isEmpty {
+            return normalizedBrowserResultActionName(browserAction)
+        }
         if let action = firstJSONStringValue(in: toolContent, key: "action"),
            !action.isEmpty {
             return normalizedBrowserResultActionName(action)
@@ -14147,9 +14004,7 @@ final class ChatViewModel {
         call: LocalAlpineNativeToolCall,
         toolContent: String
     ) -> Bool {
-        if toolContent.localizedCaseInsensitiveContains("\"file_url\"")
-            || toolContent.localizedCaseInsensitiveContains("已等待到网页生成图片")
-            || toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
+        if toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
             return true
         }
 
@@ -14157,32 +14012,21 @@ final class ChatViewModel {
         if action == "browser.fetch" || action == "browser.wait_for_image" {
             return true
         }
+        if action == "browser.screenshot",
+           anyJSONBoolValue(in: toolContent, key: "attach_preview", equals: true) {
+            return true
+        }
 
         let ok = anyJSONBoolValue(in: toolContent, key: "ok", equals: true)
-        let fullPage = anyJSONBoolValue(in: toolContent, key: "full_page", equals: true)
         if ok && ["browser.readable", "browser.text"].contains(action) {
             return true
         }
-        if ok && action == "browser.open" && fullPage {
-            return true
-        }
-        if ok && action == "browser.auto" && (
-            toolContent.localizedCaseInsensitiveContains("\"file_url\"")
-                || toolContent.localizedCaseInsensitiveContains("\"generation_state\" : \"success\"")
-                || toolContent.localizedCaseInsensitiveContains("\"generation_state\":\"success\"")
-                || toolContent.localizedCaseInsensitiveContains("自动搜索流程已完成")
-                || toolContent.localizedCaseInsensitiveContains("自动浏览器流程已完成")
-        ) {
-            return true
-        }
-
         return false
     }
 
     private static func browserToolResultLooksLikeInteractiveIntermediate(
         call: LocalAlpineNativeToolCall,
-        toolContent: String,
-        latestUserPrompt: String?
+        toolContent: String
     ) -> Bool {
         if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
             return false
@@ -14193,7 +14037,6 @@ final class ChatViewModel {
 
         let action = browserResultActionName(from: call, toolContent: toolContent)
         let lowerContent = toolContent.lowercased()
-        let prompt = latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         let arguments = localAlpineNativeToolArguments(for: call)
         let hasExplicitInteractionArgument = firstNonEmptyString(
             in: arguments,
@@ -14203,95 +14046,52 @@ final class ChatViewModel {
                 "fieldLabel", "selector", "coordinate_x", "coordinate_y"
             ]
         ) != nil
-        let promptLooksInteractive = [
-            "打开", "继续", "点击", "填写", "输入", "提交", "搜索", "查找", "生成", "下载", "登录", "注册", "下一步", "操作",
-            "open", "continue", "click", "fill", "type", "submit", "search", "find", "generate", "download", "login", "sign in", "next"
-        ].contains { prompt.contains($0) }
         let actionIsInteractiveProgress: Set<String> = [
-            "browser.observe", "browser.inspect", "browser.scroll", "browser.find_elements",
-            "browser.click", "browser.type", "browser.scroll_and_collect"
+            "browser.open", "browser.screenshot", "browser.observe", "browser.inspect", "browser.scroll", "browser.find_elements",
+            "browser.click", "browser.type", "browser.scroll_and_collect", "browser.wait_for_dom_stable"
         ]
 
+        if ["browser.click", "browser.type", "browser.execute_js"].contains(action),
+           anyJSONBoolValue(in: toolContent, key: "ok", equals: true) {
+            return true
+        }
+        if action == "browser.wait_for_dom_stable",
+           anyJSONBoolValue(in: toolContent, key: "ok", equals: true),
+           lowerContent.contains("\"visual_observation\"") {
+            return true
+        }
         if anyJSONBoolValue(in: toolContent, key: "needs_visual_coordinates", equals: true) {
             return true
         }
         if let stateLabel = firstJSONStringValue(in: toolContent, key: "state_label")?.lowercased(),
            ["form_available", "needs_more_scroll", "ready"].contains(stateLabel),
-           actionIsInteractiveProgress.contains(action),
-           (hasExplicitInteractionArgument || promptLooksInteractive || stateLabel != "ready") {
+           actionIsInteractiveProgress.contains(action) {
             return true
         }
         if anyJSONBoolValue(in: toolContent, key: "can_scroll_down", equals: true),
-           ["browser.observe", "browser.inspect", "browser.scroll", "browser.find_elements"].contains(action),
-           hasExplicitInteractionArgument || promptLooksInteractive {
-            return true
-        }
-        if anyJSONBoolValue(in: toolContent, key: "prompt_field_found", equals: true)
-            || anyJSONBoolValue(in: toolContent, key: "generate_button_found", equals: true)
-            || anyJSONBoolValue(in: toolContent, key: "generate_button_enabled", equals: true) {
-            return hasExplicitInteractionArgument || promptLooksInteractive || userPromptLooksLikeImageGeneration(latestUserPrompt ?? "")
-        }
-        if let generationState = firstJSONStringValue(in: toolContent, key: "generation_state")?.lowercased(),
-           ["idle", "ready", "generating", "waiting", "unknown", "retry"].contains(generationState) {
+           ["browser.open", "browser.screenshot", "browser.observe", "browser.inspect", "browser.scroll", "browser.find_elements"].contains(action) {
             return true
         }
         if (firstJSONIntValue(in: toolContent, key: "visible_element_count") ?? 0) > 0,
-           ["browser.observe", "browser.find_elements", "browser.scroll"].contains(action),
-           hasExplicitInteractionArgument || promptLooksInteractive {
+           ["browser.open", "browser.screenshot", "browser.observe", "browser.find_elements", "browser.scroll"].contains(action) {
             return true
         }
         if (firstJSONIntValue(in: toolContent, key: "count") ?? 0) > 0,
-           action == "browser.find_elements",
-           hasExplicitInteractionArgument || promptLooksInteractive {
+           action == "browser.find_elements" {
             return true
         }
         if action == "browser.find_elements",
-           (hasExplicitInteractionArgument || promptLooksInteractive),
            lowerContent.contains("\"visual_viewports\"") {
+            return true
+        }
+        if action == "browser.find_elements",
+           lowerContent.contains("\"focused_element\"") {
             return true
         }
 
         return lowerContent.contains("tool-only current viewport")
             && actionIsInteractiveProgress.contains(action)
-            && (hasExplicitInteractionArgument || promptLooksInteractive)
-    }
-
-    private static func browserContinuationShouldScanPage(
-        action: String,
-        toolContent: String
-    ) -> Bool {
-        let stateLabel = firstJSONStringValue(in: toolContent, key: "state_label")?.lowercased() ?? ""
-        if stateLabel == "needs_more_scroll" {
-            return true
-        }
-        return anyJSONBoolValue(in: toolContent, key: "can_scroll_down", equals: true)
-            && ["browser.observe", "browser.inspect", "browser.scroll"].contains(action)
-            && !anyJSONBoolValue(in: toolContent, key: "prompt_field_found", equals: true)
-            && !anyJSONBoolValue(in: toolContent, key: "generate_button_found", equals: true)
-    }
-
-    private static func browserContinuationShouldTypePrompt(
-        arguments: [String: Any],
-        toolContent: String,
-        latestUserPrompt: String?
-    ) -> Bool {
-        if firstNonEmptyString(
-            in: arguments,
-            keys: ["text", "value", "input", "content", "message", "prompt", "expected_prompt"]
-        ) != nil {
-            return true
-        }
-        if anyJSONBoolValue(in: toolContent, key: "prompt_field_found", equals: true) {
-            return true
-        }
-        let prompt = latestUserPrompt?.lowercased() ?? ""
-        let asksToType = [
-            "填写", "输入", "搜索", "查找", "生成", "写入", "填入",
-            "fill", "type", "enter", "search", "find", "generate", "write"
-        ].contains { prompt.contains($0) }
-        return asksToType
-            && (firstJSONStringValue(in: toolContent, key: "state_label")?.lowercased() == "form_available"
-                || toolContent.localizedCaseInsensitiveContains("\"visible_elements\""))
+            && (hasExplicitInteractionArgument || action == "browser.open" || action == "browser.screenshot" || action == "browser.observe")
     }
 
     private static func localNativeBrowserToolResultShouldStop(
@@ -14299,12 +14099,6 @@ final class ChatViewModel {
         toolContent: String
     ) -> Bool {
         if browserToolResultLooksComplete(call: call, toolContent: toolContent) {
-            return true
-        }
-        if let generationState = firstJSONStringValue(in: toolContent, key: "generation_state")?.lowercased(),
-           generationState == "failed",
-           !anyJSONBoolValue(in: toolContent, key: "retry_visible", equals: true),
-           !anyJSONBoolValue(in: toolContent, key: "generate_button_enabled", equals: true) {
             return true
         }
         if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
@@ -14325,17 +14119,11 @@ final class ChatViewModel {
         guard effectiveCall.name.trimmingCharacters(in: .whitespacesAndNewlines) == "browser_use" else {
             return nil
         }
-        let isImageWorkflow = browserToolResultLooksLikeImageWorkflow(
-            call: effectiveCall,
-            toolContent: toolContent,
-            latestUserPrompt: latestUserPrompt
-        )
         let isInteractiveIntermediate = browserToolResultLooksLikeInteractiveIntermediate(
             call: effectiveCall,
-            toolContent: toolContent,
-            latestUserPrompt: latestUserPrompt
+            toolContent: toolContent
         )
-        guard isImageWorkflow || isInteractiveIntermediate else {
+        guard isInteractiveIntermediate else {
             return nil
         }
         if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
@@ -14346,6 +14134,7 @@ final class ChatViewModel {
         }
 
         let lowerContent = toolContent.lowercased()
+        let action = browserResultActionName(from: effectiveCall, toolContent: toolContent)
         if lowerContent.contains("自动流程未能输入文本")
             || lowerContent.contains("自动流程未能点击目标按钮")
             || lowerContent.contains("点击后没有验证到生成已开始")
@@ -14354,6 +14143,14 @@ final class ChatViewModel {
         }
 
         var arguments = localAlpineNativeToolArguments(for: effectiveCall)
+        let continuationStage = firstNonEmptyString(
+            in: arguments,
+            keys: ["continuation_stage", "continuationStage"]
+        )?.lowercased() ?? ""
+        if action == "browser.screenshot",
+           continuationStage == "focused_element_view" {
+            return nil
+        }
         for key in ["url", "link", "href", "page_url", "source", "input_url"] {
             arguments.removeValue(forKey: key)
         }
@@ -14361,60 +14158,38 @@ final class ChatViewModel {
         arguments["forceReload"] = false
         arguments["reload"] = false
 
-        let prompt = browserContinuationPrompt(
-            from: arguments,
-            latestUserPrompt: latestUserPrompt
-        )
-        let action = browserResultActionName(from: effectiveCall, toolContent: toolContent)
-        let generationState = firstJSONStringValue(in: toolContent, key: "generation_state")?.lowercased() ?? ""
-        let clicked = action == "browser.click"
-            && (lowerContent.contains("\"ok\" : true") || lowerContent.contains("\"ok\":true"))
-        let shouldWaitForImage = isImageWorkflow && (clicked
-            || ["generating", "waiting", "success"].contains(generationState)
-            || ((firstJSONIntValue(in: toolContent, key: "new_candidate_count") ?? 0) > 0))
-
-        if shouldWaitForImage {
-            arguments["action"] = "wait_for_image"
-            arguments["wait_for_image"] = true
-            if let prompt, !prompt.isEmpty {
-                arguments["query"] = prompt
-                arguments["expected_prompt"] = prompt
-            }
-            if arguments["timeout"] == nil {
-                arguments["timeout"] = 60
-            }
-        } else if !isImageWorkflow && browserContinuationShouldScanPage(
-            action: action,
-            toolContent: toolContent
-        ) {
+        if ["browser.click", "browser.type", "browser.execute_js"].contains(action),
+           anyJSONBoolValue(in: toolContent, key: "ok", equals: true) {
+            arguments["action"] = "wait_for_dom_stable"
+            arguments["timeout"] = max(nativeToolIntValue(arguments["timeout"]) ?? 8, 8)
+            arguments["continuation_stage"] = "post_action_wait"
+        } else if action == "browser.wait_for_dom_stable" {
+            arguments["action"] = "screenshot"
+            arguments["full_page"] = false
+            arguments["attach_preview"] = false
+            arguments["screenshot"] = true
+            arguments["continuation_stage"] = "post_action_view"
+        } else if ["browser.open", "browser.screenshot", "browser.scroll", "browser.observe", "browser.inspect"].contains(action)
+            || (action == "browser.find_elements" && !lowerContent.contains("\"visual_viewports\"")) {
             arguments["action"] = "find_elements"
             arguments["scan_page"] = true
-            arguments["full_page"] = true
-            arguments["screenshot"] = false
+            arguments["screenshot"] = true
             arguments["capture_visuals"] = true
-            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 18, 18)
-            if let prompt, !prompt.isEmpty {
-                arguments["target"] = prompt
-                arguments["query"] = prompt
-            }
+            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 10, 10)
+            arguments["continuation_stage"] = "page_scan"
+        } else if action == "browser.find_elements",
+                  lowerContent.contains("\"focused_element\"") {
+            arguments["action"] = "screenshot"
+            arguments["full_page"] = false
+            arguments["attach_preview"] = false
+            arguments["screenshot"] = true
+            arguments["continuation_stage"] = "focused_element_view"
         } else {
-            arguments["action"] = "auto"
-            arguments["wait_for_image"] = isImageWorkflow
-            if let prompt, !prompt.isEmpty {
-                if isImageWorkflow || browserContinuationShouldTypePrompt(
-                    arguments: arguments,
-                    toolContent: toolContent,
-                    latestUserPrompt: latestUserPrompt
-                ) {
-                    arguments["text"] = prompt
-                } else if arguments["target"] == nil && arguments["label"] == nil {
-                    arguments["target"] = prompt
-                }
-            }
-            arguments["max_loops"] = max(nativeToolIntValue(arguments["max_loops"] ?? arguments["maxLoops"]) ?? 6, 6)
-            if arguments["button_text"] == nil && arguments["buttonText"] == nil {
-                arguments["button_text"] = "generate create submit send search start run continue next 免费生成 生成图片 立即生成 开始生成 提交 搜索 继续 下一步"
-            }
+            arguments["action"] = "screenshot"
+            arguments["full_page"] = false
+            arguments["attach_preview"] = false
+            arguments["screenshot"] = true
+            arguments["continuation_stage"] = "viewport_view"
         }
 
         let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
@@ -14423,58 +14198,6 @@ final class ChatViewModel {
             name: "browser_use",
             arguments: String(data: data, encoding: .utf8) ?? "{}"
         )
-    }
-
-    private static func browserToolResultLooksLikeImageWorkflow(
-        call: LocalAlpineNativeToolCall,
-        toolContent: String,
-        latestUserPrompt: String?
-    ) -> Bool {
-        let arguments = localAlpineNativeToolArguments(for: call)
-        if nativeToolBoolValue(arguments["wait_for_image"] ?? arguments["waitForImage"] ?? arguments["image_result"] ?? arguments["imageResult"]) == true {
-            return true
-        }
-        let action = localAlpineBrowserActionName(from: call)
-        if action == "browser.wait_for_image" {
-            return true
-        }
-        if userPromptLooksLikeImageGeneration(latestUserPrompt ?? ""),
-           action == "browser.auto" {
-            return true
-        }
-        let lowerArguments = arguments
-            .map { "\($0.key)=\($0.value)" }
-            .joined(separator: " ")
-            .lowercased()
-        if action == "browser.click",
-           lowerArguments.contains("generate") || lowerArguments.contains("生成") || lowerArguments.contains("image") {
-            return true
-        }
-        let lowerContent = toolContent.lowercased()
-        return lowerContent.contains("\"generation_state\"")
-            || lowerContent.contains("\"generate_button_found\"")
-            || lowerContent.contains("\"generate_button_enabled\"")
-            || lowerContent.contains("browser.wait_for_image")
-            || lowerContent.contains("generated image")
-            || lowerContent.contains("generate free image")
-            || lowerContent.contains("生成图片")
-            || lowerContent.contains("结果区")
-    }
-
-    private static func browserContinuationPrompt(
-        from arguments: [String: Any],
-        latestUserPrompt: String?
-    ) -> String? {
-        if let prompt = firstNonEmptyString(
-            in: arguments,
-            keys: ["text", "value", "input", "content", "message", "prompt", "expected_prompt", "query"]
-        ) {
-            return prompt
-        }
-        let latest = latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !latest.isEmpty else { return nil }
-        let urlString = normalizedBrowserAutomationURLString(firstBrowserURLCandidate(in: arguments)) ?? ""
-        return browserAutomationPrompt(from: latest, removing: urlString)
     }
 
     private static func localNativeBrowserFallbackMessage(from toolContent: String) -> String {
@@ -18716,7 +18439,7 @@ final class ChatViewModel {
                 "create/delete a calendar event"
             ]
             : []
-        let browserUseDescription = includeBrowserTools ? "search/open/read/screenshot/download webpages, " : ""
+        let browserUseDescription = includeBrowserTools ? "search/open/read/screenshot/click/type/scroll/download webpages, " : ""
         let imageUseDescription = includeImageTools ? "generate or edit images through the app-side image endpoint, " : ""
         let memoryUseDescription = includeMemoryTools ? "save a memory or recall stored memories, " : ""
         let officeUseDescription = includeOfficeTools ? "directly create or delete an Excel/PPT/Word/PDF file" : ""
@@ -18764,7 +18487,7 @@ final class ChatViewModel {
             ? "- Shortcuts: `shortcuts.run` with `name` and optional `input`; `shortcuts.open` with `name`; `shortcuts.create` only opens the system creation screen.\n"
             : ""
         let browserActionExamples = includeBrowserTools
-            ? "- Browser fallback actions: `web.search`, `browser.readable`, `browser.inspect`, `browser.screenshot`, `browser.fetch`, `browser.wait_for_image`, and `browser_use` with `browser_use_action` plus fields such as `url`, `selector`, `text`, `script`, `tab_id`, `timeout`, `screenshot`, `full_page`, `attach_preview`, `max_length`, `min_width`, `min_height`.\n"
+            ? "- Browser fallback actions: `web.search`, `browser.readable`, `browser.screenshot`, `browser.fetch`, and `browser_use` with `browser_use_action` plus fields such as `url`, `selector`, `text`, `script`, `tab_id`, `timeout`, `screenshot`, `full_page`, `attach_preview`, and `max_length`.\n"
             : ""
         let officeActionExamples = includeOfficeTools
             ? "- Office/PDF fallback actions: `office.create_excel`, `office.create_ppt`, `office.create_word`, `office.create_pdf`, `office.delete`. Include `title`, `file_name`, structured content (`sheets`, `slides`, or `sections`), optional `theme`, and for deletion `file_url` or `latest:true`.\n"
@@ -18774,9 +18497,9 @@ final class ChatViewModel {
             : ""
         let browserInstructions = includeBrowserTools ? """
 
-        Browser override: for interactive websites, call `browser_use` with `action:"observe"` first and use the hidden tool-only current viewport screenshot as the primary state for deciding clicks, typing, scrolling, and verification-area positioning. DOM/text is auxiliary and may be stale or incomplete on Canvas, lazy-loaded, Cloudflare, or generated-result pages. Use `inspect` for full-page reading/summarization, not as the main driver for visual interaction. Use `auto` only for clearly bounded generated-image or simple submit workflows.
+        Browser override: use `browser_use` like Minis. For interactive pages, open/navigate first, use `screenshot` to see the current viewport, then issue one primitive action (`click`, `type`, `scroll`, `find_elements`, `get_text`, `get_readable`, `get_backbone`, `scroll_and_collect`, `wait_for_dom_stable`, `fetch`) and screenshot/read again. The hidden tool-only screenshot is primary evidence for visual interaction; DOM/text is auxiliary.
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when the answer depends on current/recent/external/source-backed facts or live website content. Use search when there is no exact URL, readable for a known URL or result verification, and `browser_use` for interactive page work. Prefer `browser_use` with `action:"auto"` for form/generator/check-out style tasks that require opening a site, filling text, clicking a submit/generate button, and waiting for a result; it first inspects the real page logic (fields, action controls, verification, loading, failure, and result signals), then runs an internal observe/action/observe loop. Use `browser_use` with `action:"observe"` before choosing the next browser action and after every important click/type/scroll/wait action; each observation/action result includes a lightweight hidden current-viewport screenshot for visual decisions. When selectors are unknown, call `browser_use` with `action:"find_elements"` to scan controls across the page; use `scan_page:true`/`max_scrolls` if the target may be below the first viewport, and set `capture_visuals:true` only when visual layout is needed or DOM matching misses a visible target. Do not request full-page screenshots or multi-viewport visual sampling unless truly needed; current-viewport screenshots are the low-latency default. Treat DOM/accessibility scanning as incomplete evidence: if a button is visible in observation/full-page screenshot, click by `coordinate_x`/`coordinate_y` instead of saying the page has no button. Use `screenshot` with `full_page:true` only when visual layout is needed; browser observation screenshots are not chat attachments unless `attach_preview:true`. Do not set `attach_preview`, `show_in_chat`, or `attach_file` for browser observation screenshots unless the user explicitly asks to save, download, or show the screenshot. Before summarizing a webpage or saying what a page contains, use a full-page text/readable result (`browser_readable`, `browser.readable`, `browser.text`, or `browser.open` after it reports `full_page:true`); do not conclude from only `browser.info`, `observe`, `screenshot`, or the first viewport. The browser tool auto-scans the full page for missed click/type targets, so do not stop and ask the user to scroll for normal offscreen controls. Then click by stable selector, `label`/`button_text`/`aria_label`, or coordinates when the result says `needs_visual_coordinates:true` or the target is only visually exposed. For multi-step website tasks, continue issuing bounded `browser_use` micro-actions in the same turn until the requested browser workflow is complete or a real blocker appears; do not stop after a single successful intermediate observe/click/scroll/read. If a browser result says `requires_user_verification:true`, the shared browser stays on the same page and `observe` scrolls to the verification area; wait for the app's follow-up observation after the user completes visible shared-browser verification, then continue from the same page without asking the user to send "continue"; do not call `browser.open`, `browser_readable`, or navigate to the same URL again after verification unless a forced reload is explicitly required. For image-generation websites, after entering the prompt and clicking generate/download, call `browser_use` with `action:"wait_for_image"` or use `action:"auto"` with `wait_for_image:true` to poll the visible page and save the generated image as an attachment, then answer from that result instead of repeating screenshots. In Markdown fallback, keep `action:"browser_use"` and put the concrete action in `browser_use_action`. Set `screenshot:true` only when visual evidence must be shown or downloaded; tool-only visual observations are returned automatically for model decisions. Answer from the returned browser result and cite title/URL plainly.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use `browser_use` for interactive page work. Use `find_elements` with `scan_page:true` to discover controls across the full page, `screenshot` for visual state, and viewport coordinates when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or the tool explicitly returns `requires_user_verification:true`. If verification is required, the shared browser stays on the same page; after the user completes it, continue from the next screenshot/read result without reopening/reloading the same URL.
         """ : ""
         let officeInstructions = includeOfficeTools ? """
 

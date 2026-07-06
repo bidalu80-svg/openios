@@ -346,7 +346,7 @@ final class BrowserWebSearchService: NSObject {
         if verificationDetected && !verificationCompleted {
             _ = await scrollToVisibleHumanVerification()
         }
-        let thumbnail = includeScreenshot ? await capturePageThumbnail(prefix: "browser") : nil
+        let thumbnail = includeScreenshot ? await capturePageThumbnail(prefix: "browser_viewport") : nil
         let title = snapshot?.title.isEmpty == false ? snapshot!.title : (url.host ?? url.absoluteString)
         let finalURL = snapshot?.url.isEmpty == false ? snapshot!.url : url.absoluteString
         let text = snapshot?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -386,7 +386,12 @@ final class BrowserWebSearchService: NSObject {
                 "snippet": String(text.prefix(260))
             ]]
         }
-        return payload
+        return await addingViewportVisualObservation(
+            to: payload,
+            call: call,
+            prefix: readable ? "browser_readable_after" : "browser_open_after",
+            note: "Tool-only current viewport after opening/navigating. Use it as the primary visual state for the next browser action."
+        )
     }
 
     private func executeNativeText(_ call: [String: Any]) async -> [String: Any] {
@@ -724,7 +729,7 @@ final class BrowserWebSearchService: NSObject {
         let attachPreview = Self.boolValue(call["attach_preview"] ?? call["attachPreview"] ?? call["show_in_chat"] ?? call["showInChat"]) ?? false
         let screenshot = fullPage
             ? await captureFullPageScreenshot(prefix: "browser_full")
-            : await capturePageThumbnail(prefix: "browser")
+            : await capturePageThumbnail(prefix: "browser_viewport")
         guard let screenshot else {
             return [
                 "action": "browser.screenshot",
@@ -742,12 +747,24 @@ final class BrowserWebSearchService: NSObject {
             "url": url,
             "screenshot_url": screenshot.absoluteString,
             "file_url": screenshot.absoluteString,
+            "image_path": screenshot.path,
+            "file_path": screenshot.path,
             "file_name": screenshot.lastPathComponent,
             "content_type": "image/png",
             "full_page": fullPage,
             "attach_preview": attachPreview,
             "attach_file": attachPreview,
             "preview_images": attachPreview ? [screenshot.absoluteString] : [],
+            "visual_observation": [
+                "screenshot_url": screenshot.absoluteString,
+                "file_url": screenshot.absoluteString,
+                "file_path": screenshot.path,
+                "image_path": screenshot.path,
+                "tool_only": true,
+                "note": fullPage
+                    ? "Tool-only full-page browser screenshot. Use it to decide the next browser action; do not show in chat unless the user asks."
+                    : "Tool-only current viewport browser screenshot. Use it to decide the next browser action; do not show in chat unless the user asks."
+            ],
             "items": [[
                 "title": title,
                 "link": url,
@@ -1064,16 +1081,11 @@ final class BrowserWebSearchService: NSObject {
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
             const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
-            const actionNodes = [];
-            for (const root of allRoots()) {
-              try { actionNodes.push(...Array.from(root.querySelectorAll(clickableSelector)).slice(0, 120)); } catch (_) {}
-            }
-            const actionReady = actionNodes.some(node => visible(node) && !Boolean(node.disabled || node.getAttribute && node.getAttribute('aria-disabled') === 'true' || node.closest && node.closest('[disabled],[aria-disabled="true"]')));
             const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
-            const detected = hasChallengeWidget || (textDetected && !actionReady);
-            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
             const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
-            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText));
+            const completed = Boolean(tokenLength > 0 || successState || (!hasChallengeWidget && !textDetected && !pendingText));
+            const detected = !completed && (hasChallengeWidget || textDetected || pendingText);
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
             return {
               detected,
               provider,
@@ -1476,16 +1488,11 @@ final class BrowserWebSearchService: NSObject {
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
             const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
-            const editableNodes = [];
-            for (const root of allRoots()) {
-              try { editableNodes.push(...Array.from(root.querySelectorAll(editableSelector)).slice(0, 80)); } catch (_) {}
-            }
-            const actionReady = editableNodes.some(node => visible(node) && !Boolean(node.disabled || attr(node, 'aria-disabled') === 'true' || node.closest && node.closest('[disabled],[aria-disabled="true"]')));
             const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
-            const detected = hasChallengeWidget || (textDetected && !actionReady);
-            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
             const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
-            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText));
+            const completed = Boolean(tokenLength > 0 || successState || (!hasChallengeWidget && !textDetected && !pendingText));
+            const detected = !completed && (hasChallengeWidget || textDetected || pendingText);
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
             return {
               detected,
               provider,
@@ -3176,11 +3183,13 @@ final class BrowserWebSearchService: NSObject {
             }
         }
 
-        _ = await evaluateJSONObject(Self.scrollToPageYScript(originalY))
         let returnedItems = Self.prioritizedElements(collected, limit: limit)
         let verification = humanVerification ?? ["detected": false]
         let verificationDetected = Self.boolValue(verification["detected"]) == true
         let verificationCompleted = Self.boolValue(verification["completed"]) == true
+        var focusedElement: [String: Any]?
+        var focusedScrollY: Int?
+        var focusedVisual: [String: Any]?
         let summary: String
         if verificationDetected && !verificationCompleted {
             _ = await scrollToVisibleHumanVerification()
@@ -3188,12 +3197,34 @@ final class BrowserWebSearchService: NSObject {
                 ? "网页存在未完成的人机验证，整页扫描后未找到匹配网页元素。"
                 : "网页存在未完成的人机验证；已滚动扫描整页并找到 \(collected.count) 个网页元素，返回其中 \(returnedItems.count) 个代表项。"
         } else {
+            if let first = returnedItems.first,
+               let targetCenterY = Self.elementPageCenterY(first) ?? Self.elementPageY(first) {
+                let targetY = min(max(targetCenterY - viewportHeight / 2, 0), maxY)
+                _ = await evaluateJSONObject(Self.scrollToPageYScript(targetY))
+                try? await Task.sleep(nanoseconds: 220_000_000)
+                focusedElement = first
+                focusedScrollY = targetY
+                if captureVisuals,
+                   let screenshot = await captureViewportScreenshot(prefix: "browser_find_focus", scrollY: targetY) {
+                    focusedVisual = [
+                        "screenshot_url": screenshot.absoluteString,
+                        "file_url": screenshot.absoluteString,
+                        "file_path": screenshot.path,
+                        "image_path": screenshot.path,
+                        "scroll_y": targetY,
+                        "tool_only": true,
+                        "note": "Tool-only focused viewport after full-page element scan. The browser is left near the best matching element so the next click/type/coordinate action can operate on the visible page."
+                    ]
+                }
+            } else {
+                _ = await evaluateJSONObject(Self.scrollToPageYScript(originalY))
+            }
             summary = collected.isEmpty
                 ? "整页扫描后未找到匹配网页元素。"
                 : "已滚动扫描整页并找到 \(collected.count) 个网页元素，返回其中 \(returnedItems.count) 个代表项。"
         }
 
-        return [
+        var payload: [String: Any] = [
             "action": "browser.find_elements",
             "ok": true,
             "title": metrics["title"] as? String ?? "",
@@ -3214,6 +3245,18 @@ final class BrowserWebSearchService: NSObject {
             "items": returnedItems,
             "summary": visualViewports.isEmpty ? summary : "\(summary) 已同步截取 \(visualViewports.count) 个滚动视口用于视觉核对。"
         ]
+        if let focusedElement {
+            payload["focused_element"] = focusedElement
+        }
+        if let focusedScrollY {
+            payload["focused_scroll_y"] = focusedScrollY
+            payload["current_scroll_y"] = focusedScrollY
+            payload["summary"] = "\(payload["summary"] as? String ?? summary) 已停在最匹配元素附近。"
+        }
+        if let focusedVisual {
+            payload["visual_observation"] = focusedVisual
+        }
+        return payload
     }
 
     private func executeNativeBackbone(_ call: [String: Any]) async -> [String: Any] {
@@ -3458,17 +3501,27 @@ final class BrowserWebSearchService: NSObject {
                 payload["ok"] = true
                 payload["samples"] = Array(history.suffix(6))
                 payload["summary"] = "网页 DOM 已稳定。"
-                return payload
+                return await addingViewportVisualObservation(
+                    to: payload,
+                    call: call,
+                    prefix: "browser_dom_stable_after",
+                    note: "Tool-only current viewport after DOM became stable. Use it as the primary visual state for the next browser action."
+                )
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
 
-        return [
+        return await addingViewportVisualObservation(
+            to: [
             "action": "browser.wait_for_dom_stable",
             "ok": false,
             "samples": Array(history.suffix(6)),
             "error": "Timed out waiting for DOM stability"
-        ]
+            ],
+            call: call,
+            prefix: "browser_dom_stable_timeout",
+            note: "Tool-only current viewport after waiting for DOM stability timed out. Use it to decide whether to continue, click, scroll, or report a real blocker."
+        )
     }
 
     private func executeNativeWaitForImage(_ call: [String: Any]) async -> [String: Any] {
@@ -3815,18 +3868,16 @@ final class BrowserWebSearchService: NSObject {
         case "", "browser_use", "browser.use":
             if wantsSave { return "browser.fetch" }
             if hasScript { return "browser.execute_js" }
-            if hasURL && hasTypedText { return "browser.auto" }
             if hasTypedText && (hasSelector || hasLabel || hasCoordinates) { return "browser.type" }
             if hasLabel || hasCoordinates { return "browser.click" }
             if hasSelector && wantsScreenshot { return "browser.screenshot" }
             if hasSelector { return "browser.find_elements" }
             if wantsScreenshot { return "browser.screenshot" }
-            if hasURL { return "browser.inspect" }
-            return "browser.observe"
+            if hasURL { return "browser.navigate" }
+            return "browser.screenshot"
         case "observe", "get_state", "state", "browser.observe", "browser.get_state":
-            return "browser.observe"
+            return "browser.screenshot"
         case "navigate", "open", "goto", "go", "go_to", "go_to_url", "browser.navigate", "browser.open":
-            if hasURL && hasTypedText { return "browser.auto" }
             return "browser.navigate"
         case "readable", "get_readable", "read_webpage", "browser.readable":
             return "browser.readable"
@@ -3835,7 +3886,7 @@ final class BrowserWebSearchService: NSObject {
         case "info", "get_page_info", "browser.info":
             return "browser.info"
         case "inspect", "page_inspect", "inspect_page", "page_state", "browser.inspect", "browser.page_state":
-            return "browser.inspect"
+            return "browser.get_backbone"
         case "screenshot", "browser.screenshot":
             return "browser.screenshot"
         case "fetch", "download", "browser.fetch":
@@ -3845,7 +3896,7 @@ final class BrowserWebSearchService: NSObject {
         case "type", "browser.type":
             return "browser.type"
         case "auto", "complete_task", "browser.auto", "browser.complete_task":
-            return "browser.auto"
+            return "browser.screenshot"
         case "hover", "browser.hover":
             return "browser.hover"
         case "scroll", "browser.scroll":
@@ -3867,7 +3918,7 @@ final class BrowserWebSearchService: NSObject {
         case "wait_for_dom_stable", "browser.wait_for_dom_stable":
             return "browser.wait_for_dom_stable"
         case "wait_for_image", "wait_image", "image_result", "browser.wait_for_image":
-            return "browser.wait_for_image"
+            return "browser.screenshot"
         case "new_tab", "browser.new_tab":
             return "browser.new_tab"
         case "close_tab", "browser.close_tab":
@@ -3876,9 +3927,8 @@ final class BrowserWebSearchService: NSObject {
             return "browser.list_tabs"
         default:
             if wantsSave { return "browser.fetch" }
-            if hasURL && hasTypedText { return "browser.auto" }
             if hasURL { return "browser.navigate" }
-            return normalized.isEmpty ? "browser.info" : normalized
+            return normalized.isEmpty ? "browser.screenshot" : normalized
         }
     }
 
@@ -4118,6 +4168,22 @@ final class BrowserWebSearchService: NSObject {
         return nil
     }
 
+    private static func elementPageCenterY(_ item: [String: Any]) -> Int? {
+        if let direct = Self.intValue(item["page_center_y"]) {
+            return direct
+        }
+        if let rect = item["rect"] as? [String: Any] {
+            if let center = Self.intValue(rect["page_center_y"] ?? rect["center_y"]) {
+                return center
+            }
+            if let y = Self.intValue(rect["page_y"] ?? rect["y"]) {
+                let height = Self.intValue(rect["height"]) ?? 0
+                return y + max(height / 2, 0)
+            }
+        }
+        return nil
+    }
+
     private static func findElementsIntent(in call: [String: Any]) -> String? {
         let keys = [
             "query", "q", "keywords", "keyword", "label", "button_text", "buttonText",
@@ -4333,16 +4399,12 @@ final class BrowserWebSearchService: NSObject {
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
             const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
-            const actionNodes = [];
-            for (const root of allRoots()) {
-              try { actionNodes.push(...Array.from(root.querySelectorAll(clickableSelector)).slice(0, 120)); } catch (_) {}
-            }
-            const actionReady = actionNodes.some(node => visible(node) && !Boolean(node.disabled || node.getAttribute && node.getAttribute('aria-disabled') === 'true' || node.closest && node.closest('[disabled],[aria-disabled="true"]')));
             const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
-            const detected = hasChallengeWidget || (textDetected && !actionReady);
-            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
             const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
-            return { detected, provider, token_length: tokenLength, completed: Boolean(tokenLength > 0 || successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText)) };
+            const completed = Boolean(tokenLength > 0 || successState || (!hasChallengeWidget && !textDetected && !pendingText));
+            const detected = !completed && (hasChallengeWidget || textDetected || pendingText);
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
+            return { detected, provider, token_length: tokenLength, completed };
           }
           const explicitNode = deepQuerySelector(selector) || findByLabel(desiredLabel);
           const fallbackNode = explicitNode ? null : bestClickableFallback();
@@ -4574,13 +4636,12 @@ final class BrowserWebSearchService: NSObject {
             const textDetected = /prove you are human|verify you are human|checking if the site connection is secure|captcha|turnstile|recaptcha|人机验证|验证您是真人|请验证您是真人|正在检查/.test(bodyText);
             const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
             const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
-            const inputNodes = Array.from(document.querySelectorAll('input, textarea, select, [contenteditable], [role="textbox"]')).slice(0, 120);
-            const actionReady = inputNodes.some(node => visible(node) && !Boolean(node.disabled || attr(node, 'aria-disabled') === 'true' || node.closest('[disabled],[aria-disabled="true"]')));
             const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
-            const detected = hasChallengeWidget || (textDetected && !actionReady);
-            const provider = recaptcha ? 'recaptcha' : (turnstile ? 'cloudflare_turnstile' : (detected ? 'human_verification' : ''));
             const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
-            return { detected, provider, completed: Boolean(successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText)) };
+            const completed = Boolean(successState || (!hasChallengeWidget && !textDetected && !pendingText));
+            const detected = !completed && (hasChallengeWidget || textDetected || pendingText);
+            const provider = recaptcha ? 'recaptcha' : (turnstile ? 'cloudflare_turnstile' : (detected ? 'human_verification' : ''));
+            return { detected, provider, completed };
           }
           const explicitNode = deepQuerySelector(selector) || findByLabel(desiredLabel);
           const fallbackNode = explicitNode ? null : bestEditableFallback();
@@ -4770,22 +4831,17 @@ final class BrowserWebSearchService: NSObject {
             const tokenNode = turnstile || recaptcha;
             const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
             const successState = /成功|success|verified|验证成功|已验证/.test(bodyText);
-            const actionPattern = /generate|create|submit|start|run|continue|next|free image|生成|开始|提交|继续|下一步|立即生成|生成图片/i;
-            const actionReady = findElements('button, a[href], input[type="submit"], input[type="button"], [role="button"], [onclick], [tabindex]')
-              .slice(0, 240)
-              .some(node => visible(node) && !disabledState(node) && actionPattern.test(accessibleText(node)));
             const hasChallengeWidget = Boolean(turnstile || recaptcha || frameDetected);
-            const detected = hasChallengeWidget || (textDetected && !actionReady);
-            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
             const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
-            const completed = Boolean(tokenLength > 0 || successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText));
+            const completed = Boolean(tokenLength > 0 || successState || (!hasChallengeWidget && !textDetected && !pendingText));
+            const detected = !completed && (hasChallengeWidget || textDetected || pendingText);
+            const provider = turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : ''));
             return {
               detected,
               provider,
               token_length: tokenLength,
               completed,
-              success_state: successState,
-              action_ready: actionReady
+              success_state: successState
             };
           }
           function scoreElement(node, label, nodeHref) {
@@ -5932,9 +5988,18 @@ final class BrowserWebSearchService: NSObject {
         let fileManager = FileManager.default
         let tempPrefixes = [
             "browser_live_",
+            "browser_viewport_",
             "browser_observe_",
             "browser_scan_",
             "browser_click_miss_",
+            "browser_click_after_",
+            "browser_type_after_",
+            "browser_scroll_after_",
+            "browser_open_after_",
+            "browser_readable_after_",
+            "browser_dom_stable_after_",
+            "browser_dom_stable_timeout_",
+            "browser_find_focus_",
             "browser_full_",
             "browser_image_timeout_",
             "search_"
@@ -7038,35 +7103,52 @@ final class BrowserWebSearchService: NSObject {
             const r = node.getBoundingClientRect();
             return r.width > 12 && r.height > 12 && r.bottom >= 0 && r.right >= 0 && r.top <= innerHeight * 1.25 && r.left <= innerWidth;
           }
-          function enabledActionButtonPresent() {
-            const selector = 'button, a[href], input[type="submit"], input[type="button"], [role="button"], [onclick], [tabindex]';
-            const actionPattern = /generate|create|submit|start|run|continue|next|free image|生成|开始|提交|继续|下一步|立即生成|生成图片/i;
-            const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 240);
-            return nodes.some(node => {
-              if (!visible(node)) return false;
-              const disabled = Boolean(node.disabled || node.getAttribute('aria-disabled') === 'true' || node.closest('[disabled],[aria-disabled="true"]'));
-              if (disabled) return false;
-              const label = [
-                node.innerText || '',
-                node.textContent || '',
-                node.getAttribute('aria-label') || '',
-                node.getAttribute('title') || '',
-                node.getAttribute('value') || '',
-                node.value || ''
-              ].join(' ').replace(/\\s+/g, ' ').trim();
-              return actionPattern.test(label);
+          function challengeElementVisible() {
+            const selectors = [
+              '[name="cf-turnstile-response"]',
+              'input[id^="cf-chl-widget"]',
+              '.cf-turnstile',
+              '[data-sitekey]',
+              '[name="g-recaptcha-response"]',
+              '.g-recaptcha',
+              'iframe[src*="turnstile" i]',
+              'iframe[src*="recaptcha" i]',
+              'iframe[src*="challenge" i]',
+              '[class*="turnstile" i]',
+              '[class*="captcha" i]',
+              '[id*="turnstile" i]',
+              '[id*="captcha" i]',
+              '[id*="challenge" i]'
+            ];
+            return selectors.some(selector => {
+              try { return Array.from(document.querySelectorAll(selector)).some(visible); }
+              catch (_) { return false; }
             });
           }
-          function enabledEditablePresent() {
-            const selector = 'textarea, input:not([type="hidden"]), select, [contenteditable], [role="textbox"]';
-            const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 160);
-            return nodes.some(node => {
-              if (!visible(node)) return false;
-              return !Boolean(node.disabled || node.getAttribute('aria-disabled') === 'true' || node.closest('[disabled],[aria-disabled="true"]'));
-            });
+          function pageUsableControlPresent() {
+            const selector = 'button, a[href], input:not([type="hidden"]), textarea, select, [contenteditable], [role="button"], [role="link"], [role="textbox"], [onclick], [tabindex]';
+            const challengePattern = /turnstile|captcha|recaptcha|challenge|cf-chl|cloudflare|验证|人机|verify you are human|prove you are human/i;
+            try {
+              return Array.from(document.querySelectorAll(selector)).slice(0, 240).some(node => {
+                if (!visible(node)) return false;
+                const disabled = Boolean(node.disabled || node.getAttribute && node.getAttribute('aria-disabled') === 'true' || node.closest && node.closest('[disabled],[aria-disabled="true"]'));
+                if (disabled) return false;
+                const signature = [
+                  node.id || '',
+                  node.name || '',
+                  node.className || '',
+                  node.getAttribute && node.getAttribute('aria-label') || '',
+                  node.getAttribute && node.getAttribute('title') || '',
+                  node.getAttribute && node.getAttribute('placeholder') || '',
+                  node.innerText || '',
+                  node.textContent || ''
+                ].join(' ');
+                return !challengePattern.test(signature);
+              });
+            } catch (_) {
+              return false;
+            }
           }
-          const actionReady = enabledActionButtonPresent();
-          const pageReady = actionReady || enabledEditablePresent();
           const hasChallengeWidget = Boolean(
             turnstile ||
             recaptcha ||
@@ -7077,15 +7159,20 @@ final class BrowserWebSearchService: NSObject {
           const successState = /verified|验证成功|已验证/.test(bodyText)
             || (/成功|success/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText));
           const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
-          const completedState = tokenLength > 0 || successState || (textChallenge && pageReady && !failedState) || (hasChallengeWidget && pageReady && !pendingText && !failedState);
-          const challengeDetected = !completedState && (hasChallengeWidget || (textChallenge && !pageReady));
+          const challengeVisible = challengeElementVisible();
+          const pageUsable = pageUsableControlPresent();
+          const textOnlyChallenge = textChallenge && !challengeVisible && !hasChallengeWidget && !pendingText && !failedState;
+          const completedState = tokenLength > 0 || successState || (!challengeVisible && !pendingText && !failedState && (!textChallenge || pageUsable));
+          const challengeDetected = !completedState && (hasChallengeWidget || challengeVisible || pendingText || failedState || (textOnlyChallenge && !pageUsable));
           return JSON.stringify({
             detected: challengeDetected,
             completed: completedState,
             failed_state: failedState && !completedState,
             success_state: successState,
-            action_ready: actionReady,
-            page_ready: pageReady
+            challenge_visible: challengeVisible,
+            page_usable: pageUsable,
+            text_only_challenge: textOnlyChallenge,
+            token_length: tokenLength
           });
         })();
         """
