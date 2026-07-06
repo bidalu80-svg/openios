@@ -1499,6 +1499,14 @@ final class LocalNativeToolService {
             of: #"<\s*(?:tool_call|tool_use|function_call|function|iexa_native)\b[^>]*>[\s\S]*?</\s*(?:tool_call|tool_use|function_call|function|iexa_native)\s*>"#,
             with: "",
             options: [.regularExpression, .caseInsensitive]
+        ).replacingOccurrences(
+            of: #"(?im)^\s*</\s*(?:tool_calls?|tool_use|function_call|function|iexa_native)\s*>\s*$"#,
+            with: "",
+            options: .regularExpression
+        ).replacingOccurrences(
+            of: #"(?i)</\s*(?:tool_calls?|tool_use|function_call|function|iexa_native)\s*>"#,
+            with: "",
+            options: .regularExpression
         )
         for range in plainLineNativeToolRanges(in: withoutNativeFence).reversed() {
             guard let swiftRange = Range(range, in: withoutNativeFence) else { continue }

@@ -956,6 +956,104 @@ final class BrowserWebSearchService: NSObject {
             const tag = (node.tagName || node.nodeName || '').toLowerCase();
             return tag === 'input' || tag === 'textarea' || tag === 'select' || !!node.isContentEditable;
           }
+          function attr(node, name) {
+            return node && node.getAttribute ? (node.getAttribute(name) || '') : '';
+          }
+          function isDisabled(node) {
+            return Boolean(
+              node &&
+              (node.disabled ||
+                attr(node, 'aria-disabled') === 'true' ||
+                node.closest && node.closest('[disabled],[aria-disabled="true"]'))
+            );
+          }
+          function clickTarget(node) {
+            if (!node) return null;
+            return node.closest && node.closest('button, a, input, textarea, select, summary, [contenteditable], [role="button"], [role="link"], [onclick], [tabindex]')
+              || node;
+          }
+          function clickableCandidates() {
+            const nodes = [];
+            for (const root of allRoots()) {
+              try { nodes.push(...Array.from(root.querySelectorAll(clickableSelector))); } catch (_) {}
+            }
+            return nodes
+              .map(clickTarget)
+              .filter((node, index, list) => node && list.indexOf(node) === index && visible(node) && !isDisabled(node));
+          }
+          function hasValuedSearchEditable(form) {
+            if (!form || !form.querySelectorAll) return false;
+            try {
+              return Array.from(form.querySelectorAll('input:not([type="hidden"]), textarea, [contenteditable], [role="textbox"]')).some(input => {
+                if (!visible(input)) return false;
+                const type = norm(attr(input, 'type'));
+                if (['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image', 'password'].includes(type)) return false;
+                const key = norm([input.id || '', attr(input, 'name'), attr(input, 'class'), attr(input, 'placeholder'), attr(input, 'aria-label'), type, attr(input, 'role')].join(' '));
+                const value = norm(input.value || text(input));
+                return value.length > 0 && (/搜索|搜一下|百度一下|search|query|keyword|关键词|查找|请输入|输入|(^|[\\s_-])(q|kw|wd|word|query|search)([\\s_-]|$)/.test(key));
+              });
+            } catch (_) {
+              return false;
+            }
+          }
+          function clickableScore(node) {
+            if (!node || !visible(node) || isDisabled(node)) return -100000;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const type = norm(attr(node, 'type'));
+            const role = norm(attr(node, 'role'));
+            const label = norm(accessibleText(node));
+            const key = norm([
+              node.id || '',
+              attr(node, 'name'),
+              attr(node, 'class'),
+              attr(node, 'data-testid'),
+              attr(node, 'data-test'),
+              attr(node, 'data-cy'),
+              attr(node, 'formaction'),
+              type,
+              role,
+              label
+            ].join(' '));
+            if ((tag === 'input' || tag === 'textarea') && !['submit', 'button', 'reset', 'image'].includes(type)) {
+              return -10000;
+            }
+            let score = 0;
+            const wanted = norm(desiredLabel);
+            if (wanted) {
+              if (label === wanted || key === wanted) score += 600;
+              else if (label.startsWith(wanted) || key.includes(wanted)) score += 420;
+              else if (label.includes(wanted) || wanted.includes(label)) score += 300;
+              const tokens = wanted.split(/[\\s,，、]+/).filter(Boolean);
+              for (const token of tokens) {
+                if (token.length >= 2 && (label.includes(token) || key.includes(token))) score += 45;
+              }
+            }
+            if (tag === 'button') score += 120;
+            if (tag === 'input' && ['submit', 'button', 'image'].includes(type)) score += 130;
+            if (role === 'button') score += 90;
+            if (tag === 'a') score += 35;
+            if (/百度一下|搜索|搜一下|查找|提交|确定|确认|继续|下一步|完成|发送|生成|打开|search|submit|go|continue|next|ok|confirm|send|generate/.test(label + ' ' + key)) score += 260;
+            const form = node.closest && node.closest('form');
+            if (hasValuedSearchEditable(form)) score += 420;
+            if (form) {
+              const formText = norm([attr(form, 'role'), attr(form, 'action'), attr(form, 'id'), attr(form, 'class'), attr(form, 'name')].join(' '));
+              if (/search|query|百度|baidu|搜索|wd=|q=/.test(formText)) score += 120;
+            }
+            const r = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+            if (r) {
+              if (r.width >= 36 && r.height >= 24) score += 40;
+              if (r.top >= -20 && r.top <= (innerHeight || 800) * 0.9) score += 20;
+            }
+            return score;
+          }
+          function bestClickableFallback() {
+            const ranked = clickableCandidates()
+              .map(node => ({ node, score: clickableScore(node) }))
+              .sort((a, b) => b.score - a.score);
+            if (!ranked.length) return null;
+            if (ranked[0].score >= 180 || (ranked.length === 1 && ranked[0].score >= 40)) return ranked[0].node;
+            return null;
+          }
           function humanVerificationState() {
             const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
             const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
@@ -984,9 +1082,11 @@ final class BrowserWebSearchService: NSObject {
               reason: provider && !completed ? 'Human verification is present but not completed.' : ''
             };
           }
-          const node = findNode(selector)
+          const explicitNode = findNode(selector)
             || findByLabel(desiredLabel)
             || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
+          const fallbackNode = explicitNode ? null : bestClickableFallback();
+          const node = explicitNode || fallbackNode;
           if (!node) {
             return JSON.stringify({
               ok: false,
@@ -996,6 +1096,7 @@ final class BrowserWebSearchService: NSObject {
               selector: selector || '',
               label: desiredLabel || '',
               needs_visual_coordinates: true,
+              searched_visible_clickables: true,
               recovery_hint: 'DOM/accessibility text did not expose the target. Inspect the current viewport screenshot and retry with coordinate_x/coordinate_y instead of concluding the button is absent.'
             });
           }
@@ -1009,10 +1110,8 @@ final class BrowserWebSearchService: NSObject {
           const cy = Number.isFinite(y) ? y : (r ? Math.round(r.top + r.height / 2) : 0);
           const verification = humanVerificationState();
           const disabled = Boolean(
-            target.disabled ||
-            target.getAttribute && target.getAttribute('aria-disabled') === 'true' ||
-            node.disabled ||
-            node.getAttribute && node.getAttribute('aria-disabled') === 'true'
+            isDisabled(target) ||
+            isDisabled(node)
           );
           if (disabled) {
             return JSON.stringify({
@@ -1068,6 +1167,7 @@ final class BrowserWebSearchService: NSObject {
             coordinate_x: cx,
             coordinate_y: cy,
             disabled: false,
+            fallback_click_selected: Boolean(fallbackNode && node === fallbackNode),
             human_verification: verification
           });
         })();
@@ -1144,7 +1244,7 @@ final class BrowserWebSearchService: NSObject {
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message"]) ?? ""
         let clear = Self.boolValue(call["clear"] ?? call["replace"] ?? call["overwrite"]) ?? true
         let pressEnter = Self.boolValue(call["press_enter"] ?? call["enter"] ?? call["submit"]) ?? false
-        guard selector != nil || label != nil || (x != nil && y != nil) else {
+        guard selector != nil || label != nil || (x != nil && y != nil) || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return [
                 "action": "browser.type",
                 "ok": false,
@@ -1300,6 +1400,72 @@ final class BrowserWebSearchService: NSObject {
             }
             return best;
           }
+          function usableEditable(node) {
+            if (!node || !isEditable(node) || !visible(node)) return false;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const type = norm(attr(node, 'type'));
+            if (tag === 'input' && ['button', 'submit', 'reset', 'checkbox', 'radio', 'hidden', 'file', 'image'].includes(type)) return false;
+            return !Boolean(node.disabled || attr(node, 'aria-disabled') === 'true' || node.closest && node.closest('[disabled],[aria-disabled="true"]'));
+          }
+          function editableScore(node) {
+            if (!usableEditable(node)) return -100000;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const type = norm(attr(node, 'type'));
+            const role = norm(attr(node, 'role'));
+            const label = norm(accessibleText(node));
+            const key = norm([
+              node.id || '',
+              attr(node, 'name'),
+              attr(node, 'class'),
+              attr(node, 'autocomplete'),
+              attr(node, 'data-testid'),
+              attr(node, 'data-test'),
+              attr(node, 'data-cy'),
+              type,
+              role
+            ].join(' '));
+            let score = 0;
+            if (document.activeElement === node) score += 500;
+            if (tag === 'textarea') score += 70;
+            if (tag === 'input') score += 50;
+            if (node.isContentEditable || role === 'textbox') score += 60;
+            if (type === 'search' || role === 'searchbox') score += 260;
+            if (/(^|[\\s_-])(q|kw|wd|query|keyword|word|search|s)([\\s_-]|$)/.test(key)) score += 240;
+            if (/搜索|搜一下|百度一下|search|query|keyword|关键词|查找|请输入|输入/.test(label + ' ' + key)) score += 220;
+            const form = node.closest && node.closest('form');
+            if (form) {
+              const formText = norm([attr(form, 'role'), attr(form, 'action'), attr(form, 'id'), attr(form, 'class'), attr(form, 'name')].join(' '));
+              if (/search|query|百度|baidu|搜索|wd=|q=/.test(formText)) score += 120;
+            }
+            const desired = norm(desiredLabel);
+            const typed = norm(text);
+            if (desired && desired !== typed) {
+              score += Math.max(0, scoreLabel(node, desired));
+            }
+            const r = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+            if (r) {
+              if (r.width >= 120 && r.height >= 24) score += 80;
+              if (r.width >= 220) score += 35;
+              if (r.top >= -20 && r.top <= (innerHeight || 800) * 0.8) score += 25;
+              score -= Math.max(0, Math.round(r.top / 1200));
+            }
+            if (!String(node.value || '').trim()) score += 25;
+            if (type === 'password') score -= 10000;
+            return score;
+          }
+          function bestEditableFallback() {
+            const nodes = [];
+            for (const root of allRoots()) {
+              try { nodes.push(...Array.from(root.querySelectorAll(editableSelector))); } catch (_) {}
+            }
+            const ranked = nodes
+              .filter(usableEditable)
+              .map(node => ({ node, score: editableScore(node) }))
+              .sort((a, b) => b.score - a.score);
+            if (!ranked.length) return null;
+            if (ranked[0].score >= 80 || ranked.length === 1) return ranked[0].node;
+            return null;
+          }
           function humanVerificationState() {
             const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
             const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
@@ -1329,11 +1495,18 @@ final class BrowserWebSearchService: NSObject {
             };
           }
           const coordinateNode = (Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null;
-          const node = editableTarget(findNode(selector))
+          const explicitNode = editableTarget(findNode(selector))
             || editableTarget(findByLabel(desiredLabel))
             || editableTarget(coordinateNode);
+          const fallbackNode = explicitNode ? null : bestEditableFallback();
+          const node = explicitNode || fallbackNode;
           if (!node) {
-            return JSON.stringify({ ok: false, error: 'Element not found' });
+            return JSON.stringify({
+              ok: false,
+              error: 'Element not found',
+              searched_visible_editables: true,
+              recovery_hint: 'No label/selector matched and no usable visible input/search box fallback was safe to select.'
+            });
           }
           if (node.scrollIntoView) {
             try { node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
@@ -1420,6 +1593,7 @@ final class BrowserWebSearchService: NSObject {
             text: textOf(node).slice(0, 160),
             value: node.value || '',
             tag,
+            fallback_input_selected: Boolean(fallbackNode && node === fallbackNode),
             human_verification: verification
           });
         })();
@@ -3852,6 +4026,9 @@ final class BrowserWebSearchService: NSObject {
             ];
             return parts.filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
           }
+          function attr(node, name) {
+            return node && node.getAttribute ? (node.getAttribute(name) || '') : '';
+          }
           function visible(node) {
             if (!node || !node.getBoundingClientRect) return false;
             if (node.hidden || (node.closest && node.closest('[hidden],[aria-hidden="true"]'))) return false;
@@ -3908,6 +4085,101 @@ final class BrowserWebSearchService: NSObject {
             }
             return best;
           }
+          function isDisabled(node) {
+            return Boolean(
+              node &&
+              (node.disabled ||
+                attr(node, 'aria-disabled') === 'true' ||
+                node.closest && node.closest('[disabled],[aria-disabled="true"]'))
+            );
+          }
+          function clickTarget(node) {
+            if (!node) return null;
+            return node.closest && node.closest('button, a, input, textarea, select, summary, [contenteditable], [role="button"], [role="link"], [onclick], [tabindex]')
+              || node;
+          }
+          function clickableCandidates() {
+            const nodes = [];
+            for (const root of allRoots()) {
+              try { nodes.push(...Array.from(root.querySelectorAll(clickableSelector))); } catch (_) {}
+            }
+            return nodes
+              .map(clickTarget)
+              .filter((node, index, list) => node && list.indexOf(node) === index && visible(node) && !isDisabled(node));
+          }
+          function hasValuedSearchEditable(form) {
+            if (!form || !form.querySelectorAll) return false;
+            try {
+              return Array.from(form.querySelectorAll('input:not([type="hidden"]), textarea, [contenteditable], [role="textbox"]')).some(input => {
+                if (!visible(input)) return false;
+                const type = norm(attr(input, 'type'));
+                if (['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image', 'password'].includes(type)) return false;
+                const key = norm([input.id || '', attr(input, 'name'), attr(input, 'class'), attr(input, 'placeholder'), attr(input, 'aria-label'), type, attr(input, 'role')].join(' '));
+                const value = norm(input.value || text(input));
+                return value.length > 0 && (/搜索|搜一下|百度一下|search|query|keyword|关键词|查找|请输入|输入|(^|[\\s_-])(q|kw|wd|word|query|search)([\\s_-]|$)/.test(key));
+              });
+            } catch (_) {
+              return false;
+            }
+          }
+          function clickableScore(node) {
+            if (!node || !visible(node) || isDisabled(node)) return -100000;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const type = norm(attr(node, 'type'));
+            const role = norm(attr(node, 'role'));
+            const label = norm(accessibleText(node));
+            const key = norm([
+              node.id || '',
+              attr(node, 'name'),
+              attr(node, 'class'),
+              attr(node, 'data-testid'),
+              attr(node, 'data-test'),
+              attr(node, 'data-cy'),
+              attr(node, 'formaction'),
+              type,
+              role,
+              label
+            ].join(' '));
+            if ((tag === 'input' || tag === 'textarea') && !['submit', 'button', 'reset', 'image'].includes(type)) {
+              return -10000;
+            }
+            let score = 0;
+            const wanted = norm(desiredLabel);
+            if (wanted) {
+              if (label === wanted || key === wanted) score += 600;
+              else if (label.startsWith(wanted) || key.includes(wanted)) score += 420;
+              else if (label.includes(wanted) || wanted.includes(label)) score += 300;
+              const tokens = wanted.split(/[\\s,，、]+/).filter(Boolean);
+              for (const token of tokens) {
+                if (token.length >= 2 && (label.includes(token) || key.includes(token))) score += 45;
+              }
+            }
+            if (tag === 'button') score += 120;
+            if (tag === 'input' && ['submit', 'button', 'image'].includes(type)) score += 130;
+            if (role === 'button') score += 90;
+            if (tag === 'a') score += 35;
+            if (/百度一下|搜索|搜一下|查找|提交|确定|确认|继续|下一步|完成|发送|生成|打开|search|submit|go|continue|next|ok|confirm|send|generate/.test(label + ' ' + key)) score += 260;
+            const form = node.closest && node.closest('form');
+            if (hasValuedSearchEditable(form)) score += 420;
+            if (form) {
+              const formText = norm([attr(form, 'role'), attr(form, 'action'), attr(form, 'id'), attr(form, 'class'), attr(form, 'name')].join(' '));
+              if (/search|query|百度|baidu|搜索|wd=|q=/.test(formText)) score += 120;
+            }
+            const r = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+            if (r) {
+              if (r.width >= 36 && r.height >= 24) score += 40;
+              if (r.top >= -20 && r.top <= (innerHeight || 800) * 0.9) score += 20;
+            }
+            return score;
+          }
+          function bestClickableFallback() {
+            const ranked = clickableCandidates()
+              .map(node => ({ node, score: clickableScore(node) }))
+              .sort((a, b) => b.score - a.score);
+            if (!ranked.length) return null;
+            if (ranked[0].score >= 180 || (ranked.length === 1 && ranked[0].score >= 40)) return ranked[0].node;
+            return null;
+          }
           function humanVerificationState() {
             const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
             const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
@@ -3929,20 +4201,28 @@ final class BrowserWebSearchService: NSObject {
             const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
             return { detected, provider, token_length: tokenLength, completed: Boolean(tokenLength > 0 || successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText)) };
           }
-          const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
+          const explicitNode = deepQuerySelector(selector) || findByLabel(desiredLabel);
+          const fallbackNode = explicitNode ? null : bestClickableFallback();
+          const node = explicitNode || fallbackNode;
           if (!node) {
             const verification = humanVerificationState();
             if (verification.detected && !verification.completed) {
               return JSON.stringify({ ok: false, requires_user_verification: true, human_verification: verification, title: document.title || '', url: location.href });
             }
-            return JSON.stringify({ ok: false, error: 'Element not found in current viewport', title: document.title || '', url: location.href });
+            return JSON.stringify({
+              ok: false,
+              error: 'Element not found in current viewport',
+              title: document.title || '',
+              url: location.href,
+              searched_visible_clickables: true
+            });
           }
           try { node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
-          const target = node.closest && node.closest('button, a, input, textarea, select, [contenteditable], [role="button"], [onclick]') || node;
+          const target = clickTarget(node);
           const r = target.getBoundingClientRect ? target.getBoundingClientRect() : null;
           const cx = r ? Math.round(r.left + r.width / 2) : 0;
           const cy = r ? Math.round(r.top + r.height / 2) : 0;
-          const disabled = Boolean(target.disabled || target.getAttribute && target.getAttribute('aria-disabled') === 'true');
+          const disabled = isDisabled(target);
           if (disabled) {
             return JSON.stringify({ ok: false, disabled: true, title: document.title || '', url: location.href, text: accessibleText(target).slice(0, 160) });
           }
@@ -3969,7 +4249,8 @@ final class BrowserWebSearchService: NSObject {
             tag: (target.tagName || target.nodeName || '').toLowerCase(),
             text: accessibleText(target).slice(0, 160),
             coordinate_x: cx,
-            coordinate_y: cy
+            coordinate_y: cy,
+            fallback_click_selected: Boolean(fallbackNode && node === fallbackNode)
           });
         })();
         """
@@ -4074,6 +4355,74 @@ final class BrowserWebSearchService: NSObject {
             }
             return best;
           }
+          function usableEditable(node) {
+            if (!node || !isEditable(node) || !visible(node)) return false;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const type = norm(attr(node, 'type'));
+            if (tag === 'input' && ['button', 'submit', 'reset', 'checkbox', 'radio', 'hidden', 'file', 'image'].includes(type)) return false;
+            return !Boolean(node.disabled || attr(node, 'aria-disabled') === 'true' || node.closest && node.closest('[disabled],[aria-disabled="true"]'));
+          }
+          function editableScore(node) {
+            if (!usableEditable(node)) return -100000;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const type = norm(attr(node, 'type'));
+            const role = norm(attr(node, 'role'));
+            const label = norm(accessibleText(node));
+            const key = norm([
+              node.id || '',
+              attr(node, 'name'),
+              attr(node, 'class'),
+              attr(node, 'autocomplete'),
+              attr(node, 'data-testid'),
+              attr(node, 'data-test'),
+              attr(node, 'data-cy'),
+              type,
+              role
+            ].join(' '));
+            let score = 0;
+            if (document.activeElement === node) score += 500;
+            if (tag === 'textarea') score += 70;
+            if (tag === 'input') score += 50;
+            if (node.isContentEditable || role === 'textbox') score += 60;
+            if (type === 'search' || role === 'searchbox') score += 260;
+            if (/(^|[\\s_-])(q|kw|wd|query|keyword|word|search|s)([\\s_-]|$)/.test(key)) score += 240;
+            if (/搜索|搜一下|百度一下|search|query|keyword|关键词|查找|请输入|输入/.test(label + ' ' + key)) score += 220;
+            const form = node.closest && node.closest('form');
+            if (form) {
+              const formText = norm([attr(form, 'role'), attr(form, 'action'), attr(form, 'id'), attr(form, 'class'), attr(form, 'name')].join(' '));
+              if (/search|query|百度|baidu|搜索|wd=|q=/.test(formText)) score += 120;
+            }
+            const desired = norm(desiredLabel);
+            const typed = norm(text);
+            if (desired && desired !== typed) {
+              const nodeLabel = norm(accessibleText(node));
+              if (nodeLabel === desired) score += 100;
+              else if (nodeLabel.includes(desired) || desired.includes(nodeLabel)) score += 45;
+            }
+            const r = node.getBoundingClientRect ? node.getBoundingClientRect() : null;
+            if (r) {
+              if (r.width >= 120 && r.height >= 24) score += 80;
+              if (r.width >= 220) score += 35;
+              if (r.top >= -20 && r.top <= (innerHeight || 800) * 0.8) score += 25;
+              score -= Math.max(0, Math.round(r.top / 1200));
+            }
+            if (!String(node.value || '').trim()) score += 25;
+            if (type === 'password') score -= 10000;
+            return score;
+          }
+          function bestEditableFallback() {
+            const nodes = [];
+            for (const root of allRoots()) {
+              try { nodes.push(...Array.from(root.querySelectorAll(editableSelector))); } catch (_) {}
+            }
+            const ranked = nodes
+              .filter(usableEditable)
+              .map(node => ({ node, score: editableScore(node) }))
+              .sort((a, b) => b.score - a.score);
+            if (!ranked.length) return null;
+            if (ranked[0].score >= 80 || ranked.length === 1) return ranked[0].node;
+            return null;
+          }
           function humanVerificationState() {
             const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
             const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
@@ -4090,13 +4439,21 @@ final class BrowserWebSearchService: NSObject {
             const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
             return { detected, provider, completed: Boolean(successState || (textDetected && actionReady) || (hasChallengeWidget && actionReady && !pendingText)) };
           }
-          const node = deepQuerySelector(selector) || findByLabel(desiredLabel);
+          const explicitNode = deepQuerySelector(selector) || findByLabel(desiredLabel);
+          const fallbackNode = explicitNode ? null : bestEditableFallback();
+          const node = explicitNode || fallbackNode;
           if (!node) {
             const verification = humanVerificationState();
             if (verification.detected && !verification.completed) {
               return JSON.stringify({ ok: false, requires_user_verification: true, human_verification: verification, title: document.title || '', url: location.href });
             }
-            return JSON.stringify({ ok: false, error: 'Element not found in current viewport', title: document.title || '', url: location.href });
+            return JSON.stringify({
+              ok: false,
+              error: 'Element not found in current viewport',
+              title: document.title || '',
+              url: location.href,
+              searched_visible_editables: true
+            });
           }
           try { node.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch (_) {}
           const disabled = Boolean(node.disabled || attr(node, 'aria-disabled') === 'true' || node.closest('[disabled],[aria-disabled="true"]'));
@@ -4141,7 +4498,8 @@ final class BrowserWebSearchService: NSObject {
             url: location.href,
             tag,
             text: textOf(node).slice(0, 160),
-            value: node.value || ''
+            value: node.value || '',
+            fallback_input_selected: Boolean(fallbackNode && node === fallbackNode)
           });
         })();
         """
@@ -4196,6 +4554,9 @@ final class BrowserWebSearchService: NSObject {
               node.placeholder || ''
             ];
             return parts.filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+          }
+          function attr(node, name) {
+            return node && node.getAttribute ? (node.getAttribute(name) || '') : '';
           }
           function rect(node) {
             if (!node || !node.getBoundingClientRect) return null;

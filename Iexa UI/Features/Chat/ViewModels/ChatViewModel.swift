@@ -10815,7 +10815,7 @@ final class ChatViewModel {
             guard let self, !self.hasFinishedStreaming else { return }
             self.updateAssistantMessage(
                 id: messageId,
-                content: snapshot.renderedContent,
+                content: Self.cleanedInternalPromptArtifacts(snapshot.renderedContent),
                 isStreaming: true,
                 reasoningContent: snapshot.reasoningContent,
                 reasoningDone: snapshot.reasoningDone
@@ -25052,6 +25052,16 @@ final class ChatViewModel {
 
     private static func cleanedInternalPromptArtifacts(_ text: String) -> String {
         var cleaned = text
+        cleaned = cleaned.replacingOccurrences(
+            of: #"(?im)^\s*</\s*(?:tool_calls?|tool_use|function_call|invoke|parameter|iexa_native)\s*>\s*$"#,
+            with: "",
+            options: .regularExpression
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"(?i)</\s*(?:tool_calls?|tool_use|function_call|invoke|parameter|iexa_native)\s*>"#,
+            with: "",
+            options: .regularExpression
+        )
         let blockNames = [
             "Current model capability",
             "Local Alpine tool protocol",
