@@ -86,24 +86,25 @@ final class AppAccountAuthService {
         guard Self.isPasswordValid(password) else {
             throw AppAccountAuthServiceError.weakPassword
         }
-        guard Self.isActivationCodeValid(normalizedActivationCode) else {
-            throw AppAccountAuthServiceError.invalidActivationCode
+
+        var body: [String: Any] = [
+            "phone": normalizedAccount,
+            "account": normalizedAccount,
+            "name": normalizedAccount,
+            "username": normalizedAccount,
+            "password": password
+        ]
+        if !normalizedActivationCode.isEmpty {
+            body["activationCode"] = normalizedActivationCode
+            body["activation_code"] = normalizedActivationCode
+            body["inviteCode"] = normalizedActivationCode
         }
 
         let object = try await sendRequest(
             baseURL: baseURL,
             path: "/auth/register",
             method: "POST",
-            body: [
-                "phone": normalizedAccount,
-                "account": normalizedAccount,
-                "name": normalizedAccount,
-                "username": normalizedAccount,
-                "password": password,
-                "activationCode": normalizedActivationCode,
-                "activation_code": normalizedActivationCode,
-                "inviteCode": normalizedActivationCode
-            ],
+            body: body,
             bearerToken: nil
         )
         guard let session = try parseSession(from: object, fallbackLoginID: normalizedAccount) else {

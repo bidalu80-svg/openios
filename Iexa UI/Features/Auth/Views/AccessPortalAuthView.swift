@@ -206,18 +206,20 @@ struct AccessPortalAuthView: View {
                 .focused($focusedField, equals: .password)
                 .id(Field.password)
 
-                credentialField(
-                    icon: "key.fill",
-                    placeholder: "激活码（注册必填）",
-                    text: $viewModel.activationCode,
-                    keyboardType: .asciiCapable,
-                    textContentType: nil,
-                    submitLabel: .go,
-                    nextField: nil,
-                    isFocused: focusedField == .activation
-                )
-                .focused($focusedField, equals: .activation)
-                .id(Field.activation)
+                if viewModel.requiresActivationCode {
+                    credentialField(
+                        icon: "key.fill",
+                        placeholder: "激活码（注册必填）",
+                        text: $viewModel.activationCode,
+                        keyboardType: .asciiCapable,
+                        textContentType: nil,
+                        submitLabel: .go,
+                        nextField: nil,
+                        isFocused: focusedField == .activation
+                    )
+                    .focused($focusedField, equals: .activation)
+                    .id(Field.activation)
+                }
             }
 
             VStack(spacing: 12) {
@@ -389,9 +391,13 @@ struct AccessPortalAuthView: View {
                 .autocorrectionDisabled()
                 .font(.system(size: 16, weight: .medium))
                 .foregroundStyle(Color.black.opacity(0.92))
-                .submitLabel(.next)
+                .submitLabel(.go)
                 .onSubmit {
-                    focusedField = .activation
+                    if viewModel.requiresActivationCode {
+                        focusedField = .activation
+                    } else {
+                        submit(.login)
+                    }
                 }
         }
         .padding(.horizontal, 14)

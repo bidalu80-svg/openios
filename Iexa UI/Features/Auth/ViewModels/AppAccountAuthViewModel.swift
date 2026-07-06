@@ -44,6 +44,10 @@ final class AppAccountAuthViewModel {
         !AppAccountAuthSessionStore.normalizedBaseURL(baseURL).isEmpty
     }
 
+    var requiresActivationCode: Bool {
+        Self.requiresActivationCode
+    }
+
     var canLogin: Bool {
         guard !isSubmitting else { return false }
         let endpoint = AppAccountAuthSessionStore.normalizedBaseURL(baseURL)
@@ -55,6 +59,7 @@ final class AppAccountAuthViewModel {
 
     var canRegister: Bool {
         guard canLogin else { return false }
+        guard Self.requiresActivationCode else { return true }
         let normalizedActivationCode = AppAccountAuthService.normalizedActivationCode(activationCode)
         return AppAccountAuthService.isActivationCodeValid(normalizedActivationCode)
     }
@@ -84,7 +89,9 @@ final class AppAccountAuthViewModel {
             return
         }
         let normalizedActivationCode = AppAccountAuthService.normalizedActivationCode(activationCode)
-        if mode == .register && !AppAccountAuthService.isActivationCodeValid(normalizedActivationCode) {
+        if mode == .register,
+           Self.requiresActivationCode,
+           !AppAccountAuthService.isActivationCodeValid(normalizedActivationCode) {
             errorMessage = "请填写有效激活码。"
             return
         }
@@ -93,6 +100,20 @@ final class AppAccountAuthViewModel {
         statusMessage = ""
         isSubmitting = true
         defer { isSubmitting = false }
+
+        if Self.temporaryOfflineAccessEnabled {
+            let result = Self.makeTemporaryOfflineSession(account: normalizedAccount)
+            AppAccountAuthSessionStore.saveBaseURL(endpoint)
+            AppAccountAuthSessionStore.saveSession(result)
+            baseURL = endpoint
+            session = result
+            account = result.user.loginID
+            password = ""
+            activationCode = ""
+            statusMessage = "认证服务暂不可用，已进入本地临时模式"
+            lastSessionValidationAt = Date()
+            return
+        }
 
         do {
             let result: AppAccountAuthSession
@@ -125,7 +146,7 @@ final class AppAccountAuthViewModel {
         let existingSession = session
         let endpoint = AppAccountAuthSessionStore.normalizedBaseURL(baseURL)
         signOutLocal()
-        if let existingSession, !endpoint.isEmpty {
+        if let existingSession, !existingSession.isTemporaryOfflineAccess, !endpoint.isEmpty {
             Task {
                 await service.logout(baseURL: endpoint, token: existingSession.token)
             }
@@ -163,6 +184,14 @@ final class AppAccountAuthViewModel {
 
     func validateCurrentSession(force: Bool = false) async {
         guard let currentSession = session else { return }
+        if currentSession.isTemporaryOfflineAccess {
+            guard Self.temporaryOfflineAccessEnabled else {
+                signOutLocal(statusMessage: "临时通行已关闭", errorMessage: "服务器认证已恢复，请重新登录。")
+                return
+            }
+            lastSessionValidationAt = Date()
+            return
+        }
         let endpoint = AppAccountAuthSessionStore.normalizedBaseURL(baseURL)
         guard !endpoint.isEmpty else { return }
         guard !isValidatingSession else { return }
@@ -226,5 +255,26 @@ final class AppAccountAuthViewModel {
         }
         let text = error.localizedDescription
         return text.isEmpty ? "登录失败，请稍后重试。" : text
+    }
+
+    private static let temporaryOfflineAccessEnabled = true
+    private static let requiresActivationCode = false
+
+    private static func makeTemporaryOfflineSession(account: String) -> AppAccountAuthSession {
+        let loginID = AppAccountAuthService.normalizedAccount(account)
+        let fallbackID = loginID.isEmpty ? "local-user" : loginID
+        return AppAccountAuthSession(
+            token: "iexa-temporary-offline-\(UUID().uuidString)",
+            expiresAt: nil,
+            user: AppAccountAuthUser(
+                id: "local-\(fallbackID)",
+                phone: fallbackID,
+                email: fallbackID.contains("@") ? fallbackID : nil,
+                name: fallbackID,
+                role: "local",
+                profileImageURL: nil,
+                createdAt: Date()
+            )
+        )
     }
 }

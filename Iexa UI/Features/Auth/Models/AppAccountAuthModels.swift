@@ -31,6 +31,10 @@ struct AppAccountAuthSession: Codable, Equatable {
     let token: String
     let expiresAt: Date?
     let user: AppAccountAuthUser
+
+    var isTemporaryOfflineAccess: Bool {
+        token.hasPrefix("iexa-temporary-offline-")
+    }
 }
 
 enum AppAccountAuthSessionStore {
