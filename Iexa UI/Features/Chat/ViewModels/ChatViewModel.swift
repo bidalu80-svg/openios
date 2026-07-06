@@ -11785,6 +11785,7 @@ final class ChatViewModel {
         var browserToolCount = 0
         var browserSearchCount = 0
         var pendingBrowserContinuationCall: LocalAlpineNativeToolCall?
+        var forcedLatestUserBrowserCall = forcedBrowserContinuationToolCallFromLatestUser()
         var forcedBrowserContinuationCount = 0
 
         func streamFinalWithoutLocalAlpineTools(reason: String, fallback: String?) async throws -> [String: Any]? {
@@ -11839,7 +11840,16 @@ final class ChatViewModel {
             if Task.isCancelled { return exactUsage }
 
             var calls = toolAccumulator.completedCalls()
-            if calls.isEmpty,
+            if !executedAnyTool,
+               let userBrowserCall = forcedLatestUserBrowserCall,
+               !calls.contains(where: Self.isLocalAlpineBrowserNativeToolCall) {
+                forcedLatestUserBrowserCall = nil
+                if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    acc.replace("")
+                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
+                }
+                calls = [userBrowserCall]
+            } else if calls.isEmpty,
                let continuationCall = pendingBrowserContinuationCall,
                forcedBrowserContinuationCount < Self.localNativeBrowserForcedContinuationLimit {
                 forcedBrowserContinuationCount += 1
@@ -12040,6 +12050,7 @@ final class ChatViewModel {
         var lastNativeToolFallback: String?
         var executedAnyTool = false
         var pendingBrowserContinuationCall: LocalAlpineNativeToolCall?
+        var forcedLatestUserBrowserCall = forcedBrowserContinuationToolCallFromLatestUser()
         var forcedBrowserContinuationCount = 0
 
         func streamFinalWithoutTools(reason: String, fallback: String?) async throws -> [String: Any]? {
@@ -12096,7 +12107,16 @@ final class ChatViewModel {
 
             var calls = toolAccumulator.completedCalls()
                 .filter(Self.isLocalNativeFunctionToolCall)
-            if calls.isEmpty,
+            if !executedAnyTool,
+               let userBrowserCall = forcedLatestUserBrowserCall,
+               !calls.contains(where: { Self.localNativeBrowserToolKind($0) != nil }) {
+                forcedLatestUserBrowserCall = nil
+                if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    acc.replace("")
+                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
+                }
+                calls = [userBrowserCall]
+            } else if calls.isEmpty,
                let continuationCall = pendingBrowserContinuationCall,
                forcedBrowserContinuationCount < Self.localNativeBrowserForcedContinuationLimit {
                 forcedBrowserContinuationCount += 1
@@ -12944,6 +12964,87 @@ final class ChatViewModel {
             .last(where: { $0.role == .user && !Self.isLocalAlpineAgentResult($0) })?
             .content
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func shouldForceBrowserToolRetryForLatestUser() -> Bool {
+        guard isLocalBrowserNativeToolsEnabled,
+              let latestPrompt = latestUserBrowserAutomationPrompt(),
+              !latestPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              hasLocalBrowserContinuationState() else {
+            return false
+        }
+        return true
+    }
+
+    private func hasLocalBrowserContinuationState() -> Bool {
+        hasRecentLocalBrowserActivityForContinuation()
+            || BrowserWebSearchService.shared.hasActiveBrowserPageForContinuation
+    }
+
+    private func forcedBrowserContinuationToolCallFromLatestUser() -> LocalAlpineNativeToolCall? {
+        guard shouldForceBrowserToolRetryForLatestUser() else {
+            return nil
+        }
+        let latestPrompt = latestUserBrowserAutomationPrompt() ?? ""
+        let arguments: [String: Any] = [
+            "tool_title": "观察当前网页",
+            "action": "find_elements",
+            "scan_page": true,
+            "screenshot": true,
+            "capture_visuals": true,
+            "attach_preview": false,
+            "max_scrolls": 10,
+            "user_prompt": latestPrompt
+        ]
+        guard JSONSerialization.isValidJSONObject(arguments),
+              let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+              let argumentString = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        return LocalAlpineNativeToolCall(
+            id: "browser_user_\(UUID().uuidString)",
+            name: "browser_use",
+            arguments: argumentString
+        )
+    }
+
+    private func hasRecentLocalBrowserActivityForContinuation() -> Bool {
+        guard let messages = conversation?.messages,
+              let latestUserIndex = messages.lastIndex(where: {
+                  $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+              }) else {
+            return false
+        }
+        let lowerBound = max(messages.startIndex, latestUserIndex - 16)
+        guard lowerBound < latestUserIndex else { return false }
+        for index in stride(from: latestUserIndex - 1, through: lowerBound, by: -1) {
+            if Self.messageHasLocalBrowserActivity(messages[index]) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func messageHasLocalBrowserActivity(_ message: ChatMessage) -> Bool {
+        if let metadata = message.metadata {
+            if metadata["iexa_local_browser_tool"] == "true"
+                || metadata["iexa_local_native_tool_parent"] == "true"
+                || metadata["iexa_local_native_hidden_tool_parent"] == "true" {
+                return true
+            }
+            if metadata["iexa_local_alpine_tool_calls"]?.localizedCaseInsensitiveContains("browser_use") == true
+                || metadata["iexa_local_alpine_tool_calls"]?.localizedCaseInsensitiveContains("web_search") == true {
+                return true
+            }
+        }
+        return message.statusHistory.contains { status in
+            let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let state = status.status?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            return action == "browser_web_search"
+                || action.hasPrefix("browser.")
+                || state.hasPrefix("browser.")
+        }
     }
 
     private func executeLocalAlpineWebSearchToolCall(
@@ -14820,15 +14921,16 @@ final class ChatViewModel {
 
     private func shouldExposeLocalBrowserNativeTools(for text: String?) -> Bool {
         guard isLocalBrowserNativeToolsEnabled else { return false }
-        guard !latestUserMessageHasResolvedWebSearchContext() else { return false }
+        let hasBrowserContinuationState = hasLocalBrowserContinuationState()
+        guard hasBrowserContinuationState || !latestUserMessageHasResolvedWebSearchContext() else { return false }
         guard let text,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return false
+            return hasBrowserContinuationState
         }
 
         // When web search is enabled, expose the browser
-        // tools consistently and let the model decide whether this turn needs
-        // live web access.
+        // tools consistently. If a shared browser page is already alive, keep
+        // the tool path open so the next turn can observe and continue that page.
         return true
     }
 
@@ -16431,6 +16533,8 @@ final class ChatViewModel {
             modelId: request.model,
             text: latestUserTextForLocalNativeTools
         )
+        let shouldRequireBrowserToolRetry = !shouldPrioritizeImageRoute
+            && shouldForceBrowserToolRetryForLatestUser()
 
         // Always send the full features object with explicit true/false values
         var features = buildChatFeatures()
@@ -16471,7 +16575,7 @@ final class ChatViewModel {
                 .lowercased() == "none"
             if shouldUseLocalAlpineNativeTools(for: request.model), request.tools == nil, !nativeToolsDisabled {
                 request.tools = Self.localAlpineNativeToolSchemas(includeMemoryTools: memoryEnabled)
-                request.toolChoice = "auto"
+                request.toolChoice = shouldRequireBrowserToolRetry ? "required" : "auto"
                 request.parallelToolCalls = true
             }
             if var modelItem = request.modelItem,
@@ -16527,6 +16631,12 @@ final class ChatViewModel {
             )
             request.toolChoice = "auto"
             request.parallelToolCalls = true
+        }
+        if shouldRequireBrowserToolRetry,
+           shouldExposeBrowserTools,
+           request.tools?.isEmpty == false,
+           !nativeToolsDisabled {
+            request.toolChoice = "required"
         }
 
         if let fc = selectedModel?.functionCallingMode, fc == "native", !localAlpineClientSideTask {

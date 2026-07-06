@@ -36,6 +36,15 @@ final class BrowserWebSearchService: NSObject {
         super.init()
     }
 
+    var hasActiveBrowserPageForContinuation: Bool {
+        guard let webView = browserTabs[activeBrowserTabID] ?? webView,
+              let url = webView.url,
+              Self.isHTTPBrowserURL(url) else {
+            return false
+        }
+        return true
+    }
+
     func search(queries: [String], originalQuery: String?) async -> WebSearchResponse {
         let baseQueries = queries
             .map(Self.normalizedQuery)

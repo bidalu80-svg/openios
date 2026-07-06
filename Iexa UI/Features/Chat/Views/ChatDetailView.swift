@@ -5444,7 +5444,8 @@ struct ChatDetailView: View {
                         message: message,
                         index: index,
                         lastVisibleMessageId: snapshot.lastVisibleMessageId,
-                        latestUserMessageId: snapshot.latestUserMessageId
+                        latestUserMessageId: snapshot.latestUserMessageId,
+                        isMergedActivityAnchor: snapshot.mergedActivityAnchorIds.contains(message.id)
                     )
                         .id(message.id)
                 }
@@ -5463,7 +5464,8 @@ struct ChatDetailView: View {
         message: ChatMessage,
         index: Int,
         lastVisibleMessageId: String?,
-        latestUserMessageId: String?
+        latestUserMessageId: String?,
+        isMergedActivityAnchor: Bool
     ) -> some View {
         let isLastAssistant = message.role == .assistant && message.id == lastVisibleMessageId
         let userTextIsEmpty = message.role == .user
@@ -5472,7 +5474,7 @@ struct ChatDetailView: View {
         let rowAgentActivity = message.role == .assistant
             ? transcriptAgentActivity(
                 for: message,
-                isMergedAnchor: snapshot.mergedActivityAnchorIds.contains(message.id)
+                isMergedAnchor: isMergedActivityAnchor
             )
             : nil
         let suppressAssistantBubble = shouldSuppressAssistantBubbleForActivityParent(message, activityItem: rowAgentActivity)
