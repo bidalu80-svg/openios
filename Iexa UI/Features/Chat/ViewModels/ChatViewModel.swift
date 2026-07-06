@@ -1356,7 +1356,7 @@ final class ChatViewModel {
     }
 
     var canSend: Bool {
-        (!isStreaming || isOnlyDirectMediaGenerationActive)
+        (!isStreaming || isOnlyDirectMediaGenerationActive || isLocalAlpineAgentRunActive)
             && !attachments.contains(where: { $0.type == .audio && $0.isTranscribing })
             && !attachments.contains(where: { $0.isUploading && !canSendAttachmentWithoutCompletedUpload($0) })
             && !attachments.contains(where: { $0.uploadStatus == .error && !canSendAttachmentWithoutCompletedUpload($0) })
@@ -1369,7 +1369,17 @@ final class ChatViewModel {
     }
 
     var canSendWhileStreaming: Bool {
-        isOnlyDirectMediaGenerationActive
+        isOnlyDirectMediaGenerationActive || isLocalAlpineAgentRunActive
+    }
+
+    private var isLocalAlpineAgentRunActive: Bool {
+        localAlpineAgentTask != nil
+            || localAlpineContinuationTask != nil
+            || !localAlpineActiveRunIdsByMessageId.isEmpty
+            || !localAlpineLiveToolCallsByMessageId.isEmpty
+            || conversation?.messages.contains(where: { message in
+                message.isStreaming && Self.isLocalAlpineAgentResult(message)
+            }) == true
     }
 
     private var isOnlyDirectMediaGenerationActive: Bool {
@@ -6498,6 +6508,15 @@ final class ChatViewModel {
         guard let manager else { return }
         let isLocalAlpineInterjection = Self.isLocalAlpineInterjection(text)
         let isExplicitLocalAlpineResume = Self.isExplicitLocalAlpineResumeRequest(text)
+        if isStreaming,
+           isLocalAlpineAgentRunActive {
+            guard attachments.isEmpty else {
+                errorMessage = "本地任务执行中可以先发送文字指导；附件请等当前步骤结束后再发。"
+                return
+            }
+            await appendLocalAlpineGuidanceMessage(text: text)
+            return
+        }
         if isLocalAlpineInterjection && !isExplicitLocalAlpineResume {
             pauseLocalAlpineAgentLoopForUserInterjection()
         } else {
@@ -9402,6 +9421,48 @@ final class ChatViewModel {
         localAlpineInputRequest = nil
         localAlpineInputText = ""
         continuation.resume(returning: nil)
+    }
+
+    @MainActor
+    private func appendLocalAlpineGuidanceMessage(text: String) async {
+        let messageText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !messageText.isEmpty else { return }
+        guard conversation != nil else { return }
+
+        let messageId = UUID().uuidString
+        let parentId = conversation?.messages.last?.id
+        let metadata = ["iexa_local_alpine_user_guidance": "true"]
+        let message = ChatMessage(
+            id: messageId,
+            role: .user,
+            content: messageText,
+            timestamp: .now,
+            metadata: metadata
+        )
+
+        inputText = ""
+        attachments = []
+        errorMessage = nil
+        conversation?.messages.append(message)
+
+        let node = HistoryNode(
+            id: messageId,
+            parentId: parentId,
+            childrenIds: [],
+            role: .user,
+            content: messageText,
+            timestamp: message.timestamp,
+            metadata: metadata
+        )
+        conversation?.history.nodes[messageId] = node
+        if let parentId = parentId {
+            conversation?.history.appendChildId(messageId, to: parentId)
+        }
+        conversation?.history.currentId = messageId
+
+        scheduleLocalConversationAutosave(immediate: true)
+        await persistLocalConversationIfNeeded()
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
     }
 
     private func resetLocalAlpineAgentLoopForNewTurn() {

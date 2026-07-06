@@ -76,6 +76,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
     }
 
     let id: String
+    let sortOrder: Double
     let kind: Kind
     let title: String
     let detail: String
@@ -141,6 +142,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
 
     static func == (lhs: AgentActivityStep, rhs: AgentActivityStep) -> Bool {
         lhs.id == rhs.id
+            && lhs.sortOrder == rhs.sortOrder
             && lhs.kind == rhs.kind
             && lhs.title == rhs.title
             && lhs.detail == rhs.detail
@@ -164,6 +166,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
+        hasher.combine(sortOrder)
         hasher.combine(kind)
         hasher.combine(title)
         hasher.combine(detail)
@@ -476,6 +479,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
     private static func lightweightFloatingStep(_ step: AgentActivityStep) -> AgentActivityStep {
         AgentActivityStep(
             id: step.id,
+            sortOrder: step.sortOrder,
             kind: step.kind,
             title: step.title,
             detail: clippedFloatingText(step.detail, limit: floatingDetailLimit),
@@ -503,7 +507,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             content: file.previewLines(limit: 8).joined(separator: "\n"),
             source: file.source,
             byteCount: file.byteCount,
-            lineCountValue: file.lineCount
+            lineCountValue: file.lineCount,
+            diffPreviewLines: file.diffPreviewLines
         )
     }
 
@@ -559,7 +564,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             officeDocumentFiles: officeDocumentFiles
         )
         let localStatusPlaceholders = localStatusSteps(from: statusHistory)
-        steps.append(contentsOf: toolCalls.map { call in
+        steps.append(contentsOf: toolCalls.enumerated().map { index, call in
             let matchedFile = file(for: call, in: writtenFiles)
             let title = displayTitle(for: call, file: matchedFile)
             let detail = call.displayDetail
@@ -570,6 +575,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let previewOpenURL = toolCallPreviewOpenTarget(for: call, file: matchedFile)
             return AgentActivityStep(
                 id: "tool-\(call.id)",
+                sortOrder: toolSortOrder(call, fallbackIndex: index),
                 kind: .tool,
                 title: title,
                 detail: detail.isEmpty ? title : detail,
@@ -592,10 +598,11 @@ private struct AgentActivityItem: Identifiable, Hashable {
         })
 
         let existingFilePaths = Set(steps.compactMap { $0.file?.path })
-        for file in writtenFiles where !existingFilePaths.contains(file.path) {
+        for (index, file) in writtenFiles.filter({ !existingFilePaths.contains($0.path) }).enumerated() {
             steps.append(
                 AgentActivityStep(
                     id: "file-\(file.path)",
+                    sortOrder: fallbackStepSortOrder(index: index, bucket: 1),
                     kind: .file,
                     title: "写入 \(file.fileName)",
                     detail: file.path,
@@ -634,6 +641,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             steps.append(
                 AgentActivityStep(
                     id: "command-\(index)-\(command.hashValue)",
+                    sortOrder: fallbackStepSortOrder(index: index, bucket: 2),
                     kind: .command,
                     title: commandStepTitle(for: command, failed: result.failed),
                     detail: command,
@@ -668,7 +676,38 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 return true
             }
         }
-        return concreteSteps.isEmpty ? localStatusPlaceholders : concreteSteps
+        let visibleSteps = concreteSteps.isEmpty ? localStatusPlaceholders : concreteSteps
+        return orderedActivitySteps(visibleSteps)
+    }
+
+    private static func orderedActivitySteps(_ steps: [AgentActivityStep]) -> [AgentActivityStep] {
+        steps.sorted { lhs, rhs in
+            if lhs.sortOrder != rhs.sortOrder {
+                return lhs.sortOrder < rhs.sortOrder
+            }
+            return lhs.id < rhs.id
+        }
+    }
+
+    private static func toolSortOrder(_ call: LocalAlpineToolCall, fallbackIndex: Int) -> Double {
+        if call.startedAtMs > 0 {
+            return Double(call.startedAtMs) / 1_000
+        }
+        if let completedAtMs = call.completedAtMs, completedAtMs > 0 {
+            return Double(completedAtMs) / 1_000
+        }
+        return fallbackStepSortOrder(index: fallbackIndex, bucket: 0)
+    }
+
+    private static func statusSortOrder(_ group: CollapsedStatusGroup) -> Double {
+        if let occurredAt = group.statuses.compactMap(\.occurredAt).first {
+            return occurredAt.timeIntervalSince1970
+        }
+        return fallbackStepSortOrder(index: group.startIndex, bucket: -1)
+    }
+
+    private static func fallbackStepSortOrder(index: Int, bucket: Int) -> Double {
+        9_000_000_000 + Double(bucket * 100_000 + index)
     }
 
     private static func structuredToolPathsByName(from toolCalls: [LocalAlpineToolCall]) -> [String: Set<String>] {
@@ -780,6 +819,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let duration = durationText(for: group.statuses, isRunning: isRunning)
             return AgentActivityStep(
                 id: "status-\(group.startIndex)-\(group.key)",
+                sortOrder: statusSortOrder(group),
                 kind: .status,
                 title: title,
                 detail: detail,
@@ -822,6 +862,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let duration = durationText(for: group.statuses, isRunning: isRunning)
             return AgentActivityStep(
                 id: "local-status-\(group.startIndex)-\(group.key)",
+                sortOrder: statusSortOrder(group),
                 kind: .status,
                 title: title,
                 detail: detail == title ? "" : detail,
@@ -1930,7 +1971,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 lineDelta: call.lineDelta,
                 startedAtMs: call.startedAtMs,
                 completedAtMs: call.completedAtMs,
-                failed: call.failed
+                browserURL: call.browserURL,
+                imageFilePath: call.imageFilePath,
+                failed: call.failed,
+                contentOffset: call.contentOffset
             )
         }
     }
@@ -2080,6 +2124,7 @@ private struct TranscriptRenderSnapshot {
     let latestUserMessageId: String?
     let localAlpineAnyFinalSummaryAfter: Set<String>
     let localAlpineVisibleFinalSummaryAfter: Set<String>
+    let mergedActivityAnchorIds: Set<String>
 }
 
 private struct TranscriptMessageTurnGroup: Identifiable {
@@ -2405,6 +2450,8 @@ struct ChatDetailView: View {
         var anyFinalSummaryAfter: Set<String> = []
         var visibleFinalSummaryAfter: Set<String> = []
         var laterLocalAlpineTurnMessageAfter: Set<String> = []
+        var mergedActivityAnchorIds: Set<String> = []
+        var hiddenMergedActivityMessageIds: Set<String> = []
     }
 
     private var transcriptSnapshot: TranscriptRenderSnapshot {
@@ -2430,7 +2477,8 @@ struct ChatDetailView: View {
             lastVisibleMessageId: visibleMessages.last?.id,
             latestUserMessageId: visibleMessages.last(where: { $0.role == .user })?.id,
             localAlpineAnyFinalSummaryAfter: context.anyFinalSummaryAfter,
-            localAlpineVisibleFinalSummaryAfter: context.visibleFinalSummaryAfter
+            localAlpineVisibleFinalSummaryAfter: context.visibleFinalSummaryAfter,
+            mergedActivityAnchorIds: context.mergedActivityAnchorIds
         )
         transcriptCache.store(snapshot)
         return snapshot
@@ -2551,7 +2599,47 @@ struct ChatDetailView: View {
             }
         }
 
+        applyMergedActivityVisibility(to: &context, messages: messages)
         return context
+    }
+
+    private func applyMergedActivityVisibility(
+        to context: inout TranscriptVisibilityContext,
+        messages: [ChatMessage]
+    ) {
+        var turnMessages: [ChatMessage] = []
+
+        func flushTurn() {
+            defer { turnMessages.removeAll(keepingCapacity: true) }
+            guard !turnMessages.isEmpty else { return }
+
+            let activityMessages = turnMessages.filter { message in
+                message.role == .assistant && hasRenderableAgentActivity(for: message)
+            }
+            guard !activityMessages.isEmpty else { return }
+
+            let anchor = turnMessages.first { message in
+                guard message.role == .assistant else { return false }
+                return hasRenderableAgentActivity(for: message)
+                    || !visibleAssistantTextAfterToolProtocolCleanup(for: message)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .isEmpty
+                    || isMessageVisuallyStreaming(message)
+            } ?? activityMessages[0]
+
+            context.mergedActivityAnchorIds.insert(anchor.id)
+            for message in activityMessages where message.id != anchor.id {
+                context.hiddenMergedActivityMessageIds.insert(message.id)
+            }
+        }
+
+        for message in messages {
+            if message.role == .user {
+                flushTurn()
+            }
+            turnMessages.append(message)
+        }
+        flushTurn()
     }
 
     private func agentActivity(for message: ChatMessage) -> AgentActivityItem? {
@@ -2587,6 +2675,42 @@ struct ChatDetailView: View {
         )
         agentActivityCache.store(messageId: message.id, signature: signature, item: item)
         return item
+    }
+
+    private func transcriptAgentActivity(
+        for message: ChatMessage,
+        isMergedAnchor: Bool
+    ) -> AgentActivityItem? {
+        guard message.role == .assistant else { return nil }
+        if isMergedAnchor {
+            let items = agentActivityItemsInTurn(containing: message)
+            if let merged = AgentActivityItem.mergedTurn(
+                id: "turn-\(message.id)",
+                items: items
+            ), merged.hasConcreteSteps {
+                return merged
+            }
+        }
+        return agentActivity(for: message)
+    }
+
+    private func agentActivityItemsInTurn(containing message: ChatMessage) -> [AgentActivityItem] {
+        let messages = viewModel.messages
+        guard let index = messages.firstIndex(where: { $0.id == message.id }) else {
+            return agentActivity(for: message).map { [$0] } ?? []
+        }
+
+        let start = messages[..<index]
+            .lastIndex(where: { $0.role == .user })
+            .map { messages.index(after: $0) }
+            ?? messages.startIndex
+        let end = messages[messages.index(after: index)...]
+            .firstIndex(where: { $0.role == .user })
+            ?? messages.endIndex
+
+        return messages[start..<end]
+            .compactMap { activityItem(for: $0) }
+            .filter { $0.hasConcreteSteps || $0.isActive }
     }
 
     private func agentActivityCacheSignature(for message: ChatMessage) -> Int {
@@ -3165,6 +3289,14 @@ struct ChatDetailView: View {
             return value
         }
 
+        if context.hiddenMergedActivityMessageIds.contains(message.id) {
+            return true
+        }
+        if context.mergedActivityAnchorIds.contains(message.id),
+           hasRenderableAgentActivityCached() {
+            return false
+        }
+
         if metadata["iexa_local_native_hidden_tool_parent"] == "true" {
             return !hasVisibleCleanedAssistantText() && !hasRenderableAgentActivityCached()
         }
@@ -3306,17 +3438,18 @@ struct ChatDetailView: View {
             return nil
         }
 
-        if let orderedLocalBlocks = orderedLocalAlpineTranscriptBlocks(
-            for: message,
-            activityItem: activityItem
-        ) {
-            return orderedLocalBlocks
-        }
-
         let visible = stripNativeToolProtocolBlocks(
             from: LocalAlpineAgentService.visibleContent(from: message.content)
         )
         .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !activityItem.id.hasPrefix("turn-"),
+           let orderedLocalBlocks = orderedLocalAlpineTranscriptBlocks(
+                for: message,
+                activityItem: activityItem
+           ) {
+            return orderedLocalBlocks
+        }
 
         var blocks: [OrderedAgentTranscriptBlock] = []
         if isLocalAlpineResultMessage(message) {
@@ -3342,6 +3475,12 @@ struct ChatDetailView: View {
             return blocks
         }
 
+        blocks.append(
+            OrderedAgentTranscriptBlock(
+                id: "\(message.id)-agent-steps",
+                content: .steps(activityItem)
+            )
+        )
         if !visible.isEmpty,
            !shouldHideProcessOnlyAgentText(
                 message,
@@ -3355,13 +3494,6 @@ struct ChatDetailView: View {
                 )
             )
         }
-
-        blocks.append(
-            OrderedAgentTranscriptBlock(
-                id: "\(message.id)-agent-steps",
-                content: .steps(activityItem)
-            )
-        )
         return blocks
     }
 
@@ -5337,7 +5469,12 @@ struct ChatDetailView: View {
         let userTextIsEmpty = message.role == .user
             && activeUserDisplayContent(for: message).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let waitingUIIsDelayed = shouldDelayWaitingUI(for: message)
-        let rowAgentActivity = message.role == .assistant ? agentActivity(for: message) : nil
+        let rowAgentActivity = message.role == .assistant
+            ? transcriptAgentActivity(
+                for: message,
+                isMergedAnchor: snapshot.mergedActivityAnchorIds.contains(message.id)
+            )
+            : nil
         let suppressAssistantBubble = shouldSuppressAssistantBubbleForActivityParent(message, activityItem: rowAgentActivity)
         let orderedAgentBlocks = orderedAgentTranscriptBlocks(
             for: message,
@@ -5364,6 +5501,11 @@ struct ChatDetailView: View {
             if message.role == .assistant,
                let orderedAgentBlocks {
                 orderedAgentTranscriptView(for: message, blocks: orderedAgentBlocks)
+
+                if let attachedSummary = attachedLocalAlpineFinalSummary(for: message) {
+                    attachedLocalAlpineFinalSummaryView(for: attachedSummary)
+                        .transition(.opacity)
+                }
             } else {
                 if message.role == .assistant {
                     agentStepPreview(for: message, fallbackItem: rowAgentActivity)
@@ -10482,6 +10624,11 @@ private struct AgentStepFloatingBar: View {
         return AgentActivityItem.multilinePreview(selectedStep.detail, maxLines: 4, maxLineLength: 88)
     }
 
+    private var previewDiffLines: [LocalAlpineFileDiffLine] {
+        guard let file = selectedStep?.file else { return [] }
+        return Array(file.diffPreviewLines.prefix(5))
+    }
+
     private var previewThumbnailReference: String? {
         let liveBrowser = liveBrowserThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
         let isBrowserStep = (selectedStep?.isInteractiveBrowserStatusStep == true) || item.hasInteractiveBrowserStatusSteps
@@ -10623,6 +10770,7 @@ private struct AgentStepFloatingBar: View {
                     previewTitle: previewTitle,
                     previewSubtitle: previewSubtitle,
                     previewText: previewText,
+                    diffLines: previewDiffLines,
                     thumbnailReference: previewThumbnailReference
                 )
                 .frame(
@@ -10705,10 +10853,15 @@ private struct AgentToolPreviewPop: View {
     let previewTitle: String
     let previewSubtitle: String
     let previewText: String
+    let diffLines: [LocalAlpineFileDiffLine]
     let thumbnailReference: String?
 
     private let previewSize = AgentStepFloatingMetrics.previewSize
     private let cornerRadius = AgentStepFloatingMetrics.previewCornerRadius
+
+    private var hasThumbnail: Bool {
+        thumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -10745,7 +10898,9 @@ private struct AgentToolPreviewPop: View {
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
 
-                if thumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                if !hasThumbnail, !diffLines.isEmpty {
+                    AgentToolPreviewMiniDiff(lines: diffLines)
+                } else if !hasThumbnail {
                     Text(previewText)
                         .font(.system(size: 5.6, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
@@ -10762,6 +10917,75 @@ private struct AgentToolPreviewPop: View {
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .strokeBorder(.white.opacity(0.08), lineWidth: 0.5)
         )
+    }
+}
+
+private struct AgentToolPreviewMiniDiff: View {
+    let lines: [LocalAlpineFileDiffLine]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(Array(lines.prefix(5).enumerated()), id: \.offset) { _, line in
+                HStack(spacing: 2) {
+                    Text(lineNumberText(for: line))
+                        .font(.system(size: 4.8, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.42))
+                        .frame(width: 11, alignment: .trailing)
+                    Text(prefix(for: line))
+                        .font(.system(size: 5.4, weight: .bold, design: .monospaced))
+                        .foregroundStyle(foreground(for: line))
+                        .frame(width: 4, alignment: .center)
+                    Text(String(line.text.prefix(54)))
+                        .font(.system(size: 5.4, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(foreground(for: line))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .padding(.horizontal, 2)
+                .frame(height: 6.4, alignment: .center)
+                .background(background(for: line), in: RoundedRectangle(cornerRadius: 2, style: .continuous))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func lineNumberText(for line: LocalAlpineFileDiffLine) -> String {
+        let number = line.newLineNumber ?? line.oldLineNumber
+        guard let number else { return "" }
+        return String(number)
+    }
+
+    private func prefix(for line: LocalAlpineFileDiffLine) -> String {
+        switch line.kind {
+        case .added:
+            return "+"
+        case .deleted:
+            return "-"
+        case .context:
+            return " "
+        }
+    }
+
+    private func foreground(for line: LocalAlpineFileDiffLine) -> Color {
+        switch line.kind {
+        case .added:
+            return Color(red: 0.38, green: 0.95, blue: 0.57)
+        case .deleted:
+            return Color(red: 1.0, green: 0.45, blue: 0.45)
+        case .context:
+            return Color(red: 0.72, green: 0.78, blue: 0.86)
+        }
+    }
+
+    private func background(for line: LocalAlpineFileDiffLine) -> Color {
+        switch line.kind {
+        case .added:
+            return Color.green.opacity(0.18)
+        case .deleted:
+            return Color.red.opacity(0.18)
+        case .context:
+            return Color.white.opacity(0.035)
+        }
     }
 }
 
@@ -11423,6 +11647,111 @@ private struct AgentFloatingStepPreviewItem: Identifiable, Hashable {
     let initialIndex: Int
 }
 
+private struct LocalAlpineDiffPreviewView: View {
+    let file: LocalAlpineWrittenFile
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(file.diffPreviewLines.enumerated()), id: \.offset) { _, line in
+                    diffLine(line)
+                }
+            }
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(theme.isDark ? 0.32 : 0.04))
+        }
+        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.78 : 0.98))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.34 : 0.55), lineWidth: 0.7)
+        )
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "square.and.pencil")
+                .foregroundStyle(theme.textSecondary)
+            Text(file.fileName)
+                .scaledFont(size: 16, weight: .semibold)
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+            Text("修改片段")
+                .scaledFont(size: 11, weight: .bold)
+                .foregroundStyle(theme.success)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 14)
+        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.72))
+    }
+
+    private func diffLine(_ line: LocalAlpineFileDiffLine) -> some View {
+        HStack(spacing: 8) {
+            Text(lineNumberText(for: line))
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(theme.textTertiary)
+                .frame(width: 42, alignment: .trailing)
+            Text(prefix(for: line))
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundStyle(foreground(for: line))
+                .frame(width: 12, alignment: .center)
+            Text(line.text.isEmpty ? " " : line.text)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(foreground(for: line))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 24, alignment: .center)
+        .background(background(for: line))
+    }
+
+    private func lineNumberText(for line: LocalAlpineFileDiffLine) -> String {
+        let number = line.newLineNumber ?? line.oldLineNumber
+        return number.map { "\($0)" } ?? ""
+    }
+
+    private func prefix(for line: LocalAlpineFileDiffLine) -> String {
+        switch line.kind {
+        case .added:
+            return "+"
+        case .deleted:
+            return "-"
+        case .context:
+            return " "
+        }
+    }
+
+    private func foreground(for line: LocalAlpineFileDiffLine) -> Color {
+        switch line.kind {
+        case .added:
+            return theme.success
+        case .deleted:
+            return .red
+        case .context:
+            return theme.textSecondary
+        }
+    }
+
+    private func background(for line: LocalAlpineFileDiffLine) -> Color {
+        switch line.kind {
+        case .added:
+            return Color.green.opacity(theme.isDark ? 0.15 : 0.10)
+        case .deleted:
+            return Color.red.opacity(theme.isDark ? 0.16 : 0.10)
+        case .context:
+            return Color.clear
+        }
+    }
+}
+
 private struct AgentFloatingStepPreviewSheet: View {
     let item: AgentFloatingStepPreviewItem
 
@@ -11568,14 +11897,19 @@ private struct AgentFloatingStepPreviewSheet: View {
         }
     }
 
+    @ViewBuilder
     private func filePreview(_ file: LocalAlpineWrittenFile) -> some View {
-        LocalAlpineLazyFilePreview(
-            path: file.path,
-            fileName: file.fileName,
-            language: file.language,
-            fallbackLines: file.previewLines(limit: 120),
-            byteCount: file.byteCount
-        )
+        if !file.diffPreviewLines.isEmpty {
+            LocalAlpineDiffPreviewView(file: file)
+        } else {
+            LocalAlpineLazyFilePreview(
+                path: file.path,
+                fileName: file.fileName,
+                language: file.language,
+                fallbackLines: file.previewLines(limit: 120),
+                byteCount: file.byteCount
+            )
+        }
     }
 
     private func lazyPreviewPath(for step: AgentActivityStep) -> String? {
@@ -11705,6 +12039,9 @@ private struct AgentFloatingStepPreviewSheet: View {
     private func copyText(for step: AgentActivityStep?) -> String {
         guard let step else { return "" }
         if let file = step.file {
+            if !file.diffPreviewLines.isEmpty {
+                return diffCopyText(for: file)
+            }
             return file.previewLines(limit: 120).joined(separator: "\n")
         }
         if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
@@ -11714,6 +12051,25 @@ private struct AgentFloatingStepPreviewSheet: View {
         return output.isEmpty
             ? step.detail
             : output
+    }
+
+    private func diffCopyText(for file: LocalAlpineWrittenFile) -> String {
+        var lines = ["# \(file.path)"]
+        lines.append(contentsOf: file.diffPreviewLines.map { line in
+            let prefix: String
+            switch line.kind {
+            case .added:
+                prefix = "+"
+            case .deleted:
+                prefix = "-"
+            case .context:
+                prefix = " "
+            }
+            let number = line.newLineNumber ?? line.oldLineNumber
+            let numberText = number.map(String.init) ?? ""
+            return "\(numberText)\t\(prefix)\(line.text)"
+        })
+        return lines.joined(separator: "\n")
     }
 }
 

@@ -183,29 +183,57 @@ nonisolated enum LocalAlpineOutputOffloadStore {
     }
 }
 
+nonisolated struct LocalAlpineFileDiffLine: Codable, Hashable, Sendable {
+    enum Kind: String, Codable, Hashable, Sendable {
+        case context
+        case added
+        case deleted
+    }
+
+    let kind: Kind
+    let oldLineNumber: Int?
+    let newLineNumber: Int?
+    let text: String
+
+    init(kind: Kind, oldLineNumber: Int?, newLineNumber: Int?, text: String) {
+        self.kind = kind
+        self.oldLineNumber = oldLineNumber
+        self.newLineNumber = newLineNumber
+        self.text = Self.previewText(text)
+    }
+
+    private static func previewText(_ text: String, limit: Int = 220) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit)) + " ..."
+    }
+}
+
 nonisolated struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
     let path: String
     let source: String
     let byteCount: Int
     let lineCountValue: Int
     let previewTailLines: [String]
+    let diffPreviewLines: [LocalAlpineFileDiffLine]
 
     init(
         path: String,
         content: String,
         source: String,
         byteCount: Int,
-        lineCountValue: Int? = nil
+        lineCountValue: Int? = nil,
+        diffPreviewLines: [LocalAlpineFileDiffLine] = []
     ) {
         self.path = path
         self.source = source
         self.byteCount = byteCount
         self.lineCountValue = lineCountValue ?? Self.countLines(in: content)
         self.previewTailLines = Self.tailLines(in: content, limit: 120)
+        self.diffPreviewLines = Array(diffPreviewLines.prefix(80))
     }
 
     private enum CodingKeys: String, CodingKey {
-        case path, content, source, byteCount, lineCountValue, previewTailLines
+        case path, content, source, byteCount, lineCountValue, previewTailLines, diffPreviewLines
     }
 
     init(from decoder: Decoder) throws {
@@ -219,6 +247,7 @@ nonisolated struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
             ?? Self.countLines(in: legacyContent)
         previewTailLines = (try? container.decode([String].self, forKey: .previewTailLines))
             ?? Self.tailLines(in: legacyContent, limit: 120)
+        diffPreviewLines = (try? container.decode([LocalAlpineFileDiffLine].self, forKey: .diffPreviewLines)) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -228,6 +257,9 @@ nonisolated struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
         try container.encode(byteCount, forKey: .byteCount)
         try container.encode(lineCountValue, forKey: .lineCountValue)
         try container.encode(previewTailLines, forKey: .previewTailLines)
+        if !diffPreviewLines.isEmpty {
+            try container.encode(diffPreviewLines, forKey: .diffPreviewLines)
+        }
     }
 
     var fileName: String {
@@ -300,6 +332,7 @@ nonisolated struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
             LocalAlpineWrittenFile(
                 path: file.path,
                 previewLines: file.previewTailLines,
+                diffPreviewLines: file.diffPreviewLines,
                 source: file.source,
                 byteCount: file.byteCount,
                 lineCountValue: file.lineCount
@@ -321,6 +354,7 @@ nonisolated struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
     private init(
         path: String,
         previewLines: [String],
+        diffPreviewLines: [LocalAlpineFileDiffLine],
         source: String,
         byteCount: Int,
         lineCountValue: Int
@@ -330,6 +364,7 @@ nonisolated struct LocalAlpineWrittenFile: Codable, Hashable, Sendable {
         self.byteCount = byteCount
         self.lineCountValue = lineCountValue
         self.previewTailLines = Array(previewLines.suffix(120))
+        self.diffPreviewLines = Array(diffPreviewLines.prefix(80))
     }
 }
 
@@ -4758,6 +4793,197 @@ actor LocalAlpineAgentService {
         )
     }
 
+    private nonisolated static func fileDiffPreviewLines(
+        from oldContent: String,
+        to newContent: String,
+        limit: Int
+    ) -> [LocalAlpineFileDiffLine] {
+        guard oldContent != newContent, limit > 0 else { return [] }
+        let oldLines = sourceLines(oldContent)
+        let newLines = sourceLines(newContent)
+        guard !oldLines.isEmpty || !newLines.isEmpty else { return [] }
+
+        let product = oldLines.count * newLines.count
+        if product > 180_000 {
+            return simpleFileDiffPreviewLines(from: oldLines, to: newLines, limit: limit)
+        }
+
+        let newCount = newLines.count
+        var table = Array(repeating: 0, count: (oldLines.count + 1) * (newCount + 1))
+        func index(_ oldIndex: Int, _ newIndex: Int) -> Int {
+            oldIndex * (newCount + 1) + newIndex
+        }
+
+        if !oldLines.isEmpty, !newLines.isEmpty {
+            for oldIndex in 1...oldLines.count {
+                for newIndex in 1...newLines.count {
+                    if oldLines[oldIndex - 1] == newLines[newIndex - 1] {
+                        table[index(oldIndex, newIndex)] = table[index(oldIndex - 1, newIndex - 1)] + 1
+                    } else {
+                        table[index(oldIndex, newIndex)] = max(
+                            table[index(oldIndex - 1, newIndex)],
+                            table[index(oldIndex, newIndex - 1)]
+                        )
+                    }
+                }
+            }
+        }
+
+        var reversed: [LocalAlpineFileDiffLine] = []
+        var oldIndex = oldLines.count
+        var newIndex = newLines.count
+        while oldIndex > 0 || newIndex > 0 {
+            if oldIndex > 0,
+               newIndex > 0,
+               oldLines[oldIndex - 1] == newLines[newIndex - 1] {
+                reversed.append(
+                    LocalAlpineFileDiffLine(
+                        kind: .context,
+                        oldLineNumber: oldIndex,
+                        newLineNumber: newIndex,
+                        text: oldLines[oldIndex - 1]
+                    )
+                )
+                oldIndex -= 1
+                newIndex -= 1
+            } else if newIndex > 0,
+                      (oldIndex == 0 || table[index(oldIndex, newIndex - 1)] >= table[index(oldIndex - 1, newIndex)]) {
+                reversed.append(
+                    LocalAlpineFileDiffLine(
+                        kind: .added,
+                        oldLineNumber: nil,
+                        newLineNumber: newIndex,
+                        text: newLines[newIndex - 1]
+                    )
+                )
+                newIndex -= 1
+            } else if oldIndex > 0 {
+                reversed.append(
+                    LocalAlpineFileDiffLine(
+                        kind: .deleted,
+                        oldLineNumber: oldIndex,
+                        newLineNumber: nil,
+                        text: oldLines[oldIndex - 1]
+                    )
+                )
+                oldIndex -= 1
+            }
+        }
+
+        return compactDiffPreview(Array(reversed.reversed()), contextRadius: 2, limit: limit)
+    }
+
+    private nonisolated static func compactDiffPreview(
+        _ lines: [LocalAlpineFileDiffLine],
+        contextRadius: Int,
+        limit: Int
+    ) -> [LocalAlpineFileDiffLine] {
+        guard limit > 0 else { return [] }
+        let changedIndices = lines.indices.filter { index in
+            lines[index].kind != .context
+        }
+        guard !changedIndices.isEmpty else { return Array(lines.prefix(limit)) }
+
+        var selected = Set<Int>()
+        for index in changedIndices {
+            let lower = max(lines.startIndex, index - contextRadius)
+            let upper = min(lines.endIndex - 1, index + contextRadius)
+            for candidate in lower...upper {
+                selected.insert(candidate)
+            }
+        }
+
+        return lines.indices
+            .filter { selected.contains($0) }
+            .prefix(limit)
+            .map { lines[$0] }
+    }
+
+    private nonisolated static func simpleFileDiffPreviewLines(
+        from oldLines: [String],
+        to newLines: [String],
+        limit: Int
+    ) -> [LocalAlpineFileDiffLine] {
+        var prefix = 0
+        while prefix < oldLines.count,
+              prefix < newLines.count,
+              oldLines[prefix] == newLines[prefix] {
+            prefix += 1
+        }
+
+        var suffix = 0
+        while suffix < oldLines.count - prefix,
+              suffix < newLines.count - prefix,
+              oldLines[oldLines.count - 1 - suffix] == newLines[newLines.count - 1 - suffix] {
+            suffix += 1
+        }
+
+        let oldChangeEnd = oldLines.count - suffix
+        let newChangeEnd = newLines.count - suffix
+        var preview: [LocalAlpineFileDiffLine] = []
+
+        let beforeStart = max(0, prefix - 2)
+        if beforeStart < prefix {
+            for index in beforeStart..<prefix {
+                preview.append(
+                    LocalAlpineFileDiffLine(
+                        kind: .context,
+                        oldLineNumber: index + 1,
+                        newLineNumber: index + 1,
+                        text: oldLines[index]
+                    )
+                )
+            }
+        }
+
+        if prefix < oldChangeEnd {
+            for index in prefix..<oldChangeEnd {
+                preview.append(
+                    LocalAlpineFileDiffLine(
+                        kind: .deleted,
+                        oldLineNumber: index + 1,
+                        newLineNumber: nil,
+                        text: oldLines[index]
+                    )
+                )
+                if preview.count >= limit { return preview }
+            }
+        }
+
+        if prefix < newChangeEnd {
+            for index in prefix..<newChangeEnd {
+                preview.append(
+                    LocalAlpineFileDiffLine(
+                        kind: .added,
+                        oldLineNumber: nil,
+                        newLineNumber: index + 1,
+                        text: newLines[index]
+                    )
+                )
+                if preview.count >= limit { return preview }
+            }
+        }
+
+        if suffix > 0, preview.count < limit {
+            let afterCount = min(2, suffix)
+            for offset in 0..<afterCount {
+                let oldLine = oldChangeEnd + offset
+                let newLine = newChangeEnd + offset
+                preview.append(
+                    LocalAlpineFileDiffLine(
+                        kind: .context,
+                        oldLineNumber: oldLine + 1,
+                        newLineNumber: newLine + 1,
+                        text: oldLines[oldLine]
+                    )
+                )
+                if preview.count >= limit { break }
+            }
+        }
+
+        return Array(preview.prefix(limit))
+    }
+
     private nonisolated static func sourceLineCount(_ content: String) -> Int {
         sourceLines(content).count
     }
@@ -5344,6 +5570,11 @@ actor LocalAlpineAgentService {
                 )
             }
             let delta = Self.lineDelta(from: originalContent ?? "", to: content)
+            let diffPreview = Self.fileDiffPreviewLines(
+                from: originalContent ?? "",
+                to: content,
+                limit: 52
+            )
             var lines = ["- `\(target)` (\(data.count) B，已写入，来源：\(source.displayName))"]
             if !delta.isEmpty {
                 lines.append("  - 行数变化：\(delta.displayText)")
@@ -5356,7 +5587,8 @@ actor LocalAlpineAgentService {
                     path: target,
                     content: content,
                     source: source.displayName,
-                    byteCount: data.count
+                    byteCount: data.count,
+                    diffPreviewLines: diffPreview
                 ),
                 lineDelta: delta.isEmpty ? nil : delta,
                 hadFailure: false
