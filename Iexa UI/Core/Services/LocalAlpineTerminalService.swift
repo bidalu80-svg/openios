@@ -621,7 +621,7 @@ actor LocalAlpineTerminalService {
     private let logger = Logger(subsystem: "com.openui", category: "LocalAlpine")
     private let fileManager = FileManager.default
     private let rootArchiveName = "iexa-alpine-rootfs.fakefs"
-    private let bundledRootFSVersion = "3.19.9-lite.1"
+    private let bundledRootFSVersion = "3.21.7-lite.1"
     private let rootVersionFileName = ".iexa-rootfs-version"
     private let rootResetMarkerFileName = ".iexa-rootfs-reset-pending"
     private let workspaceFolderName = "Iexa Alpine"
@@ -1725,6 +1725,13 @@ actor LocalAlpineTerminalService {
             return writableURL.standardizedFileURL
         }
 
+        if nativeRuntimeStarted,
+           fileManager.fileExists(atPath: dataURL.path),
+           fileManager.fileExists(atPath: metadataURL.path) {
+            try? "rootfs upgrade pending\n".write(to: resetMarkerURL, atomically: true, encoding: .utf8)
+            return writableURL.standardizedFileURL
+        }
+
         let temporaryURL = workspaceURL.appendingPathComponent("rootfs.fakefs.tmp-\(UUID().uuidString)", isDirectory: true)
         try? fileManager.removeItem(at: temporaryURL)
         try fileManager.copyItem(at: bundledURL, to: temporaryURL)
@@ -1879,7 +1886,7 @@ actor LocalAlpineTerminalService {
               match.numberOfRanges >= 3,
               let majorRange = Range(match.range(at: 1), in: version),
               let minorRange = Range(match.range(at: 2), in: version) else {
-            return "v3.19"
+            return "v3.21"
         }
         return "v\(version[majorRange]).\(version[minorRange])"
     }

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 output_path="${1:-Iexa UI/Resources/iexa-alpine-rootfs.tar.gz}"
-rootfs_url="${IEXA_ALPINE_ROOTFS_URL:-https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86/alpine-minirootfs-3.19.9-x86.tar.gz}"
-expected_sha256="${IEXA_ALPINE_ROOTFS_SHA256:-8b85e1c9c743704eda40f69cd82c80ac3805732eb0906f35c870b44d91e1818d}"
+rootfs_url="${IEXA_ALPINE_ROOTFS_URL:-https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86/alpine-minirootfs-3.21.7-x86.tar.gz}"
+expected_sha256="${IEXA_ALPINE_ROOTFS_SHA256:-b6ca484f1a667990b1276bcc4811ab0617557a13bef5ff03be2e2600ad717477}"
 preinstall_packages="${IEXA_ALPINE_PREINSTALL_PACKAGES:-}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

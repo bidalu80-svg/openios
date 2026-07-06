@@ -5579,7 +5579,7 @@ final class BrowserWebSearchService: NSObject {
         timeout: TimeInterval = 300,
         onUserInteraction: ((String) -> Void)? = nil
     ) async -> Bool {
-        var sawChallenge = false
+        var sawChallenge = true
         var completedSamples = 0
         var clearSamples = 0
         var lastScrollAt = Date.distantPast
@@ -5588,20 +5588,25 @@ final class BrowserWebSearchService: NSObject {
         lastScrollAt = Date()
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
+            scheduleLiveBrowserPreview(reason: "verification_poll", minimumInterval: 1.2)
             if let probe = await evaluateJSONObject(Self.visibleChallengeProbeScript()) {
                 let detected = Self.boolValue(probe["detected"]) == true
                 let completed = Self.boolValue(probe["completed"]) == true
                 let failed = Self.boolValue(probe["failed_state"]) == true
+                let pending = Self.boolValue(probe["pending_state"]) == true
+                let pageUsable = Self.boolValue(probe["page_usable"]) == true
+                let challengeVisible = Self.boolValue(probe["challenge_visible"]) == true
+                let effectivelyCompleted = completed || (sawChallenge && pageUsable && !challengeVisible && !pending && !failed)
                 if detected {
                     sawChallenge = true
                     clearSamples = 0
-                    if !completed && Date().timeIntervalSince(lastScrollAt) >= 4 {
+                    if !effectivelyCompleted && Date().timeIntervalSince(lastScrollAt) >= 4 {
                         _ = await scrollToVisibleHumanVerification()
                         lastScrollAt = Date()
                     }
                 }
 
-                if sawChallenge && completed && !failed {
+                if sawChallenge && effectivelyCompleted && !failed {
                     completedSamples += 1
                 } else {
                     completedSamples = 0
@@ -5609,7 +5614,9 @@ final class BrowserWebSearchService: NSObject {
                 if completedSamples >= 2 {
                     var completedProbe = probe
                     completedProbe["completed"] = true
+                    completedProbe["detected"] = false
                     notifyHumanVerificationState(completedProbe)
+                    scheduleLiveBrowserPreview(reason: "verification_completed", minimumInterval: 0.2)
                     return true
                 }
 
@@ -5623,6 +5630,7 @@ final class BrowserWebSearchService: NSObject {
                     completedProbe["detected"] = false
                     completedProbe["completed"] = true
                     notifyHumanVerificationState(completedProbe)
+                    scheduleLiveBrowserPreview(reason: "verification_completed", minimumInterval: 0.2)
                     return true
                 }
 
@@ -6884,8 +6892,13 @@ final class BrowserWebSearchService: NSObject {
         }
         let detected = Self.boolValue(probe["detected"]) == true
         let completed = Self.boolValue(probe["completed"]) == true
-        guard detected && !completed else { return nil }
+        let failed = Self.boolValue(probe["failed_state"]) == true
+        let pending = Self.boolValue(probe["pending_state"]) == true
+        let pageUsable = Self.boolValue(probe["page_usable"]) == true
+        let challengeVisible = Self.boolValue(probe["challenge_visible"]) == true
+        guard detected && !completed && !(pageUsable && !challengeVisible && !pending && !failed) else { return nil }
         _ = await scrollToVisibleHumanVerification()
+        scheduleLiveBrowserPreview(reason: "verification_required", minimumInterval: 0.2)
         probe["requires_user_verification"] = true
         return probe
     }
@@ -6922,12 +6935,16 @@ final class BrowserWebSearchService: NSObject {
     private func notifyHumanVerificationState(_ probe: [String: Any]) {
         let detected = Self.boolValue(probe["detected"]) == true
         let explicitCompleted = Self.boolValue(probe["completed"]) == true
-        let completed = explicitCompleted
+        let failed = Self.boolValue(probe["failed_state"]) == true
+        let pending = Self.boolValue(probe["pending_state"]) == true
+        let pageUsable = Self.boolValue(probe["page_usable"]) == true
+        let challengeVisible = Self.boolValue(probe["challenge_visible"]) == true
+        let completed = explicitCompleted || (pageUsable && !challengeVisible && !pending && !failed)
         if let tabID = browserTabID(for: webView) {
             if detected {
                 browserHumanVerificationSeenTabs.insert(tabID)
             }
-            if detected && !explicitCompleted {
+            if detected && !completed {
                 browserHumanVerificationCompletedAtByTab.removeValue(forKey: tabID)
                 browserHumanVerificationCompletedURLByTab.removeValue(forKey: tabID)
                 if let currentURL = webView?.url {
@@ -6952,7 +6969,10 @@ final class BrowserWebSearchService: NSObject {
             userInfo: [
                 "detected": detected,
                 "completed": completed,
-                "failed_state": Self.boolValue(probe["failed_state"]) == true,
+                "failed_state": failed,
+                "pending_state": pending,
+                "page_usable": pageUsable,
+                "challenge_visible": challengeVisible,
                 "user_interaction_kind": probe["user_interaction_kind"] as? String ?? "",
                 "user_interaction_at": probe["user_interaction_at"] as? String ?? "",
                 "url": webView?.url?.absoluteString ?? "",
@@ -7125,14 +7145,15 @@ final class BrowserWebSearchService: NSObject {
               catch (_) { return false; }
             });
           }
-          function pageUsableControlPresent() {
+          function pageUsableEvidence() {
             const selector = 'button, a[href], input:not([type="hidden"]), textarea, select, [contenteditable], [role="button"], [role="link"], [role="textbox"], [onclick], [tabindex]';
             const challengePattern = /turnstile|captcha|recaptcha|challenge|cf-chl|cloudflare|验证|人机|verify you are human|prove you are human/i;
+            let controlCount = 0;
             try {
-              return Array.from(document.querySelectorAll(selector)).slice(0, 240).some(node => {
-                if (!visible(node)) return false;
+              for (const node of Array.from(document.querySelectorAll(selector)).slice(0, 240)) {
+                if (!visible(node)) continue;
                 const disabled = Boolean(node.disabled || node.getAttribute && node.getAttribute('aria-disabled') === 'true' || node.closest && node.closest('[disabled],[aria-disabled="true"]'));
-                if (disabled) return false;
+                if (disabled) continue;
                 const signature = [
                   node.id || '',
                   node.name || '',
@@ -7143,11 +7164,25 @@ final class BrowserWebSearchService: NSObject {
                   node.innerText || '',
                   node.textContent || ''
                 ].join(' ');
-                return !challengePattern.test(signature);
-              });
+                if (!challengePattern.test(signature)) {
+                  controlCount += 1;
+                }
+              }
             } catch (_) {
-              return false;
+              controlCount = 0;
             }
+            const titleText = String(document.title || '');
+            const nonChallengeTitle = titleText.length > 0 && !challengePattern.test(titleText);
+            const strippedBodyText = bodyText
+              .replace(/prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|故障排除|验证失败|验证您是真人|请验证您是真人|正在检查|troubleshooting|verification failed/g, ' ')
+              .replace(/\\s+/g, ' ')
+              .trim();
+            const usefulText = nonChallengeTitle && strippedBodyText.length >= 320;
+            return {
+              usable: controlCount > 0 || usefulText,
+              control_count: controlCount,
+              content_text_length: strippedBodyText.length
+            };
           }
           const hasChallengeWidget = Boolean(
             turnstile ||
@@ -7160,7 +7195,8 @@ final class BrowserWebSearchService: NSObject {
             || (/成功|success/.test(bodyText) && /cloudflare|captcha|turnstile|验证/.test(bodyText));
           const pendingText = /checking if the site connection is secure|checking your browser|正在检查/.test(bodyText);
           const challengeVisible = challengeElementVisible();
-          const pageUsable = pageUsableControlPresent();
+          const usableEvidence = pageUsableEvidence();
+          const pageUsable = Boolean(usableEvidence.usable);
           const textOnlyChallenge = textChallenge && !challengeVisible && !hasChallengeWidget && !pendingText && !failedState;
           const completedState = tokenLength > 0 || successState || (!challengeVisible && !pendingText && !failedState && (!textChallenge || pageUsable));
           const challengeDetected = !completedState && (hasChallengeWidget || challengeVisible || pendingText || failedState || (textOnlyChallenge && !pageUsable));
@@ -7168,9 +7204,12 @@ final class BrowserWebSearchService: NSObject {
             detected: challengeDetected,
             completed: completedState,
             failed_state: failedState && !completedState,
+            pending_state: pendingText && !completedState,
             success_state: successState,
             challenge_visible: challengeVisible,
             page_usable: pageUsable,
+            page_usable_control_count: usableEvidence.control_count,
+            page_usable_text_length: usableEvidence.content_text_length,
             text_only_challenge: textOnlyChallenge,
             token_length: tokenLength
           });

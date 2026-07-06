@@ -292,7 +292,6 @@ jobs:
             etc/alpine-release
             etc/apk/repositories
             usr/bin/wget
-            lib/libapk.so.2.14.0
           )
           for required_path in "${required_exact_paths[@]}"; do
             if ! grep -Fxq "$required_path" "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"; then
@@ -302,6 +301,10 @@ jobs:
               exit 1
             fi
           done
+          if ! grep -Eq '(^|/)libapk\.so' "$RUNNER_TEMP/iexa-alpine-rootfs-files.txt"; then
+            echo "::error::Local Alpine rootfs is missing libapk.so"
+            exit 1
+          fi
 
       - name: Prepare Local Alpine iSH runtime
         run: |
@@ -334,7 +337,6 @@ jobs:
             etc/alpine-release
             etc/apk/repositories
             usr/bin/wget
-            lib/libapk.so.2.14.0
           )
           for tool_path in "${required_exact_tool_paths[@]}"; do
             fakefs_path="/$tool_path"
@@ -346,6 +348,11 @@ jobs:
               exit 1
             fi
           done
+          libapk_count="$(sqlite3 ".build/local-alpine-resources/iexa-alpine-rootfs.fakefs/meta.db" "select count(*) from paths where cast(path as text) like '%libapk.so%';")"
+          if [ "$libapk_count" = "0" ]; then
+            echo "::error::Local Alpine fakefs is missing libapk.so"
+            exit 1
+          fi
           bash scripts/build-local-alpine-ish-ci.sh External/ish "$RUNNER_TEMP/ish-products"
           bash scripts/enable-local-alpine-ish-ci.sh \
             "Iexa UI.xcodeproj/project.pbxproj" \
