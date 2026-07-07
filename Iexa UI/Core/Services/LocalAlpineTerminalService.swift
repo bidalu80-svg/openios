@@ -621,7 +621,7 @@ actor LocalAlpineTerminalService {
     private let logger = Logger(subsystem: "com.openui", category: "LocalAlpine")
     private let fileManager = FileManager.default
     private let rootArchiveName = "iexa-alpine-rootfs.fakefs"
-    private let bundledRootFSVersion = "3.19.9-lite.1"
+    private let bundledRootFSVersion = "3.19.9-lite.2"
     private let rootVersionFileName = ".iexa-rootfs-version"
     private let rootResetMarkerFileName = ".iexa-rootfs-reset-pending"
     private let requiredRootFSFakeFSPaths = [
@@ -632,6 +632,7 @@ actor LocalAlpineTerminalService {
         "/etc/os-release",
         "/etc/apk/repositories",
         "/lib/apk/db/installed",
+        "/usr/sbin/fping",
         "/dev"
     ]
     private let requiredRootFSDataPaths = [
@@ -642,6 +643,7 @@ actor LocalAlpineTerminalService {
         "etc/os-release",
         "etc/apk/repositories",
         "lib/apk/db/installed",
+        "usr/sbin/fping",
         "dev"
     ]
     private let workspaceFolderName = "Iexa Alpine"
@@ -675,7 +677,7 @@ actor LocalAlpineTerminalService {
     printf '\\n== workspace /mnt/iexa ==\\n'
     ls -la /mnt/iexa 2>/dev/null || true
     printf '\\n== core tools ==\\n'
-    for x in sh ash busybox apk wget curl python3 pip3 node npm gcc g++ make git tar unzip zip sqlite3; do
+    for x in sh ash busybox apk wget curl ping fping nc python3 pip3 node npm gcc g++ make git tar unzip zip sqlite3; do
       printf '%-8s ' "$x"
       command -v "$x" 2>/dev/null || printf 'missing\\n'
     done
@@ -2332,14 +2334,61 @@ actor LocalAlpineTerminalService {
           exit 127
         fi
 
+        count=4
+        wait_seconds=2
         has_limit=0
+        previous=
         for arg in "$@"; do
+          if [ "$previous" = "-c" ]; then
+            case "$arg" in ''|*[!0-9]*) ;; *) count="$arg" ;; esac
+            previous=
+            continue
+          fi
+          if [ "$previous" = "-W" ] || [ "$previous" = "-w" ]; then
+            case "$arg" in ''|*[!0-9]*) ;; *) wait_seconds="$arg" ;; esac
+            previous=
+            continue
+          fi
           case "$arg" in
-            -c|-c*|-w|-w*|-W|-W*|--help|-h)
+            -c)
+              has_limit=1
+              previous=-c
+              ;;
+            -c*)
+              has_limit=1
+              value="${arg#-c}"
+              case "$value" in ''|*[!0-9]*) ;; *) count="$value" ;; esac
+              ;;
+            -w|-W)
+              has_limit=1
+              previous="$arg"
+              ;;
+            -w*|-W*)
+              has_limit=1
+              value="${arg#-w}"
+              [ "$value" = "$arg" ] && value="${arg#-W}"
+              case "$value" in ''|*[!0-9]*) ;; *) wait_seconds="$value" ;; esac
+              ;;
+            --help|-h)
               has_limit=1
               ;;
           esac
         done
+        [ "$count" -gt 0 ] 2>/dev/null || count=4
+        [ "$wait_seconds" -gt 0 ] 2>/dev/null || wait_seconds=2
+
+        target=
+        for arg in "$@"; do
+          case "$arg" in
+            -*) ;;
+            *)
+              case "$arg" in ''|*[!0-9]*) target="$arg" ;; esac
+              ;;
+          esac
+        done
+        [ -n "$target" ] || target="host"
+        timeout_ms=$((wait_seconds * 1000))
+        [ "$timeout_ms" -gt 0 ] 2>/dev/null || timeout_ms=2000
 
         run_ping() {
           if [ -n "$busybox_ping" ]; then
@@ -2349,33 +2398,97 @@ actor LocalAlpineTerminalService {
           fi
         }
 
-        if command -v timeout >/dev/null 2>&1; then
-          if [ "$has_limit" -eq 1 ]; then
-            if [ -n "$busybox_ping" ]; then
-              timeout 12 "$busybox_ping" ping "$@"
-            else
-              timeout 12 "$real_ping" "$@"
-            fi
-          else
-            if [ -n "$busybox_ping" ]; then
-              timeout 12 "$busybox_ping" ping -c 4 -W 2 "$@"
-            else
-              timeout 12 "$real_ping" -c 4 -W 2 "$@"
-            fi
-          fi
+        run_fping_if_available() {
+          fping_bin="$(command -v fping 2>/dev/null || true)"
+          [ -n "$fping_bin" ] || return 127
+          [ "$target" != "host" ] || return 127
+          tmp="/tmp/iexa-fping-$$.log"
+          : > "$tmp" 2>/dev/null || {
+            tmp="/mnt/iexa/shared/.iexa-fping-$$.log"
+            : > "$tmp" 2>/dev/null || return 125
+          }
+          "$fping_bin" -c "$count" -t "$timeout_ms" "$target" >"$tmp" 2>&1
           status=$?
-          case "$status" in
-            124|137|143)
-              printf '\\nIEXA_PING_TIMEOUT: ping exceeded 12 seconds. ICMP can be unreliable in the embedded iSH runtime; use HTTP/TCP checks for latency.\\n' >&2
-              ;;
-          esac
-          exit "$status"
-        fi
+          cat "$tmp" 2>/dev/null
+          if grep -Eq -- 'xmt/rcv/%loss = [0-9]+/[1-9][0-9]*/' "$tmp" 2>/dev/null ||
+             grep -Eq -- '(^|[[:space:]])64 bytes,' "$tmp" 2>/dev/null; then
+            rm -f "$tmp" >/dev/null 2>&1 || true
+            return 0
+          fi
+          rm -f "$tmp" >/dev/null 2>&1 || true
+          return "$status"
+        }
+
+        print_supervised_stats() {
+          awk -v target="$target" -v transmitted="$count" '
+            / bytes from / {
+              received++
+              if (match($0, /time=[0-9.]+/)) {
+                value = substr($0, RSTART + 5, RLENGTH - 5) + 0
+                if (samples == 0 || value < min) min = value
+                if (samples == 0 || value > max) max = value
+                sum += value
+                samples++
+              }
+            }
+            END {
+              if (received > 0) {
+                loss = transmitted > 0 ? int(((transmitted - received) * 100) / transmitted) : 0
+                printf "\\n--- %s ping statistics ---\\n", target
+                printf "%d packets transmitted, %d packets received, %d%% packet loss\\n", transmitted, received, loss
+                if (samples > 0) {
+                  printf "round-trip min/avg/max = %.3f/%.3f/%.3f ms\\n", min, sum / samples, max
+                }
+              }
+            }
+          ' "$1"
+        }
+
+        supervised_ping() {
+          tmp="/tmp/iexa-ping-$$.log"
+          : > "$tmp" 2>/dev/null || {
+            tmp="/mnt/iexa/shared/.iexa-ping-$$.log"
+            : > "$tmp" 2>/dev/null || exit 125
+          }
+          if [ -n "$busybox_ping" ]; then
+            "$busybox_ping" ping "$@" >"$tmp" 2>&1 &
+          else
+            "$real_ping" "$@" >"$tmp" 2>&1 &
+          fi
+          pid=$!
+          deadline=$((count * wait_seconds + 4))
+          [ "$deadline" -lt 6 ] && deadline=6
+          [ "$deadline" -gt 15 ] && deadline=15
+          elapsed=0
+          while [ "$elapsed" -lt "$deadline" ]; do
+            if grep -Eq -- '(^|[[:space:]])[0-9]+ bytes from ' "$tmp" 2>/dev/null; then
+              replies="$(grep -E -- '(^|[[:space:]])[0-9]+ bytes from ' "$tmp" 2>/dev/null | wc -l | tr -d ' ')"
+              if [ "$replies" -ge "$count" ] 2>/dev/null || grep -q -- ' ping statistics ' "$tmp" 2>/dev/null; then
+                break
+              fi
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              break
+            fi
+            sleep 1 2>/dev/null || break
+            elapsed=$((elapsed + 1))
+          done
+          cat "$tmp" 2>/dev/null
+          if ! grep -q -- ' ping statistics ' "$tmp" 2>/dev/null; then
+            print_supervised_stats "$tmp"
+          fi
+          replies="$(grep -E -- '(^|[[:space:]])[0-9]+ bytes from ' "$tmp" 2>/dev/null | wc -l | tr -d ' ')"
+          kill "$pid" >/dev/null 2>&1 || true
+          rm -f "$tmp" >/dev/null 2>&1 || true
+          [ "$replies" -gt 0 ] 2>/dev/null
+        }
 
         if [ "$has_limit" -eq 1 ]; then
-          run_ping "$@"
+          run_fping_if_available && exit 0
+          supervised_ping "$@"
         else
-          run_ping -c 4 -W 2 "$@"
+          run_fping_if_available && exit 0
+          supervised_ping -c 4 -W 2 "$@"
         fi
         """
     }
@@ -3111,7 +3224,7 @@ actor LocalAlpineTerminalService {
         export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-07-07.2
+          _iexa_bootstrap_version=2026-07-07.3
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
           if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"

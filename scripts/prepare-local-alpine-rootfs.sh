@@ -4,7 +4,7 @@ set -euo pipefail
 output_path="${1:-Iexa UI/Resources/iexa-alpine-rootfs.tar.gz}"
 rootfs_url="${IEXA_ALPINE_ROOTFS_URL:-https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86/alpine-minirootfs-3.19.9-x86.tar.gz}"
 expected_sha256="${IEXA_ALPINE_ROOTFS_SHA256:-8b85e1c9c743704eda40f69cd82c80ac3805732eb0906f35c870b44d91e1818d}"
-preinstall_packages="${IEXA_ALPINE_PREINSTALL_PACKAGES:-}"
+preinstall_packages="${IEXA_ALPINE_PREINSTALL_PACKAGES:-fping}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$(dirname "$output_path")"
@@ -42,21 +42,30 @@ if [ -n "$preinstall_packages" ]; then
 
   rootfs_contents="$(mktemp)"
   tar -tzf "$output_path" > "$rootfs_contents"
-  required_exact_paths=(
-    usr/bin/as
-    usr/bin/gcc
-    usr/bin/g++
-    usr/bin/ld
-    usr/bin/make
-    usr/bin/pip3
-    usr/bin/python3
-    usr/include/stdio.h
-    usr/lib/libstdc++.so.6
-    usr/lib/crt1.o
-  )
-  required_prefix_paths=(
-    usr/include/c++/
-  )
+  required_exact_paths=()
+  required_prefix_paths=()
+  case " $preinstall_packages " in
+    *" fping "*) required_exact_paths+=(usr/sbin/fping) ;;
+  esac
+  if [[ " $preinstall_packages " == *" build-base "* || " $preinstall_packages " == *" gcc "* || " $preinstall_packages " == *" g++ "* ]]; then
+    required_exact_paths+=(
+      usr/bin/as
+      usr/bin/gcc
+      usr/bin/g++
+      usr/bin/ld
+      usr/bin/make
+      usr/include/stdio.h
+      usr/lib/libstdc++.so.6
+      usr/lib/crt1.o
+    )
+    required_prefix_paths+=(usr/include/c++/)
+  fi
+  if [[ " $preinstall_packages " == *" python3 "* || " $preinstall_packages " == *" py3-pip "* ]]; then
+    required_exact_paths+=(usr/bin/python3)
+  fi
+  if [[ " $preinstall_packages " == *" py3-pip "* ]]; then
+    required_exact_paths+=(usr/bin/pip3)
+  fi
   for required_path in "${required_exact_paths[@]}"; do
     if ! grep -Fxq "$required_path" "$rootfs_contents"; then
       echo "Preinstalled rootfs is missing $required_path" >&2

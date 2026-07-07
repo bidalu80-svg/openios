@@ -20,6 +20,20 @@ if [ -f "$patch_file" ]; then
   fi
 fi
 
+socket_patch_file="$PWD/scripts/ish-socket-recvfrom-result-length.patch"
+if [ -f "$socket_patch_file" ]; then
+  if git -C "$ish_dir" apply --check "$socket_patch_file"; then
+    git -C "$ish_dir" apply "$socket_patch_file"
+    echo "Applied iSH recvfrom result-length copy fix"
+  elif grep -Fq "user_write(buffer_addr, buffer, res)" "$ish_dir/fs/sock.c"; then
+    echo "iSH recvfrom result-length copy fix already present"
+  else
+    echo "Could not apply iSH recvfrom result-length copy fix" >&2
+    git -C "$ish_dir" apply --check "$socket_patch_file" || true
+    exit 1
+  fi
+fi
+
 xcodebuild \
   -project "$ish_dir/iSH.xcodeproj" \
   -target libish \

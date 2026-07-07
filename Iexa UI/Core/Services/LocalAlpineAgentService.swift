@@ -420,7 +420,27 @@ nonisolated struct LocalAlpineAgentCommandResult: Codable, Hashable, Sendable {
 
     var failed: Bool {
         guard let exitCode else { return true }
-        return exitCode != 0
+        if exitCode == 0 { return false }
+        return !Self.treatsAsSuccessful(command: command, exitCode: exitCode, output: outputPreview)
+    }
+
+    static func treatsAsSuccessful(command: String, exitCode: Int?, output: String) -> Bool {
+        guard let exitCode, exitCode != 0 else { return exitCode == 0 }
+        return isICMPReachabilitySuccess(command: command, exitCode: exitCode, output: output)
+    }
+
+    private static func isICMPReachabilitySuccess(command: String, exitCode: Int, output: String) -> Bool {
+        guard exitCode == 124 || exitCode == 1 else { return false }
+        let normalizedCommand = command
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard normalizedCommand.range(of: #"(^|[;&|]\s*)(?:busybox\s+)?(?:fping|ping)\b"#, options: .regularExpression) != nil else {
+            return false
+        }
+        return output.range(of: #"(?m)^\s*\d+\s+bytes\s+from\s+"#, options: .regularExpression) != nil
+            || output.range(of: #"(?m)\bxmt/rcv/%loss\s*=\s*\d+/[1-9]\d*/"#, options: .regularExpression) != nil
+            || output.range(of: #"(?m)^\s*\S+\s+:\s+\[\d+\],\s+\d+\s+bytes,"#, options: .regularExpression) != nil
     }
 
     static func metadataString(for results: [LocalAlpineAgentCommandResult]) -> String? {
@@ -1317,7 +1337,7 @@ actor LocalAlpineAgentService {
                     context,
                     exitCode: result.exitCode,
                     outputPreview: result.output,
-                    failed: result.exitCode != 0 || result.interactiveRequest != nil
+                    failed: Self.shellToolCallFailed(command: commandToExecute, result: result)
                 ))
                 if let diagnostic = await pythonSyntaxDiagnostic(
                     command: commandToExecute,
@@ -1561,6 +1581,18 @@ actor LocalAlpineAgentService {
         return LocalAlpineAgentCommandResult.compact(
             command: normalizedCommand,
             cwd: cwd,
+            exitCode: result.exitCode,
+            output: result.output
+        )
+    }
+
+    private nonisolated static func shellToolCallFailed(
+        command: String,
+        result: LocalAlpineCommandResult
+    ) -> Bool {
+        if result.interactiveRequest != nil { return true }
+        return !LocalAlpineAgentCommandResult.treatsAsSuccessful(
+            command: command,
             exitCode: result.exitCode,
             output: result.output
         )
@@ -7186,10 +7218,10 @@ actor LocalAlpineAgentService {
         "apk", "ash", "awk", "bash", "bunzip2", "busybox", "bzcat", "bzip2", "cat", "cd",
         "chmod", "chown", "cmake", "cp", "curl", "date", "df", "dirname", "du", "echo",
         "cargo", "deno", "env", "find", "free", "g++", "gcc", "git", "go", "grep",
-        "gunzip", "gzip", "head", "id", "install", "java", "javac", "ln", "ls", "lua",
+        "gunzip", "gzip", "head", "id", "install", "ip", "java", "javac", "ln", "ls", "lua",
         "make", "mkdir", "mv", "nc", "node", "npm", "npx", "patch", "perl", "php",
-        "pip", "pip3", "printf", "pwd", "python", "python3", "rm", "rmdir", "ruby",
-        "rustc", "sed", "sh", "sleep", "sort", "tail", "tar", "tee", "test", "top",
+        "ping", "fping", "pip", "pip3", "printf", "pwd", "python", "python3", "rm", "rmdir", "ruby",
+        "rustc", "sed", "sh", "sleep", "sort", "ss", "tail", "tar", "tee", "test", "top",
         "touch", "tr", "uname", "uniq", "unzip", "vi", "vim", "wget", "which", "whoami",
         "xargs", "xz", "zip"
     ]

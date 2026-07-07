@@ -291,6 +291,7 @@ jobs:
             sbin/apk
             etc/alpine-release
             etc/apk/repositories
+            usr/sbin/fping
             usr/bin/wget
           )
           for required_path in "${required_exact_paths[@]}"; do
@@ -336,6 +337,7 @@ jobs:
             sbin/apk
             etc/alpine-release
             etc/apk/repositories
+            usr/sbin/fping
             usr/bin/wget
           )
           for tool_path in "${required_exact_tool_paths[@]}"; do

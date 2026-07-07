@@ -2,7 +2,7 @@ param(
     [string]$OutputPath = "Iexa UI\Resources\iexa-alpine-rootfs.tar.gz",
     [string]$RootFSUrl = "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86/alpine-minirootfs-3.19.9-x86.tar.gz",
     [string]$ExpectedSHA256 = "8b85e1c9c743704eda40f69cd82c80ac3805732eb0906f35c870b44d91e1818d",
-    [string[]]$PreinstallPackages = @()
+    [string[]]$PreinstallPackages = @("fping")
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,21 +38,27 @@ if ($PreinstallPackages.Count -gt 0) {
 import sys
 import tarfile
 
-required = {
-    "usr/bin/as",
-    "usr/bin/gcc",
-    "usr/bin/g++",
-    "usr/bin/ld",
-    "usr/bin/make",
-    "usr/bin/pip3",
-    "usr/bin/python3",
-    "usr/include/stdio.h",
-    "usr/lib/libstdc++.so.6",
-    "usr/lib/crt1.o",
-}
-required_prefixes = (
-    "usr/include/c++/",
-)
+packages = set(sys.argv[2:])
+required = set()
+required_prefixes = []
+if "fping" in packages:
+    required.add("usr/sbin/fping")
+if {"build-base", "gcc", "g++"} & packages:
+    required.update({
+        "usr/bin/as",
+        "usr/bin/gcc",
+        "usr/bin/g++",
+        "usr/bin/ld",
+        "usr/bin/make",
+        "usr/include/stdio.h",
+        "usr/lib/libstdc++.so.6",
+        "usr/lib/crt1.o",
+    })
+    required_prefixes.append("usr/include/c++/")
+if {"python3", "py3-pip"} & packages:
+    required.add("usr/bin/python3")
+if "py3-pip" in packages:
+    required.add("usr/bin/pip3")
 with tarfile.open(sys.argv[1], "r:*") as archive:
     names = set(archive.getnames())
 missing = sorted(required - names)
@@ -60,7 +66,7 @@ missing.extend(prefix + "*" for prefix in required_prefixes if not any(name.star
 if missing:
     raise SystemExit("Preinstalled rootfs is missing " + ", ".join(missing))
 '@
-    $verifyScript | python - $resolvedOutput
+    $verifyScript | python - $resolvedOutput @PreinstallPackages
     if ($LASTEXITCODE -ne 0) {
         throw "Preinstalled rootfs verification failed with exit code $LASTEXITCODE"
     }

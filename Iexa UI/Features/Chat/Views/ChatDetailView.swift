@@ -1808,6 +1808,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             title = "安装依赖"
         } else if normalized.range(of: #"(^|[;&|]\s*)(?:curl|wget)\s+"#, options: .regularExpression) != nil {
             title = "网络请求"
+        } else if normalized.range(of: #"(^|[;&|]\s*)(?:ping|fping)\b"#, options: .regularExpression) != nil {
+            title = "网络延迟"
         } else if normalized.range(of: #"(^|[;&|]\s*)(?:python3?|node|deno|bun|ruby|php|lua|go\s+run|cargo\s+run|swift\s+run)\b"#, options: .regularExpression) != nil {
             title = "运行脚本"
         } else {
