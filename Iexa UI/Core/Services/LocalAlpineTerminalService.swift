@@ -621,9 +621,29 @@ actor LocalAlpineTerminalService {
     private let logger = Logger(subsystem: "com.openui", category: "LocalAlpine")
     private let fileManager = FileManager.default
     private let rootArchiveName = "iexa-alpine-rootfs.fakefs"
-    private let bundledRootFSVersion = "3.21.7-lite.1"
+    private let bundledRootFSVersion = "3.19.9-lite.1"
     private let rootVersionFileName = ".iexa-rootfs-version"
     private let rootResetMarkerFileName = ".iexa-rootfs-reset-pending"
+    private let requiredRootFSFakeFSPaths = [
+        "/bin/busybox",
+        "/bin/sh",
+        "/sbin/apk",
+        "/etc/alpine-release",
+        "/etc/os-release",
+        "/etc/apk/repositories",
+        "/lib/apk/db/installed",
+        "/dev"
+    ]
+    private let requiredRootFSDataPaths = [
+        "bin/busybox",
+        "bin/sh",
+        "sbin/apk",
+        "etc/alpine-release",
+        "etc/os-release",
+        "etc/apk/repositories",
+        "lib/apk/db/installed",
+        "dev"
+    ]
     private let workspaceFolderName = "Iexa Alpine"
     private let sharedFolderName = "shared"
     private let maximumInlineRuntimeCommandBytes = 3_072
@@ -729,8 +749,7 @@ actor LocalAlpineTerminalService {
     func rootFSManagementStatus() throws -> LocalAlpineRootFSManagementStatus {
         let workspaceURL = try ensureWorkspaceDirectory()
         let runtimeRootFSURL = workspaceURL.appendingPathComponent("rootfs.fakefs", isDirectory: true)
-        let rootFSInstalled = fileManager.fileExists(atPath: runtimeRootFSURL.appendingPathComponent("data", isDirectory: true).path)
-            && fileManager.fileExists(atPath: runtimeRootFSURL.appendingPathComponent("meta.db").path)
+        let rootFSInstalled = isRuntimeRootFSUsable(at: runtimeRootFSURL)
         let settings = LocalAlpineMirrorStore.load()
         let apkMirror = LocalAlpineMirrorStore.selectedAPKMirror(settings: settings)
         let pipMirror = LocalAlpineMirrorStore.selectedPipMirror(settings: settings)
@@ -1376,7 +1395,7 @@ actor LocalAlpineTerminalService {
             materializedCommand: materialized.command,
             runtimeCWD: runtimeCWD,
             sessionKey: normalizedSessionKey,
-            timeoutSeconds: timeoutSeconds
+            timeoutSeconds: effectivePersistentAgentTimeout(for: command, defaultTimeout: timeoutSeconds)
         )
         if let cleanupPath = materialized.cleanupPath {
             try? await deleteItem(path: cleanupPath)
@@ -1396,6 +1415,15 @@ actor LocalAlpineTerminalService {
 
     private func releasePersistentAgentSlot(_ sessionKey: String) {
         persistentAgentBusyKeys.remove(sessionKey)
+    }
+
+    private func effectivePersistentAgentTimeout(for command: String, defaultTimeout: TimeInterval) -> TimeInterval {
+        let lowered = command.lowercased()
+        if lowered.range(of: #"(^|[;&|()\s])(?:busybox\s+)?ping(\s|$)"#, options: .regularExpression) != nil
+            || lowered.contains("/ping ") {
+            return min(defaultTimeout, 20)
+        }
+        return defaultTimeout
     }
 
     private func persistentAgentSessionID(sessionKey: String, runtimeCWD: String) async -> (sessionID: Int?, message: String?) {
@@ -1712,22 +1740,23 @@ actor LocalAlpineTerminalService {
         let versionURL = workspaceURL.appendingPathComponent(rootVersionFileName)
         let resetMarkerURL = workspaceURL.appendingPathComponent(rootResetMarkerFileName)
         let hasPendingReset = fileManager.fileExists(atPath: resetMarkerURL.path)
-        if fileManager.fileExists(atPath: dataURL.path),
-           fileManager.fileExists(atPath: metadataURL.path),
+        let hasExistingRootFS = fileManager.fileExists(atPath: dataURL.path)
+            && fileManager.fileExists(atPath: metadataURL.path)
+        let existingRootFSIsUsable = hasExistingRootFS && isRuntimeRootFSUsable(at: writableURL)
+
+        if existingRootFSIsUsable,
            storedRootFSVersion(at: versionURL) == bundledRootFSVersion,
            !hasPendingReset {
             return writableURL.standardizedFileURL
         }
 
         if hasPendingReset, nativeRuntimeStarted,
-           fileManager.fileExists(atPath: dataURL.path),
-           fileManager.fileExists(atPath: metadataURL.path) {
+           hasExistingRootFS {
             return writableURL.standardizedFileURL
         }
 
         if nativeRuntimeStarted,
-           fileManager.fileExists(atPath: dataURL.path),
-           fileManager.fileExists(atPath: metadataURL.path) {
+           hasExistingRootFS {
             try? "rootfs upgrade pending\n".write(to: resetMarkerURL, atomically: true, encoding: .utf8)
             return writableURL.standardizedFileURL
         }
@@ -1735,6 +1764,10 @@ actor LocalAlpineTerminalService {
         let temporaryURL = workspaceURL.appendingPathComponent("rootfs.fakefs.tmp-\(UUID().uuidString)", isDirectory: true)
         try? fileManager.removeItem(at: temporaryURL)
         try fileManager.copyItem(at: bundledURL, to: temporaryURL)
+        guard isRuntimeRootFSUsable(at: temporaryURL) else {
+            try? fileManager.removeItem(at: temporaryURL)
+            throw LocalAlpineError.commandFailed("Local Alpine bundled fakefs is incomplete; please rebuild the IPA with a valid iexa-alpine-rootfs.fakefs resource.")
+        }
         if fileManager.fileExists(atPath: writableURL.path) {
             try fileManager.removeItem(at: writableURL)
         }
@@ -1742,6 +1775,24 @@ actor LocalAlpineTerminalService {
         try? bundledRootFSVersion.write(to: versionURL, atomically: true, encoding: .utf8)
         try? fileManager.removeItem(at: resetMarkerURL)
         return writableURL.standardizedFileURL
+    }
+
+    private func isRuntimeRootFSUsable(at url: URL) -> Bool {
+        guard url.pathExtension == "fakefs" else { return true }
+        let dataURL = url.appendingPathComponent("data", isDirectory: true)
+        guard fileManager.fileExists(atPath: dataURL.path),
+              fileManager.fileExists(atPath: url.appendingPathComponent("meta.db").path) else {
+            return false
+        }
+        for path in requiredRootFSDataPaths {
+            guard fileManager.fileExists(atPath: dataURL.appendingPathComponent(path).path) else {
+                return false
+            }
+        }
+        return LocalAlpineNativeRuntime.shared.fakeFSContainsPaths(
+            at: url,
+            requiredPaths: requiredRootFSFakeFSPaths
+        )
     }
 
     private func resetRuntimeRootFSFiles(in workspaceURL: URL) throws {
@@ -1857,8 +1908,14 @@ actor LocalAlpineTerminalService {
 
         let npmConfig = """
         registry=\(npmMirror.url)
+        audit=false
+        fund=false
+        progress=false
+        update-notifier=false
         fetch-timeout=15000
-        fetch-retries=2
+        fetch-retries=1
+        jobs=1
+        maxsockets=2
 
         """
         try npmConfig.write(
@@ -1886,7 +1943,7 @@ actor LocalAlpineTerminalService {
               match.numberOfRanges >= 3,
               let majorRange = Range(match.range(at: 1), in: version),
               let minorRange = Range(match.range(at: 2), in: version) else {
-            return "v3.21"
+            return "v3.19"
         }
         return "v\(version[majorRange]).\(version[minorRange])"
     }
@@ -2224,11 +2281,14 @@ actor LocalAlpineTerminalService {
 
         let lsofShim = """
         #!/bin/sh
-        printf 'lsof is disabled in Iexa Local Alpine because it is unreliable in the embedded iSH runtime.\\n' >&2
+        printf '%s is disabled in Iexa Local Alpine because it is unreliable in the embedded iSH runtime.\\n' "$(basename "$0")" >&2
         printf 'For localhost preview checks, use `nc -z 127.0.0.1 <port>` or inspect /proc/net/tcp.\\n' >&2
         exit 127
         """
         try writeExecutableText(lsofShim, to: binURL.appendingPathComponent("lsof"))
+        try writeExecutableText(lsofShim, to: binURL.appendingPathComponent("netstat"))
+
+        try writeExecutableText(localPingShimScript, to: binURL.appendingPathComponent("ping"))
 
         let profileURL = dataURL.appendingPathComponent("etc/profile.d", isDirectory: true)
         try fileManager.createDirectory(at: profileURL, withIntermediateDirectories: true)
@@ -2244,6 +2304,80 @@ actor LocalAlpineTerminalService {
     private func writeExecutableText(_ text: String, to url: URL) throws {
         try text.write(to: url, atomically: true, encoding: .utf8)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
+    private var localPingShimScript: String {
+        """
+        #!/bin/sh
+        busybox_ping=
+        for candidate in /bin/busybox /usr/bin/busybox /sbin/busybox /usr/sbin/busybox; do
+          if [ -x "$candidate" ]; then
+            busybox_ping="$candidate"
+            break
+          fi
+        done
+
+        real_ping=
+        if [ -z "$busybox_ping" ]; then
+          for candidate in /bin/ping /usr/bin/ping /sbin/ping /usr/sbin/ping; do
+            if [ -x "$candidate" ]; then
+              real_ping="$candidate"
+              break
+            fi
+          done
+        fi
+
+        if [ -z "$busybox_ping" ] && [ -z "$real_ping" ]; then
+          printf '/bin/sh: ping: not found\\n' >&2
+          exit 127
+        fi
+
+        has_limit=0
+        for arg in "$@"; do
+          case "$arg" in
+            -c|-c*|-w|-w*|-W|-W*|--help|-h)
+              has_limit=1
+              ;;
+          esac
+        done
+
+        run_ping() {
+          if [ -n "$busybox_ping" ]; then
+            "$busybox_ping" ping "$@"
+          else
+            "$real_ping" "$@"
+          fi
+        }
+
+        if command -v timeout >/dev/null 2>&1; then
+          if [ "$has_limit" -eq 1 ]; then
+            if [ -n "$busybox_ping" ]; then
+              timeout 12 "$busybox_ping" ping "$@"
+            else
+              timeout 12 "$real_ping" "$@"
+            fi
+          else
+            if [ -n "$busybox_ping" ]; then
+              timeout 12 "$busybox_ping" ping -c 4 -W 2 "$@"
+            else
+              timeout 12 "$real_ping" -c 4 -W 2 "$@"
+            fi
+          fi
+          status=$?
+          case "$status" in
+            124|137|143)
+              printf '\\nIEXA_PING_TIMEOUT: ping exceeded 12 seconds. ICMP can be unreliable in the embedded iSH runtime; use HTTP/TCP checks for latency.\\n' >&2
+              ;;
+          esac
+          exit "$status"
+        fi
+
+        if [ "$has_limit" -eq 1 ]; then
+          run_ping "$@"
+        else
+          run_ping -c 4 -W 2 "$@"
+        fi
+        """
     }
 
     private func resolve(path rawPath: String, root: URL, allowRoot: Bool) throws -> URL {
@@ -2977,9 +3111,9 @@ actor LocalAlpineTerminalService {
         export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-06-19.2
+          _iexa_bootstrap_version=2026-07-07.2
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
-          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
+          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
             export BROWSER=iexa-open
             hash -r 2>/dev/null || true
@@ -3242,11 +3376,15 @@ actor LocalAlpineTerminalService {
         IEXA_SERVE_FALLBACK
           cat > "$_iexa_bootstrap_bin/lsof" <<'IEXA_LSOF_FALLBACK'
         #!/bin/sh
-        printf 'lsof is disabled in Iexa Local Alpine because it is unreliable in the embedded iSH runtime.\\n' >&2
+        printf '%s is disabled in Iexa Local Alpine because it is unreliable in the embedded iSH runtime.\\n' "$(basename "$0")" >&2
         printf 'For localhost preview checks, use `nc -z 127.0.0.1 <port>` or inspect /proc/net/tcp.\\n' >&2
         exit 127
         IEXA_LSOF_FALLBACK
-          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" 2>/dev/null || true
+          cat > "$_iexa_bootstrap_bin/ping" <<'IEXA_PING_FALLBACK'
+        \(localPingShimScript)
+        IEXA_PING_FALLBACK
+          cp "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" 2>/dev/null || true
+          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" 2>/dev/null || true
           printf '%s\\n' "$_iexa_bootstrap_version" > "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null || true
           export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
           export BROWSER=iexa-open
@@ -3303,6 +3441,42 @@ actor LocalAlpineTerminalService {
             printf '/bin/sh: pip: not found\n' >&2
             return 127
           fi
+        }
+        npm() {
+          _iexa_npm="$(iexa_find_executable npm 2>/dev/null || true)"
+          if [ -z "$_iexa_npm" ]; then
+            printf '/bin/sh: npm: not found\n' >&2
+            return 127
+          fi
+          export npm_config_audit=false
+          export npm_config_fund=false
+          export npm_config_progress=false
+          export npm_config_update_notifier=false
+          export npm_config_fetch_timeout=15000
+          export npm_config_fetch_retries=1
+          export npm_config_jobs=1
+          export npm_config_maxsockets=2
+          case "${1:-}" in
+            install|i|ci|update)
+              if command -v timeout >/dev/null 2>&1; then
+                timeout 240 "$_iexa_npm" --no-audit --no-fund --no-progress "$@"
+                status=$?
+              else
+                "$_iexa_npm" --no-audit --no-fund --no-progress "$@"
+                status=$?
+              fi
+              case "$status" in
+                124|137|143)
+                  printf '\\nIEXA_NPM_TIMEOUT: npm command exceeded 240 seconds.\\n' >&2
+                  printf 'Try a smaller dependency, switch the npm registry mirror, or use apk packages when available.\\n' >&2
+                  ;;
+              esac
+              return "$status"
+              ;;
+            *)
+              "$_iexa_npm" "$@"
+              ;;
+          esac
         }
         iexa_refresh_dns() {
           cat > /etc/resolv.conf <<'EOF'

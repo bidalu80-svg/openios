@@ -118,6 +118,12 @@ static bool contains_case_insensitive(const char *value, const char *needle) {
 // This is only a timeout policy. It is not a command allowlist: commands are
 // still passed through to /bin/sh -c below.
 static int timeout_seconds_for_command(const char *command) {
+    if (contains_case_insensitive(command, " ping ") ||
+        contains_case_insensitive(command, "\nping ") ||
+        contains_case_insensitive(command, "/ping ") ||
+        contains_case_insensitive(command, " busybox ping ")) {
+        return 20;
+    }
     if (contains_case_insensitive(command, "apk add") ||
         contains_case_insensitive(command, "apk upgrade") ||
         contains_case_insensitive(command, "apk fix")) {
@@ -399,6 +405,124 @@ static bool resolve_root_data_path(const char *root_archive_path, char *root_dat
     return false;
 }
 
+static bool fakefs_has_exact_path(sqlite3 *db, const char *path) {
+    if (db == NULL || path == NULL) {
+        return false;
+    }
+
+    const char *sql = "select count(*) from paths where cast(path as text) = ?1;";
+    sqlite3_stmt *statement = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &statement, NULL) != SQLITE_OK) {
+        return false;
+    }
+
+    sqlite3_bind_text(statement, 1, path, -1, SQLITE_TRANSIENT);
+    bool found = false;
+    if (sqlite3_step(statement) == SQLITE_ROW) {
+        found = sqlite3_column_int(statement, 0) > 0;
+    }
+    sqlite3_finalize(statement);
+    return found;
+}
+
+static bool fakefs_has_path(sqlite3 *db, const char *path) {
+    if (db == NULL || path == NULL || path[0] == '\0') {
+        return false;
+    }
+
+    if (fakefs_has_exact_path(db, path)) {
+        return true;
+    }
+
+    while (path[0] == '/') {
+        path++;
+    }
+    if (path[0] == '\0') {
+        return false;
+    }
+
+    bool found = fakefs_has_exact_path(db, path);
+    if (found) {
+        return true;
+    }
+
+    size_t path_length = strlen(path);
+    if (path_length == 0 || path_length >= 4094) {
+        return false;
+    }
+
+    char alternate[4096];
+    if (path[path_length - 1] == '/') {
+        memcpy(alternate, path, path_length);
+        alternate[path_length - 1] = '\0';
+    } else {
+        memcpy(alternate, path, path_length);
+        alternate[path_length] = '/';
+        alternate[path_length + 1] = '\0';
+    }
+
+    if (fakefs_has_exact_path(db, alternate)) {
+        return true;
+    }
+
+    if (alternate[0] != '/') {
+        char absolute[4096];
+        int written = snprintf(absolute, sizeof(absolute), "/%s", alternate);
+        if (written > 0 && (size_t) written < sizeof(absolute)) {
+            return fakefs_has_exact_path(db, absolute);
+        }
+    }
+    return false;
+}
+
+int32_t iexa_local_alpine_fakefs_contains_paths(const char *fakefs_path, const char *required_paths) {
+    if (fakefs_path == NULL || fakefs_path[0] == '\0') {
+        return 0;
+    }
+
+    char metadata_path[4096];
+    int written = snprintf(metadata_path, sizeof(metadata_path), "%s/meta.db", fakefs_path);
+    if (written <= 0 || (size_t) written >= sizeof(metadata_path)) {
+        return 0;
+    }
+
+    sqlite3 *db = NULL;
+    if (sqlite3_open_v2(metadata_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        if (db != NULL) {
+            sqlite3_close(db);
+        }
+        return 0;
+    }
+
+    bool ok = true;
+    if (required_paths != NULL && required_paths[0] != '\0') {
+        char *copy = strdup(required_paths);
+        if (copy == NULL) {
+            sqlite3_close(db);
+            return 0;
+        }
+
+        char *cursor = copy;
+        while (cursor != NULL && *cursor != '\0') {
+            char *line_end = strchr(cursor, '\n');
+            if (line_end != NULL) {
+                *line_end = '\0';
+            }
+
+            if (cursor[0] != '\0' && !fakefs_has_path(db, cursor)) {
+                ok = false;
+                break;
+            }
+
+            cursor = line_end != NULL ? line_end + 1 : NULL;
+        }
+        free(copy);
+    }
+
+    sqlite3_close(db);
+    return ok ? 1 : 0;
+}
+
 static void session_exit_hook(struct task *task, int code) {
     (void) code;
     capture_exit_hook(task, code);
@@ -423,6 +547,15 @@ static void write_file_in_fakefs(const char *path, const char *contents) {
     }
     fd->ops->write(fd, contents, strlen(contents));
     fd_close(fd);
+}
+
+static void ensure_runtime_base_directories(void) {
+    generic_mkdirat(AT_PWD, "/dev", 0755);
+    generic_mkdirat(AT_PWD, "/dev/pts", 0755);
+    generic_mkdirat(AT_PWD, "/proc", 0555);
+    generic_mkdirat(AT_PWD, "/tmp", 01777);
+    generic_mkdirat(AT_PWD, "/mnt", 0755);
+    generic_mkdirat(AT_PWD, "/mnt/iexa", 0755);
 }
 
 static int create_stdio_from_tty_device(int major, int minor) {
@@ -613,6 +746,7 @@ static int boot_runtime(
     }
     current->thread = pthread_self();
 
+    ensure_runtime_base_directories();
     create_some_device_nodes();
     do_mount(&procfs, "proc", "/proc", "", 0);
     do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
@@ -631,10 +765,6 @@ static int boot_runtime(
     char shared_path[4096];
     snprintf(shared_path, sizeof(shared_path), "%s/shared", workspace_path);
     ensure_directory(shared_path);
-    // Many shell snippets and tools assume /tmp exists.
-    generic_mkdirat(AT_PWD, "/tmp", 01777);
-    generic_mkdirat(AT_PWD, "/mnt", 0755);
-    generic_mkdirat(AT_PWD, "/mnt/iexa", 0755);
     do_mount(&realfs, shared_path, "/mnt/iexa", "", 0);
     generic_mkdirat(AT_PWD, "/mnt/iexa/mounts", 0755);
     apply_external_mounts(mounts_configuration);
@@ -1045,10 +1175,24 @@ char *iexa_local_alpine_execute(
         int wait_result = pthread_cond_timedwait(&capture_done, &capture_lock, &timeout);
         if (wait_result == ETIMEDOUT) {
             capture_exit_code = 124;
+            int timed_out_pgid = capture_pgid;
+            int timed_out_pid = capture_pid;
             char message[96];
             snprintf(message, sizeof(message), "Local Alpine command timed out after %d seconds\n", timeout_seconds);
             capture_append_locked(message, strlen(message));
             capture_finished = true;
+            pthread_mutex_unlock(&capture_lock);
+            if (timed_out_pgid > 0) {
+                send_group_signal((dword_t) timed_out_pgid, SIGKILL_, SIGINFO_NIL);
+            } else if (timed_out_pid > 0) {
+                lock(&pids_lock);
+                struct task *task = pid_get_task((dword_t) timed_out_pid);
+                if (task != NULL) {
+                    send_signal(task, SIGKILL_, SIGINFO_NIL);
+                }
+                unlock(&pids_lock);
+            }
+            pthread_mutex_lock(&capture_lock);
             break;
         }
     }
@@ -1075,6 +1219,12 @@ int32_t iexa_local_alpine_runtime_available(void) {
 }
 
 int32_t iexa_local_alpine_interrupt(void) {
+    return 0;
+}
+
+int32_t iexa_local_alpine_fakefs_contains_paths(const char *fakefs_path, const char *required_paths) {
+    (void) fakefs_path;
+    (void) required_paths;
     return 0;
 }
 

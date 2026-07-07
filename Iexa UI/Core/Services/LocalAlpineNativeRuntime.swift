@@ -6,6 +6,12 @@ private nonisolated func iexaLocalAlpineRuntimeAvailable() -> Int32
 @_silgen_name("iexa_local_alpine_interrupt")
 private nonisolated func iexaLocalAlpineInterrupt() -> Int32
 
+@_silgen_name("iexa_local_alpine_fakefs_contains_paths")
+private nonisolated func iexaLocalAlpineFakeFSContainsPaths(
+    _ fakeFSPath: UnsafePointer<CChar>,
+    _ requiredPaths: UnsafePointer<CChar>
+) -> Int32
+
 @_silgen_name("iexa_local_alpine_session_start")
 private nonisolated func iexaLocalAlpineSessionStart(
     _ cwd: UnsafePointer<CChar>,
@@ -86,6 +92,16 @@ nonisolated struct LocalAlpineNativeRuntime: Sendable {
     func interrupt() -> Bool {
         guard isLinked else { return false }
         return iexaLocalAlpineInterrupt() == 1
+    }
+
+    func fakeFSContainsPaths(at fakeFSURL: URL, requiredPaths: [String]) -> Bool {
+        guard isLinked else { return true }
+        let payload = requiredPaths.joined(separator: "\n")
+        return fakeFSURL.path.withCString { fakeFSCString in
+            payload.withCString { requiredPathsCString in
+                iexaLocalAlpineFakeFSContainsPaths(fakeFSCString, requiredPathsCString) == 1
+            }
+        }
     }
 
     func startSession(_ command: LocalAlpineNativeCommand) async -> Int? {

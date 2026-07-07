@@ -12,6 +12,11 @@ int32_t iexa_local_alpine_runtime_available(void);
 
 int32_t iexa_local_alpine_interrupt(void);
 
+int32_t iexa_local_alpine_fakefs_contains_paths(
+    const char *fakefs_path,
+    const char *required_paths
+);
+
 int32_t iexa_local_alpine_session_start(
     const char *cwd,
     const char *root_archive_path,

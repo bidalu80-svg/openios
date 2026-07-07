@@ -16,8 +16,9 @@ The source root archive lives at:
 Iexa UI/Resources/iexa-alpine-rootfs.tar.gz
 ```
 
-It is prepared from Alpine's latest stable x86 minirootfs. The bundled archive
-is currently Alpine 3.23.4, matching `alpine-minirootfs-3.23.4-x86.tar.gz`.
+It is prepared from Alpine's x86 minirootfs. The bundled archive is currently
+Alpine 3.19.9, matching `alpine-minirootfs-3.19.9-x86.tar.gz`. This version is
+kept conservative for better compatibility with the embedded iSH runtime.
 The refresh scripts verify the expected SHA256 before accepting the archive.
 
 Prepare or refresh it on Windows:

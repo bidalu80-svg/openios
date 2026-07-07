@@ -1,0 +1,36 @@
+diff --git a/kernel/signal.c b/kernel/signal.c
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -73,18 +73,25 @@ static void deliver_signal_unlocked(struct task *task, int sig, struct siginfo_
+         // must release the sighand lock while going insane, to avoid a deadlock
+         unlock(&task->sighand->lock);
+ retry:
+         lock(&task->waiting_cond_lock);
+-        if (task->waiting_cond != NULL) {
++        cond_t *waiting_cond = task->waiting_cond;
++        lock_t *waiting_lock = task->waiting_lock;
++        if (waiting_cond != NULL && waiting_lock != NULL) {
+             bool mine = false;
+-            if (trylock(task->waiting_lock) == EBUSY) {
+-                if (pthread_equal(task->waiting_lock->owner, pthread_self()))
++            if (trylock(waiting_lock) == EBUSY) {
++                if (pthread_equal(waiting_lock->owner, pthread_self()))
+                     mine = true;
+                 if (!mine) {
+                     unlock(&task->waiting_cond_lock);
+                     goto retry;
+                 }
+             }
+-            notify(task->waiting_cond);
++            notify(waiting_cond);
+             if (!mine)
+-                unlock(task->waiting_lock);
++                unlock(waiting_lock);
++        } else if (waiting_cond != NULL) {
++            // Some embedded runs can observe a partially cleared waiter while
++            // heavy process churn is delivering signals. Wake the condition if
++            // possible, but never dereference a NULL lock pointer.
++            notify(waiting_cond);
+         }
+         unlock(&task->waiting_cond_lock);
+         lock(&task->sighand->lock);

@@ -648,12 +648,14 @@ private struct LocalAlpineRootFSManagementView: View {
     @State private var status: LocalAlpineRootFSManagementStatus?
     @State private var isLoading = true
     @State private var isApplying = false
+    @State private var confirmResetRootFS = false
     @State private var feedback: String?
 
     var body: some View {
         List {
             statusSection
             mirrorSection
+            maintenanceSection
         }
         .navigationTitle("Rootfs 管理")
         .navigationBarTitleDisplayMode(.inline)
@@ -671,6 +673,14 @@ private struct LocalAlpineRootFSManagementView: View {
             }
         }
         .task { await loadStatus() }
+        .confirmationDialog("重置本地 Alpine rootfs？", isPresented: $confirmResetRootFS, titleVisibility: .visible) {
+            Button("重置 rootfs", role: .destructive) {
+                Task { await resetRootFS() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这会丢弃 apk 安装的软件和 rootfs 内的改动，但不会删除 /mnt/iexa 工作区文件。")
+        }
         .overlay(alignment: .bottom) {
             if let feedback {
                 Text(feedback)
@@ -789,6 +799,22 @@ private struct LocalAlpineRootFSManagementView: View {
         }
     }
 
+    private var maintenanceSection: some View {
+        Section(header: Text("维护")) {
+            Button(role: .destructive) {
+                confirmResetRootFS = true
+            } label: {
+                Label {
+                    Text("重置 rootfs")
+                        .scaledFont(size: 15, weight: .semibold)
+                } icon: {
+                    Image(systemName: "arrow.counterclockwise.circle.fill")
+                }
+            }
+            .disabled(isApplying)
+        }
+    }
+
     private func statusRow(title: String, value: String, icon: String, color: Color) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
@@ -834,6 +860,20 @@ private struct LocalAlpineRootFSManagementView: View {
             status = try await LocalAlpineTerminalService.shared.rootFSManagementStatus()
         } catch {
             showFeedback("Rootfs 状态读取失败：\(error.localizedDescription)")
+        }
+    }
+
+    @MainActor
+    private func resetRootFS() async {
+        isApplying = true
+        defer { isApplying = false }
+        do {
+            let result = try await LocalAlpineTerminalService.shared.resetRuntimeRootFS()
+            Haptics.play(.medium)
+            showFeedback(result.message)
+            await loadStatus()
+        } catch {
+            showFeedback("Rootfs 重置失败：\(error.localizedDescription)")
         }
     }
 

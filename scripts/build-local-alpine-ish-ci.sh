@@ -6,6 +6,20 @@ products_dir="${2:-$PWD/.build/ish-products}"
 
 mkdir -p "$products_dir"
 
+patch_file="$PWD/scripts/ish-signal-waiting-lock.patch"
+if [ -f "$patch_file" ]; then
+  if git -C "$ish_dir" apply --check "$patch_file"; then
+    git -C "$ish_dir" apply "$patch_file"
+    echo "Applied iSH signal waiter crash guard"
+  elif grep -Fq "waiting_lock != NULL" "$ish_dir/kernel/signal.c"; then
+    echo "iSH signal waiter crash guard already present"
+  else
+    echo "Could not apply iSH signal waiter crash guard" >&2
+    git -C "$ish_dir" apply --check "$patch_file" || true
+    exit 1
+  fi
+fi
+
 xcodebuild \
   -project "$ish_dir/iSH.xcodeproj" \
   -target libish \
