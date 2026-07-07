@@ -1,7 +1,9 @@
 param(
     [string]$OutputPath = "Iexa UI\Resources\iexa-alpine-rootfs.tar.gz",
-    [string]$RootFSUrl = "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86/alpine-minirootfs-3.19.9-x86.tar.gz",
-    [string]$ExpectedSHA256 = "8b85e1c9c743704eda40f69cd82c80ac3805732eb0906f35c870b44d91e1818d",
+    [string]$RootFSUrl = "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz",
+    [string]$ExpectedSHA256 = "ead8a4b37867bd19e7417dd078748e2312c0aea364403d96758d63ea8ff261ea",
+    [string]$RepositoryBaseUrl = "https://dl-cdn.alpinelinux.org/alpine/v3.21",
+    [string]$Architecture = "aarch64",
     [string[]]$PreinstallPackages = @("fping")
 )
 
@@ -28,7 +30,7 @@ if ($ExpectedSHA256 -and $actualSHA256 -ne $ExpectedSHA256.ToLowerInvariant()) {
 
 if ($PreinstallPackages.Count -gt 0) {
     $scriptPath = Join-Path $PSScriptRoot "preinstall-alpine-packages.py"
-    & python $scriptPath $downloadPath $resolvedOutput --packages @PreinstallPackages
+    & python $scriptPath $downloadPath $resolvedOutput --base-url $RepositoryBaseUrl --arch $Architecture --packages @PreinstallPackages
     if ($LASTEXITCODE -ne 0) {
         throw "preinstall-alpine-packages.py failed with exit code $LASTEXITCODE"
     }

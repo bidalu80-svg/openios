@@ -6,8 +6,8 @@ import urllib.request
 from pathlib import PurePosixPath
 
 
-DEFAULT_BASE_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.19"
-DEFAULT_ARCH = "x86"
+DEFAULT_BASE_URL = "https://dl-cdn.alpinelinux.org/alpine/v3.21"
+DEFAULT_ARCH = "aarch64"
 DEFAULT_REPOS = ("main",)
 
 

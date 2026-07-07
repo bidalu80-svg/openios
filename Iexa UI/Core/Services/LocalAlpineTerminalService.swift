@@ -621,7 +621,7 @@ actor LocalAlpineTerminalService {
     private let logger = Logger(subsystem: "com.openui", category: "LocalAlpine")
     private let fileManager = FileManager.default
     private let rootArchiveName = "iexa-alpine-rootfs.fakefs"
-    private let bundledRootFSVersion = "3.19.9-lite.2"
+    private let bundledRootFSVersion = "3.21.3-aarch64.1"
     private let rootVersionFileName = ".iexa-rootfs-version"
     private let rootResetMarkerFileName = ".iexa-rootfs-reset-pending"
     private let requiredRootFSFakeFSPaths = [
@@ -662,15 +662,21 @@ actor LocalAlpineTerminalService {
 
     static let environmentDiagnosticCommand = """
     printf '== Local Alpine ==\\n'
-    printf 'runtime: iSH x86 usermode\\n'
-    printf 'rootfs:  '
+    printf 'device hardware: iOS arm64/aarch64 outside the sandbox\\n'
+    printf 'runtime:         iSH ARM64/aarch64 usermode emulator\\n'
+    printf 'apk arch:        '
+    apk --print-arch 2>/dev/null || printf 'unknown\\n'
+    printf 'uname machine:   '
+    uname -m 2>/dev/null || printf 'unknown\\n'
+    printf 'rootfs:          '
     cat /etc/alpine-release 2>/dev/null || printf 'unknown\\n'
-    printf 'kernel:  '
+    printf 'kernel:          '
     uname -a 2>/dev/null || true
-    printf 'user:    '
+    printf 'user:            '
     id 2>/dev/null || true
-    printf 'pwd:     '
+    printf 'pwd:             '
     pwd
+    printf '\\nNote: apk packages in this iSH ARM64 runtime are aarch64 Linux packages.\\n'
     printf '\\n== PATH ==\\n%s\\n' "$PATH"
     printf '\\n== DNS ==\\n'
     cat /etc/resolv.conf 2>/dev/null || true
@@ -1887,6 +1893,7 @@ actor LocalAlpineTerminalService {
         index-url = \(pipMirror.url)
         timeout = 15
         retries = 2
+        break-system-packages = true
 
         """
         let rootPipURL = dataURL
@@ -1945,7 +1952,7 @@ actor LocalAlpineTerminalService {
               match.numberOfRanges >= 3,
               let majorRange = Range(match.range(at: 1), in: version),
               let minorRange = Range(match.range(at: 2), in: version) else {
-            return "v3.19"
+            return "v3.21"
         }
         return "v\(version[majorRange]).\(version[minorRange])"
     }
@@ -2291,12 +2298,18 @@ actor LocalAlpineTerminalService {
         try writeExecutableText(lsofShim, to: binURL.appendingPathComponent("netstat"))
 
         try writeExecutableText(localPingShimScript, to: binURL.appendingPathComponent("ping"))
+        try writeExecutableText(localTopShimScript, to: binURL.appendingPathComponent("top"))
 
         let profileURL = dataURL.appendingPathComponent("etc/profile.d", isDirectory: true)
         try fileManager.createDirectory(at: profileURL, withIntermediateDirectories: true)
         let profile = """
         export BROWSER=/usr/local/bin/iexa-open
+        export LANG=${LANG:-C.UTF-8}
+        export LC_ALL=${LC_ALL:-C.UTF-8}
+        export NO_COLOR=${NO_COLOR:-1}
         export PAGER=${PAGER:-less}
+        export PYTHONDONTWRITEBYTECODE=${PYTHONDONTWRITEBYTECODE:-1}
+        export GOMAXPROCS=${GOMAXPROCS:-2}
         export UV_LINK_MODE=${UV_LINK_MODE:-symlink}
 
         """
@@ -2490,6 +2503,99 @@ actor LocalAlpineTerminalService {
           run_fping_if_available && exit 0
           supervised_ping -c 4 -W 2 "$@"
         fi
+        """
+    }
+
+    private var localTopShimScript: String {
+        """
+        #!/bin/sh
+        delay=2
+        iterations=-1
+        batch=0
+
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            -d)
+              delay=${2:-2}
+              shift 2
+              ;;
+            -n)
+              iterations=${2:-1}
+              shift 2
+              ;;
+            -b)
+              batch=1
+              shift
+              ;;
+            -h|--help)
+              printf 'Usage: top [-b] [-n COUNT] [-d SECONDS]\\n'
+              exit 0
+              ;;
+            *)
+              shift
+              ;;
+          esac
+        done
+
+        case "$delay" in ''|*[!0-9]*) delay=2 ;; esac
+        [ "$delay" -gt 0 ] 2>/dev/null || delay=2
+        iterations_check="$iterations"
+        case "$iterations_check" in -*) iterations_check="${iterations_check#-}" ;; esac
+        case "$iterations_check" in ''|*[!0-9]*) iterations=-1 ;; esac
+
+        render_once() {
+          uptime_text=$(awk '{printf "%s", int($1)}' /proc/uptime 2>/dev/null || printf '0')
+          visible=$(for d in /proc/[0-9]*; do [ -r "$d/stat" ] && printf '.\\n'; done 2>/dev/null | wc -l | tr -d ' ')
+          [ -n "$visible" ] || visible=0
+          printf 'top - up %ss, visible processes: %s\\n' "$uptime_text" "$visible"
+          if command -v ps >/dev/null 2>&1; then
+            ps 2>/dev/null | head -40
+          elif command -v busybox >/dev/null 2>&1; then
+            busybox ps 2>/dev/null | head -40
+          else
+            printf 'top: ps is not available in this sandbox\\n' >&2
+            return 1
+          fi
+        }
+
+        count=0
+        if [ "$batch" -eq 1 ]; then
+          [ "$iterations" -lt 0 ] && iterations=1
+          while [ "$count" -lt "$iterations" ]; do
+            render_once
+            count=$((count + 1))
+            [ "$count" -ge "$iterations" ] && break
+            sleep "$delay"
+          done
+          exit 0
+        fi
+
+        saved_stty=""
+        if [ -t 0 ]; then
+          saved_stty=$(stty -g 2>/dev/null || true)
+          stty -echo -icanon min 0 time 0 2>/dev/null || true
+        fi
+        cleanup_top() {
+          [ -n "$saved_stty" ] && stty "$saved_stty" 2>/dev/null || true
+          printf '\\033[?25h'
+        }
+        trap cleanup_top INT TERM EXIT
+        printf '\\033[?25l'
+
+        while [ "$iterations" -lt 0 ] || [ "$count" -lt "$iterations" ]; do
+          printf '\\033[H\\033[2J'
+          render_once
+          count=$((count + 1))
+          [ "$iterations" -ge 0 ] && [ "$count" -ge "$iterations" ] && break
+          end=$(( $(date +%s 2>/dev/null || printf '0') + delay ))
+          while [ "$(date +%s 2>/dev/null || printf '0')" -lt "$end" ]; do
+            if [ -t 0 ]; then
+              ch=$(dd bs=1 count=1 2>/dev/null || true)
+              case "$ch" in q|Q) exit 0 ;; esac
+            fi
+            sleep 0.1
+          done
+        done
         """
     }
 
@@ -3215,19 +3321,45 @@ actor LocalAlpineTerminalService {
         let script = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !script.isEmpty else { return command }
         return """
-        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
-        export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
+        iexa_apply_compat_env() {
+          export LANG="${LANG:-C.UTF-8}"
+          export LC_ALL="${LC_ALL:-C.UTF-8}"
+          export NO_COLOR="${NO_COLOR:-1}"
+          export PAGER="${PAGER:-less}"
+          export PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE:-1}"
+          export GOMAXPROCS="${GOMAXPROCS:-2}"
+          export UV_LINK_MODE="${UV_LINK_MODE:-symlink}"
+        }
+        iexa_apply_compat_env
+        iexa_refresh_toolchain_env() {
+          _iexa_toolchain_bin=""
+          for candidate in /usr/aarch64-alpine-linux-musl/bin /usr/i586-alpine-linux-musl/bin /usr/i686-alpine-linux-musl/bin /usr/x86_64-alpine-linux-musl/bin; do
+            if [ -d "$candidate" ]; then
+              _iexa_toolchain_bin="$candidate"
+              break
+            fi
+          done
+          _iexa_base_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          if [ -n "$_iexa_toolchain_bin" ]; then
+            _iexa_base_path="$_iexa_base_path:$_iexa_toolchain_bin"
+          fi
+          export PATH="$_iexa_base_path:${PATH:-}"
+          if [ -n "$_iexa_toolchain_bin" ]; then
+            export COMPILER_PATH="$_iexa_toolchain_bin:${COMPILER_PATH:-}"
+          fi
+        }
+        iexa_refresh_toolchain_env
         if [ -f /etc/profile ]; then
           . /etc/profile >/dev/null 2>&1 || true
         fi
-        export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
-        export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
+        iexa_apply_compat_env
+        iexa_refresh_toolchain_env
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-07-07.3
+          _iexa_bootstrap_version=2026-07-07.4
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
-          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
-            export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
+          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
+            export PATH="$_iexa_bootstrap_bin:${PATH:-}"
             export BROWSER=iexa-open
             hash -r 2>/dev/null || true
             return 0
@@ -3496,10 +3628,13 @@ actor LocalAlpineTerminalService {
           cat > "$_iexa_bootstrap_bin/ping" <<'IEXA_PING_FALLBACK'
         \(localPingShimScript)
         IEXA_PING_FALLBACK
+          cat > "$_iexa_bootstrap_bin/top" <<'IEXA_TOP_FALLBACK'
+        \(localTopShimScript)
+        IEXA_TOP_FALLBACK
           cp "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" 2>/dev/null || true
-          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" 2>/dev/null || true
+          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" "$_iexa_bootstrap_bin/top" 2>/dev/null || true
           printf '%s\\n' "$_iexa_bootstrap_version" > "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null || true
-          export PATH="$_iexa_bootstrap_bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
+          export PATH="$_iexa_bootstrap_bin:${PATH:-}"
           export BROWSER=iexa-open
           hash -r 2>/dev/null || true
         }
@@ -3601,7 +3736,7 @@ actor LocalAlpineTerminalService {
         }
         iexa_repair_toolchain_links() {
           arch_bin=""
-          for candidate in /usr/i586-alpine-linux-musl/bin /usr/i686-alpine-linux-musl/bin /usr/x86_64-alpine-linux-musl/bin; do
+          for candidate in /usr/aarch64-alpine-linux-musl/bin /usr/i586-alpine-linux-musl/bin /usr/i686-alpine-linux-musl/bin /usr/x86_64-alpine-linux-musl/bin; do
             if [ -d "$candidate" ]; then
               arch_bin="$candidate"
               break
@@ -3675,8 +3810,7 @@ actor LocalAlpineTerminalService {
           case "${1:-}" in
             add|fix|upgrade)
               hash -r 2>/dev/null || true
-              export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/i586-alpine-linux-musl/bin:${PATH:-}"
-              export COMPILER_PATH="/usr/i586-alpine-linux-musl/bin:${COMPILER_PATH:-}"
+              iexa_refresh_toolchain_env
               iexa_repair_toolchain_links
               ;;
           esac

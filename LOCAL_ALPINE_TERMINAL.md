@@ -16,9 +16,10 @@ The source root archive lives at:
 Iexa UI/Resources/iexa-alpine-rootfs.tar.gz
 ```
 
-It is prepared from Alpine's x86 minirootfs. The bundled archive is currently
-Alpine 3.19.9, matching `alpine-minirootfs-3.19.9-x86.tar.gz`. This version is
-kept conservative for better compatibility with the embedded iSH runtime.
+It is prepared from Alpine's aarch64 minirootfs. The bundled archive is currently
+Alpine 3.21.3, matching `alpine-minirootfs-3.21.3-aarch64.tar.gz`. This uses the
+OpenMinis iSH ARM64 runtime so `apk`, Python wheels, npm native modules, and
+modern toolchains target the same aarch64 Linux userspace as the guest runtime.
 The refresh scripts verify the expected SHA256 before accepting the archive.
 
 Prepare or refresh it on Windows:
@@ -88,11 +89,11 @@ Iexa UI/Features/Chat/Views/iPadMainChatView.swift
 ```
 
 `LocalAlpineNativeRuntimeBridge.c` exports the native ABI with a safe default
-stub. When compiled with `IEXA_LOCAL_ALPINE_ISH=1` and linked against the iSH
-low-level static libraries, it boots the iSH core and runs commands through a
-headless TTY capture path. The app's Documents workspace is mounted inside
-Alpine at `/mnt/iexa`, so terminal files stay local and visible to Iexa's file
-browser.
+stub. When compiled with `IEXA_LOCAL_ALPINE_ISH=1`, `GUEST_ARM64=1`, and linked
+against the OpenMinis iSH ARM64 low-level static libraries, it boots the iSH
+ARM64 core and runs commands through a headless TTY capture path. The app's
+Documents workspace is mounted inside Alpine at `/mnt/iexa`, so terminal files
+stay local and visible to Iexa's file browser.
 
 The native ABI also includes an interactive session surface:
 

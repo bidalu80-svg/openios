@@ -2,8 +2,10 @@
 set -euo pipefail
 
 output_path="${1:-Iexa UI/Resources/iexa-alpine-rootfs.tar.gz}"
-rootfs_url="${IEXA_ALPINE_ROOTFS_URL:-https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86/alpine-minirootfs-3.19.9-x86.tar.gz}"
-expected_sha256="${IEXA_ALPINE_ROOTFS_SHA256:-8b85e1c9c743704eda40f69cd82c80ac3805732eb0906f35c870b44d91e1818d}"
+rootfs_url="${IEXA_ALPINE_ROOTFS_URL:-https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz}"
+expected_sha256="${IEXA_ALPINE_ROOTFS_SHA256:-ead8a4b37867bd19e7417dd078748e2312c0aea364403d96758d63ea8ff261ea}"
+repository_base_url="${IEXA_ALPINE_REPOSITORY_BASE_URL:-https://dl-cdn.alpinelinux.org/alpine/v3.21}"
+alpine_arch="${IEXA_ALPINE_ARCH:-aarch64}"
 preinstall_packages="${IEXA_ALPINE_PREINSTALL_PACKAGES:-fping}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -37,6 +39,8 @@ if [ -n "$preinstall_packages" ]; then
   python3 "$script_dir/preinstall-alpine-packages.py" \
     "$download_path" \
     "$output_path" \
+    --base-url "$repository_base_url" \
+    --arch "$alpine_arch" \
     --packages $preinstall_packages
   rm -f "$download_path"
 

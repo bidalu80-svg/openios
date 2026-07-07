@@ -56,6 +56,7 @@ static bool append_env_entry(char *buffer, size_t buffer_size, size_t *offset, c
 #include "kernel/signal.h"
 #include "kernel/task.h"
 #include "misc.h"
+#include "fs/dev.h"
 #include "fs/path.h"
 #include "fs/devices.h"
 #include "fs/fd.h"
@@ -558,6 +559,26 @@ static void ensure_runtime_base_directories(void) {
     generic_mkdirat(AT_PWD, "/mnt/iexa", 0755);
 }
 
+static void create_runtime_device_nodes(void) {
+    generic_mknodat(AT_PWD, "/dev/tty1", S_IFCHR | 0666, dev_make(TTY_CONSOLE_MAJOR, 1));
+    generic_mknodat(AT_PWD, "/dev/tty2", S_IFCHR | 0666, dev_make(TTY_CONSOLE_MAJOR, 2));
+    generic_mknodat(AT_PWD, "/dev/tty3", S_IFCHR | 0666, dev_make(TTY_CONSOLE_MAJOR, 3));
+    generic_mknodat(AT_PWD, "/dev/tty4", S_IFCHR | 0666, dev_make(TTY_CONSOLE_MAJOR, 4));
+    generic_mknodat(AT_PWD, "/dev/tty5", S_IFCHR | 0666, dev_make(TTY_CONSOLE_MAJOR, 5));
+    generic_mknodat(AT_PWD, "/dev/tty6", S_IFCHR | 0666, dev_make(TTY_CONSOLE_MAJOR, 6));
+    generic_mknodat(AT_PWD, "/dev/tty7", S_IFCHR | 0666, dev_make(TTY_CONSOLE_MAJOR, 7));
+
+    generic_mknodat(AT_PWD, "/dev/tty", S_IFCHR | 0666, dev_make(TTY_ALTERNATE_MAJOR, DEV_TTY_MINOR));
+    generic_mknodat(AT_PWD, "/dev/console", S_IFCHR | 0666, dev_make(TTY_ALTERNATE_MAJOR, DEV_CONSOLE_MINOR));
+    generic_mknodat(AT_PWD, "/dev/ptmx", S_IFCHR | 0666, dev_make(TTY_ALTERNATE_MAJOR, DEV_PTMX_MINOR));
+
+    generic_mknodat(AT_PWD, "/dev/null", S_IFCHR | 0666, dev_make(MEM_MAJOR, DEV_NULL_MINOR));
+    generic_mknodat(AT_PWD, "/dev/zero", S_IFCHR | 0666, dev_make(MEM_MAJOR, DEV_ZERO_MINOR));
+    generic_mknodat(AT_PWD, "/dev/full", S_IFCHR | 0666, dev_make(MEM_MAJOR, DEV_FULL_MINOR));
+    generic_mknodat(AT_PWD, "/dev/random", S_IFCHR | 0666, dev_make(MEM_MAJOR, DEV_RANDOM_MINOR));
+    generic_mknodat(AT_PWD, "/dev/urandom", S_IFCHR | 0666, dev_make(MEM_MAJOR, DEV_URANDOM_MINOR));
+}
+
 static int create_stdio_from_tty_device(int major, int minor) {
     struct fd *fd = adhoc_fd_create(NULL);
     if (fd == NULL) {
@@ -747,7 +768,7 @@ static int boot_runtime(
     current->thread = pthread_self();
 
     ensure_runtime_base_directories();
-    create_some_device_nodes();
+    create_runtime_device_nodes();
     do_mount(&procfs, "proc", "/proc", "", 0);
     do_mount(&devptsfs, "devpts", "/dev/pts", "", 0);
     configure_dns();
@@ -901,7 +922,7 @@ int32_t iexa_local_alpine_session_start(
     const char *shell = "/bin/sh";
     char argv[64];
     snprintf(argv, sizeof(argv), "%s%c-i%c%c", shell, '\0', '\0', '\0');
-    char envp[1024];
+    char envp[2048];
     envp[0] = '\0';
     size_t envp_offset = 0;
     append_env_entry(envp, sizeof(envp), &envp_offset, "TERM=dumb");
@@ -909,6 +930,15 @@ int32_t iexa_local_alpine_session_start(
     append_env_entry(envp, sizeof(envp), &envp_offset, "HOME=/root");
     append_env_entry(envp, sizeof(envp), &envp_offset, "USER=root");
     append_env_entry(envp, sizeof(envp), &envp_offset, "PS1=");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "ENV=/etc/profile");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "BROWSER=/usr/local/bin/iexa-open");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "LANG=C.UTF-8");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "LC_ALL=C.UTF-8");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "NO_COLOR=1");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "PAGER=less");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "PYTHONDONTWRITEBYTECODE=1");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "GOMAXPROCS=2");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "UV_LINK_MODE=symlink");
     if (time_zone != NULL && time_zone[0] != '\0') {
         char tz_env[128];
         snprintf(tz_env, sizeof(tz_env), "TZ=%s", time_zone);
@@ -1133,13 +1163,22 @@ char *iexa_local_alpine_execute(
         return iexa_dup_output("Local Alpine inline command is too long; write it to a script file and execute the file instead.\n");
     }
     snprintf(argv, sizeof(argv), "%s%c-c%c%s%c%c", shell, '\0', '\0', safe_command, '\0', '\0');
-    char envp[1024];
+    char envp[2048];
     envp[0] = '\0';
     size_t envp_offset = 0;
     append_env_entry(envp, sizeof(envp), &envp_offset, "TERM=xterm-256color");
-    append_env_entry(envp, sizeof(envp), &envp_offset, "PATH=/bin:/sbin:/usr/bin:/usr/sbin");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
     append_env_entry(envp, sizeof(envp), &envp_offset, "HOME=/root");
     append_env_entry(envp, sizeof(envp), &envp_offset, "USER=root");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "ENV=/etc/profile");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "BROWSER=/usr/local/bin/iexa-open");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "LANG=C.UTF-8");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "LC_ALL=C.UTF-8");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "NO_COLOR=1");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "PAGER=less");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "PYTHONDONTWRITEBYTECODE=1");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "GOMAXPROCS=2");
+    append_env_entry(envp, sizeof(envp), &envp_offset, "UV_LINK_MODE=symlink");
     if (time_zone != NULL && time_zone[0] != '\0') {
         char tz_env[128];
         snprintf(tz_env, sizeof(tz_env), "TZ=%s", time_zone);

@@ -68,11 +68,13 @@ def patch_build_settings(block: str) -> str:
         '$(inherited)',
         'ISH_INTERNAL=1',
         'IEXA_LOCAL_ALPINE_ISH=1',
+        'GUEST_ARM64=1',
     ])
     block = ensure_array_values(block, 'OTHER_CFLAGS', [
         '$(inherited)',
         '-DISH_INTERNAL=1',
         '-DIEXA_LOCAL_ALPINE_ISH=1',
+        '-DGUEST_ARM64=1',
     ])
     block = ensure_array_values(block, 'HEADER_SEARCH_PATHS', [
         '$(inherited)',
@@ -85,11 +87,8 @@ def patch_build_settings(block: str) -> str:
     ])
     block = ensure_array_values(block, 'OTHER_LDFLAGS', [
         '$(inherited)',
-        '-Wl,-force_load',
         (ish_products / 'libish.a').as_posix(),
-        '-Wl,-force_load',
         (ish_products / 'libish_emu.a').as_posix(),
-        '-Wl,-force_load',
         (ish_products / 'libfakefs.a').as_posix(),
         '-lsqlite3',
         '-lbz2',
