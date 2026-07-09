@@ -1463,6 +1463,12 @@ final class LocalNativeToolService {
             if let calls = object["calls"] as? [[String: Any]] {
                 return calls.map(Self.normalizedNativeCall(_:))
             }
+            if let calls = object["tool_calls"] as? [[String: Any]] {
+                return calls.flatMap(Self.parseToolCallObject(_:))
+            }
+            if let calls = object["toolCalls"] as? [[String: Any]] {
+                return calls.flatMap(Self.parseToolCallObject(_:))
+            }
             if let single = object["iexa_native"] as? [String: Any] {
                 return [Self.normalizedNativeCall(single)]
             }
@@ -1490,6 +1496,17 @@ final class LocalNativeToolService {
         return []
     }
 
+    private static func parseToolCallObject(_ object: [String: Any]) -> [[String: Any]] {
+        if let function = object["function"] as? [String: Any] {
+            var merged = function
+            for (key, value) in object where key != "function" && merged[key] == nil {
+                merged[key] = value
+            }
+            return [Self.normalizedNativeCall(merged)]
+        }
+        return [Self.normalizedNativeCall(object)]
+    }
+
     private static func stripNativeToolBlocks(from content: String) -> String {
         var withoutNativeFence = content.replacingOccurrences(
             of: #"```iexa_native\s*[\s\S]*?```"#,
@@ -1508,6 +1525,10 @@ final class LocalNativeToolService {
             with: "",
             options: .regularExpression
         )
+        for item in looseNativeToolFenceRanges(in: withoutNativeFence).reversed() {
+            guard let swiftRange = Range(item.range, in: withoutNativeFence) else { continue }
+            withoutNativeFence.removeSubrange(swiftRange)
+        }
         for range in plainLineNativeToolRanges(in: withoutNativeFence).reversed() {
             guard let swiftRange = Range(range, in: withoutNativeFence) else { continue }
             withoutNativeFence.removeSubrange(swiftRange)
@@ -1525,28 +1546,9 @@ final class LocalNativeToolService {
         in content: String,
         excluding excludedRanges: [NSRange] = []
     ) -> [String] {
-        let ns = content as NSString
-        let fullRange = NSRange(location: 0, length: ns.length)
         var bodies: [String] = []
 
-        if let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#, options: [.caseInsensitive]) {
-            for match in regex.matches(in: content, range: fullRange) where match.numberOfRanges >= 3 {
-                guard !excludedRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else {
-                    continue
-                }
-                let info = ns.substring(with: match.range(at: 1))
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased()
-                guard info == "json" || info == "javascript" || info == "js" || info.isEmpty else {
-                    continue
-                }
-                let body = ns.substring(with: match.range(at: 2))
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if bodyLooksLikeNativeToolJSON(body) {
-                    bodies.append(body)
-                }
-            }
-        }
+        bodies.append(contentsOf: looseNativeToolFenceRanges(in: content, excluding: excludedRanges).map { $0.body })
 
         bodies.append(contentsOf: taggedNativeToolBodies(in: content))
 
@@ -1560,6 +1562,33 @@ final class LocalNativeToolService {
             guard !seen.contains(body) else { return false }
             seen.insert(body)
             return true
+        }
+    }
+
+    private static func looseNativeToolFenceRanges(
+        in content: String,
+        excluding excludedRanges: [NSRange] = []
+    ) -> [(range: NSRange, body: String)] {
+        let ns = content as NSString
+        let fullRange = NSRange(location: 0, length: ns.length)
+        guard let regex = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)```"#, options: [.caseInsensitive]) else {
+            return []
+        }
+        return regex.matches(in: content, range: fullRange).compactMap { match in
+            guard match.numberOfRanges >= 3 else { return nil }
+            guard !excludedRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else {
+                return nil
+            }
+            let info = ns.substring(with: match.range(at: 1))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard info == "json" || info == "javascript" || info == "js" || info.isEmpty else {
+                return nil
+            }
+            let body = ns.substring(with: match.range(at: 2))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard bodyLooksLikeNativeToolJSON(body) else { return nil }
+            return (match.range, body)
         }
     }
 
@@ -1723,6 +1752,12 @@ final class LocalNativeToolService {
         if let calls = dictionary["calls"] as? [Any], objectContainsSupportedNativeTool(calls) {
             return true
         }
+        if let calls = dictionary["tool_calls"] as? [Any], objectContainsSupportedNativeTool(calls) {
+            return true
+        }
+        if let calls = dictionary["toolCalls"] as? [Any], objectContainsSupportedNativeTool(calls) {
+            return true
+        }
         for key in ["iexa_native", "iexaNative", "tool_call", "toolCall", "function"] {
             if let value = dictionary[key], objectContainsSupportedNativeTool(value) {
                 return true
@@ -1733,13 +1768,22 @@ final class LocalNativeToolService {
 
     private static func normalizedNativeCall(_ call: [String: Any]) -> [String: Any] {
         var normalized = call
+        let wrapperName = firstString(in: normalized, keys: ["name", "tool", "functionName", "function_name", "toolName", "tool_name"])
+            .map(normalizedActionName(_:))
+        let isBrowserUseWrapper = wrapperName == "browser_use"
+
         if let arguments = firstDictionary(in: normalized, keys: ["arguments", "args", "parameters", "params", "input"]) {
             for (key, value) in arguments where normalized[key] == nil {
+                if isBrowserUseWrapper && key == "action" {
+                    normalized["browser_use_action"] = value
+                    continue
+                }
                 normalized[key] = value
             }
         }
-        let rawName = firstString(in: normalized, keys: ["action", "name", "tool", "functionName", "function_name", "toolName", "tool_name"])
-        if let rawName {
+        if isBrowserUseWrapper {
+            normalized["action"] = "browser_use"
+        } else if let rawName = firstString(in: normalized, keys: ["action", "name", "tool", "functionName", "function_name", "toolName", "tool_name"]) {
             normalized["action"] = normalizedActionName(rawName)
         }
         if normalized["action"] as? String == "browser_use",

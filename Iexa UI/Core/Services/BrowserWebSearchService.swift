@@ -3,6 +3,13 @@ import WebKit
 import UIKit
 import OSLog
 
+struct BrowserWebSearchTabSnapshot: Identifiable, Equatable {
+    let id: Int
+    let title: String
+    let url: String
+    let isActive: Bool
+}
+
 @MainActor
 final class BrowserWebSearchService: NSObject {
     static let shared = BrowserWebSearchService()
@@ -43,6 +50,37 @@ final class BrowserWebSearchService: NSObject {
             return false
         }
         return true
+    }
+
+    var currentTabSnapshots: [BrowserWebSearchTabSnapshot] {
+        browserTabSnapshots()
+    }
+
+    func createAutomationBrowserTab(initialURL: URL? = nil) {
+        guard browserTabs.count < 3 else { return }
+        let tabID = nextBrowserTabID
+        nextBrowserTabID += 1
+        let tab = makeBrowserWebView()
+        browserTabs[tabID] = tab
+        activeBrowserTabID = tabID
+        webView = tab
+        mountActiveBrowserIfPresented()
+        if let initialURL {
+            loadInitialAutomationURL(initialURL, in: tab)
+        }
+        notifyActiveBrowserDidChange()
+    }
+
+    func activateAutomationBrowserTab(_ tabID: Int) {
+        activateBrowserTab(tabID)
+    }
+
+    func closeAutomationBrowserTab(_ tabID: Int) {
+        guard browserTabs[tabID] != nil else { return }
+        Task { @MainActor in
+            _ = await executeNativeCloseTab(["tab_id": tabID])
+            notifyActiveBrowserDidChange()
+        }
     }
 
     func search(queries: [String], originalQuery: String?) async -> WebSearchResponse {
@@ -267,7 +305,7 @@ final class BrowserWebSearchService: NSObject {
         let extraQueries = Self.stringArray(in: call, keys: ["queries", "search_queries"])
         let limit = min(max(Self.intValue(call["limit"] ?? call["count"] ?? call["max_results"]) ?? 6, 1), 8)
         let includeScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"] ?? call["attach_preview"] ?? call["attachPreview"]) ?? false
-        let queries = Self.unique(([query] + extraQueries).map(Self.normalizedQuery))
+        let queries = Self.deviceDateAwareQueries(([query] + extraQueries).map(Self.normalizedQuery))
         let response = await search(queries: Array(queries.prefix(4)), originalQuery: query)
 
         var itemsPayload = response.items.prefix(limit).map(Self.itemPayload(from:))
@@ -350,9 +388,8 @@ final class BrowserWebSearchService: NSObject {
         let maxScrolls = min(max(Self.intValue(call["scroll_count"] ?? call["max_scrolls"] ?? call["maxScrolls"]) ?? 14, 1), 24)
         let snapshot = await evaluateFullPageSnapshot(maxScrolls: maxScrolls)
         let verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()) ?? ["detected": false]
-        let verificationDetected = Self.boolValue(verification["detected"]) == true
-        let verificationCompleted = Self.boolValue(verification["completed"]) == true
-        if verificationDetected && !verificationCompleted {
+        let verificationRequiresUser = Self.humanVerificationRequiresUser(verification)
+        if verificationRequiresUser {
             _ = await scrollToVisibleHumanVerification()
         }
         let thumbnail = includeScreenshot ? await capturePageThumbnail(prefix: "browser_viewport") : nil
@@ -371,9 +408,9 @@ final class BrowserWebSearchService: NSObject {
             "full_page": true,
             "max_scrolls": maxScrolls,
             "human_verification": verification,
-            "requires_user_verification": verificationDetected && !verificationCompleted,
+            "requires_user_verification": verificationRequiresUser,
             "reused_existing_page": reusedExistingPage,
-            "summary": verificationDetected && !verificationCompleted
+            "summary": verificationRequiresUser
                 ? "网页需要先完成人机验证；请在弹出的共享浏览器中完成后继续。"
                 : (reusedExistingPage
                     ? (text.isEmpty ? "已复用当前浏览器页面：\(title)" : "已复用当前浏览器页面并滚动读取全文：\(title)")
@@ -554,10 +591,8 @@ final class BrowserWebSearchService: NSObject {
         let originalMetrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) ?? [:]
         let originalY = Self.intValue(originalMetrics["scroll_y"]) ?? 0
         var verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()) ?? ["detected": false]
-        let verificationDetected = Self.boolValue(verification["detected"]) == true
-        let verificationCompleted = Self.boolValue(verification["completed"]) == true
         var verificationVisible = false
-        if verificationDetected && !verificationCompleted {
+        if Self.humanVerificationRequiresUser(verification) {
             verificationVisible = await scrollToVisibleHumanVerification()
             try? await Task.sleep(nanoseconds: 180_000_000)
             verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()) ?? verification
@@ -593,8 +628,7 @@ final class BrowserWebSearchService: NSObject {
         let viewportHeight = Self.intValue(metrics["viewport_height"] ?? viewportContext["viewport_height"]) ?? 0
         let nearBottom = scrollHeight > 0 && viewportHeight > 0 && scrollY + viewportHeight >= scrollHeight - 24
         let canScrollDown = scrollHeight > 0 && viewportHeight > 0 && !nearBottom
-        let requiresVerification = Self.boolValue(verification["detected"]) == true
-            && Self.boolValue(verification["completed"]) != true
+        let requiresVerification = Self.humanVerificationRequiresUser(verification)
 
         return [
             "action": "browser.inspect",
@@ -643,10 +677,9 @@ final class BrowserWebSearchService: NSObject {
         try? await Task.sleep(nanoseconds: 250_000_000)
 
         let verification = await evaluateJSONObject(Self.visibleChallengeProbeScript()) ?? ["detected": false]
-        let verificationDetected = Self.boolValue(verification["detected"]) == true
-        let verificationCompleted = Self.boolValue(verification["completed"]) == true
+        let verificationRequiresUser = Self.humanVerificationRequiresUser(verification)
         var verificationVisible = false
-        if verificationDetected && !verificationCompleted {
+        if verificationRequiresUser {
             verificationVisible = await scrollToVisibleHumanVerification()
             try? await Task.sleep(nanoseconds: 180_000_000)
         }
@@ -671,7 +704,7 @@ final class BrowserWebSearchService: NSObject {
         let nearBottom = scrollHeight > 0 && viewportHeight > 0 && scrollY + viewportHeight >= scrollHeight - 24
         let canScrollDown = scrollHeight > 0 && viewportHeight > 0 && !nearBottom
         let stateLabel: String
-        if verificationDetected && !verificationCompleted {
+        if verificationRequiresUser {
             stateLabel = "needs_user_verification"
         } else if visibleElements.contains(where: { (($0["tag"] as? String) ?? "").lowercased() == "input" || (($0["tag"] as? String) ?? "").lowercased() == "textarea" }) {
             stateLabel = "form_available"
@@ -698,12 +731,12 @@ final class BrowserWebSearchService: NSObject {
             "visible_element_count": visibleElements.count,
             "viewport_context": context,
             "human_verification": verification,
-            "requires_user_verification": verificationDetected && !verificationCompleted,
+            "requires_user_verification": verificationRequiresUser,
             "verification_scrolled_into_view": verificationVisible,
             "state_label": stateLabel,
             "attach_file": false,
             "preview_images": [],
-            "summary": verificationDetected && !verificationCompleted
+            "summary": verificationRequiresUser
                 ? "已观察当前网页：发现人机验证，并已尝试滚动定位验证区域；等待用户在同一浏览器页面完成。"
                 : (canScrollDown
                     ? "已观察当前网页视口；页面仍可继续向下滚动，继续任务前应按需滚动/扫描。"
@@ -792,22 +825,129 @@ final class BrowserWebSearchService: NSObject {
                 "error": "Missing required field: url"
             ]
         }
-        var request = URLRequest(url: url, timeoutInterval: 20)
+        let wv = webViewReady()
+        let targetLiteral = Self.javaScriptStringLiteral(url.absoluteString)
+        let pageFetchScript = """
+        (async () => {
+          try {
+            const resp = await fetch(\(targetLiteral), {
+              credentials: 'include',
+              cache: 'no-store',
+              referrer: location.href
+            });
+            const buf = await resp.arrayBuffer();
+            const bytes = new Uint8Array(buf);
+            let binary = '';
+            const chunk = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunk) {
+              binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+            }
+            return JSON.stringify({
+              ok: true,
+              base64: btoa(binary),
+              contentType: resp.headers.get('content-type') || '',
+              contentDisposition: resp.headers.get('content-disposition') || '',
+              status: resp.status,
+              statusText: resp.statusText || '',
+              url: resp.url || \(targetLiteral),
+              size: bytes.length,
+              pageUrl: location.href,
+              title: document.title || ''
+            });
+          } catch (error) {
+            return JSON.stringify({
+              ok: false,
+              error: String(error && error.message ? error.message : error),
+              pageUrl: location.href,
+              title: document.title || ''
+            });
+          }
+        })();
+        """
+        let evaluation = await evaluateJavaScriptString(pageFetchScript)
+        var pageFetchError = evaluation.error ?? ""
+        if let json = evaluation.string,
+           let data = json.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if (object["ok"] as? Bool) != true {
+                pageFetchError = object["error"] as? String ?? pageFetchError
+            }
+            if (object["ok"] as? Bool) == true,
+               let base64 = object["base64"] as? String,
+               let fetchedData = Data(base64Encoded: base64) {
+                let status = Self.intValue(object["status"]) ?? 0
+                let contentType = ((object["contentType"] as? String) ?? "application/octet-stream")
+                    .components(separatedBy: ";")
+                    .first ?? "application/octet-stream"
+                let finalURL = URL(string: object["url"] as? String ?? "") ?? url
+                let contentDisposition = object["contentDisposition"] as? String ?? ""
+                let fileName = Self.fetchFileName(
+                    for: finalURL,
+                    contentType: contentType,
+                    headers: contentDisposition.isEmpty ? [:] : ["Content-Disposition": contentDisposition]
+                )
+                do {
+                    let folder = try browserOutputDirectory()
+                    let fileURL = folder.appendingPathComponent(fileName)
+                    try fetchedData.write(to: fileURL, options: [.atomic])
+                    return [
+                        "action": "browser.fetch",
+                        "ok": (200..<300).contains(status),
+                        "url": finalURL.absoluteString,
+                        "requested_url": url.absoluteString,
+                        "page_url": object["pageUrl"] as? String ?? wv.url?.absoluteString ?? "",
+                        "status": status,
+                        "status_text": object["statusText"] as? String ?? "",
+                        "file_url": fileURL.absoluteString,
+                        "file_name": fileName,
+                        "content_type": contentType,
+                        "bytes": fetchedData.count,
+                        "via": "wkwebview_fetch",
+                        "summary": (200..<300).contains(status)
+                            ? "已通过当前浏览器会话下载网页资源：\(fileName)"
+                            : "网页返回 HTTP \(status)，已保存响应内容：\(fileName)"
+                    ]
+                } catch {
+                    return [
+                        "action": "browser.fetch",
+                        "ok": false,
+                        "url": finalURL.absoluteString,
+                        "status": status,
+                        "content_type": contentType,
+                        "bytes": fetchedData.count,
+                        "via": "wkwebview_fetch",
+                        "error": "Failed to save fetched resource: \(error.localizedDescription)"
+                    ]
+                }
+            }
+        }
+
+        var request = URLRequest(url: url, timeoutInterval: 24)
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.setValue(
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
-            forHTTPHeaderField: "User-Agent"
-        )
+        if let userAgent = Self.browserUserAgentOverride(profile: browserUserAgentProfile) {
+            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        } else {
+            request.setValue(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+                forHTTPHeaderField: "User-Agent"
+            )
+        }
         request.setValue("zh-CN,zh;q=0.9,en;q=0.8,*;q=0.6", forHTTPHeaderField: "Accept-Language")
+        if let referer = wv.url?.absoluteString {
+            request.setValue(referer, forHTTPHeaderField: "Referer")
+        }
+        if let cookies = await browserCookieHeader(for: url, webView: wv) {
+            request.setValue(cookies, forHTTPHeaderField: "Cookie")
+        }
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else {
+            guard let http = response as? HTTPURLResponse else {
                 return [
                     "action": "browser.fetch",
                     "ok": false,
                     "url": url.absoluteString,
-                    "error": "Fetch failed"
+                    "error": "Fetch failed: non-HTTP response",
+                    "page_fetch_error": pageFetchError
                 ]
             }
             let contentType = http.value(forHTTPHeaderField: "Content-Type")?.components(separatedBy: ";").first ?? "application/octet-stream"
@@ -817,19 +957,27 @@ final class BrowserWebSearchService: NSObject {
             try data.write(to: fileURL, options: [.atomic])
             return [
                 "action": "browser.fetch",
-                "ok": true,
+                "ok": (200..<300).contains(http.statusCode),
                 "url": url.absoluteString,
+                "page_url": wv.url?.absoluteString ?? "",
+                "status": http.statusCode,
                 "file_url": fileURL.absoluteString,
                 "file_name": fileName,
                 "content_type": contentType,
                 "bytes": data.count,
-                "summary": "已下载网页资源：\(fileName)"
+                "via": "urlsession_with_browser_session",
+                "page_fetch_error": pageFetchError,
+                "summary": (200..<300).contains(http.statusCode)
+                    ? "已使用浏览器会话下载网页资源：\(fileName)"
+                    : "网页返回 HTTP \(http.statusCode)，已保存响应内容：\(fileName)"
             ]
         } catch {
             return [
                 "action": "browser.fetch",
                 "ok": false,
                 "url": url.absoluteString,
+                "page_url": wv.url?.absoluteString ?? "",
+                "page_fetch_error": pageFetchError,
                 "error": error.localizedDescription
             ]
         }
@@ -848,6 +996,7 @@ final class BrowserWebSearchService: NSObject {
         try? await Task.sleep(nanoseconds: 250_000_000)
 
         let selector = Self.firstString(in: call, keys: ["selector", "css", "element"])
+        let nodeID = Self.firstString(in: call, keys: ["node_id", "nodeId", "accessibility_id", "accessibilityId"])
         let label = Self.firstString(in: call, keys: [
             "label", "button_text", "buttonText", "aria_label", "ariaLabel",
             "name", "title", "placeholder", "text"
@@ -857,24 +1006,28 @@ final class BrowserWebSearchService: NSObject {
         let visualFallback = Self.boolValue(
             call["visual_fallback"] ?? call["visualFallback"] ?? call["screenshot_fallback"] ?? call["screenshotFallback"]
         ) ?? true
-        guard selector != nil || label != nil || (x != nil && y != nil) else {
+        guard selector != nil || nodeID != nil || label != nil || (x != nil && y != nil) else {
             return [
                 "action": "browser.click",
                 "ok": false,
-                "error": "Missing selector, label, or coordinates"
+                "error": "Missing selector, node_id, label, or coordinates"
             ]
         }
 
         let script = """
         (() => {
           const selector = \(Self.javascriptString(selector ?? ""));
+          const nodeId = \(Self.javascriptString(nodeID ?? ""));
           const desiredLabel = \(Self.javascriptString(label ?? ""));
           const x = \(x.map(String.init) ?? "null");
           const y = \(y.map(String.init) ?? "null");
           const clickableSelector = [
-            'button', 'a[href]', 'input', 'textarea', 'select', 'summary',
-            '[role="button"]', '[role="link"]', '[onclick]', '[tabindex]',
-            '[aria-label]', '[data-testid]', '[data-test]', '[data-cy]'
+            'button', 'a[href]', 'input', 'textarea', 'select', 'summary', 'label', 'iframe',
+            '[role="button"]', '[role="link"]', '[role="menuitem"]', '[role="tab"]',
+            '[role="option"]', '[role="checkbox"]', '[role="radio"]', '[role="switch"]',
+            '[onclick]', '[tabindex]', '[contenteditable]', '[jsaction]',
+            '[aria-label]', '[aria-labelledby]', '[aria-describedby]',
+            '[title]', '[alt]', '[data-testid]', '[data-test]', '[data-cy]'
           ].join(',');
           function norm(value) {
             return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
@@ -884,15 +1037,42 @@ final class BrowserWebSearchService: NSObject {
           }
           function accessibleText(node) {
             if (!node) return '';
+            const labelledBy = attr(node, 'aria-labelledby')
+              .split(/\\s+/)
+              .filter(Boolean)
+              .map(id => document.getElementById(id))
+              .map(text)
+              .join(' ');
+            const describedBy = attr(node, 'aria-describedby')
+              .split(/\\s+/)
+              .filter(Boolean)
+              .map(id => document.getElementById(id))
+              .map(text)
+              .join(' ');
+            const id = attr(node, 'id');
+            let labels = '';
+            if (id && window.CSS && CSS.escape) {
+              try {
+                labels = Array.from(document.querySelectorAll(`label[for="${CSS.escape(id)}"]`)).map(text).join(' ');
+              } catch (_) {}
+            }
             const parts = [
               text(node),
+              labelledBy,
+              describedBy,
+              labels,
               node.getAttribute ? node.getAttribute('aria-label') : '',
+              node.getAttribute ? node.getAttribute('aria-description') : '',
               node.getAttribute ? node.getAttribute('title') : '',
               node.getAttribute ? node.getAttribute('alt') : '',
               node.getAttribute ? node.getAttribute('name') : '',
               node.getAttribute ? node.getAttribute('value') : '',
               node.getAttribute ? node.getAttribute('placeholder') : '',
               node.getAttribute ? node.getAttribute('data-testid') : '',
+              node.getAttribute ? node.getAttribute('data-test') : '',
+              node.getAttribute ? node.getAttribute('data-cy') : '',
+              node.getAttribute ? node.getAttribute('jsaction') : '',
+              node.getAttribute ? node.getAttribute('src') : '',
               node.value || '',
               node.placeholder || ''
             ];
@@ -995,7 +1175,7 @@ final class BrowserWebSearchService: NSObject {
           }
           function clickTarget(node) {
             if (!node) return null;
-            return node.closest && node.closest('button, a, input, textarea, select, summary, [contenteditable], [role="button"], [role="link"], [onclick], [tabindex]')
+            return node.closest && node.closest('button, a, input, textarea, select, summary, label, [contenteditable], [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [onclick], [tabindex], [jsaction]')
               || node;
           }
           function clickableCandidates() {
@@ -1057,6 +1237,7 @@ final class BrowserWebSearchService: NSObject {
             if (tag === 'button') score += 120;
             if (tag === 'input' && ['submit', 'button', 'image'].includes(type)) score += 130;
             if (role === 'button') score += 90;
+            if (['menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch'].includes(role)) score += 60;
             if (tag === 'a') score += 35;
             if (/百度一下|搜索|搜一下|查找|提交|确定|确认|继续|下一步|完成|发送|生成|打开|search|submit|go|continue|next|ok|confirm|send|generate/.test(label + ' ' + key)) score += 260;
             const form = node.closest && node.closest('form');
@@ -1103,7 +1284,21 @@ final class BrowserWebSearchService: NSObject {
               reason: provider && !completed ? 'Human verification is present but not completed.' : ''
             };
           }
-          const explicitNode = findNode(selector)
+          const storedNode = (() => {
+            if (!nodeId || !window.__iexaNodeStore) return null;
+            const item = window.__iexaNodeStore[nodeId];
+            if (!item) return null;
+            if (item.expiresAt && item.expiresAt < Date.now()) {
+              try { delete window.__iexaNodeStore[nodeId]; } catch (_) {}
+              return null;
+            }
+            const candidate = item.node;
+            if (candidate && document.documentElement && document.documentElement.contains(candidate)) return candidate;
+            try { delete window.__iexaNodeStore[nodeId]; } catch (_) {}
+            return null;
+          })();
+          const explicitNode = storedNode
+            || findNode(selector)
             || findByLabel(desiredLabel)
             || ((Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null);
           const fallbackNode = explicitNode ? null : bestClickableFallback();
@@ -1115,6 +1310,7 @@ final class BrowserWebSearchService: NSObject {
               title: document.title || '',
               url: location.href,
               selector: selector || '',
+              node_id: nodeId || '',
               label: desiredLabel || '',
               needs_visual_coordinates: true,
               searched_visible_clickables: true,
@@ -1203,7 +1399,7 @@ final class BrowserWebSearchService: NSObject {
         }
         var payload = object
         payload["action"] = "browser.click"
-        let requiresVerification = Self.boolValue(payload["requires_user_verification"]) == true
+        let requiresVerification = Self.toolPayloadRequiresHumanVerification(payload)
         let clicked = Self.boolValue(payload["ok"]) ?? false
         if requiresVerification {
             _ = await scrollToVisibleHumanVerification()
@@ -1256,6 +1452,7 @@ final class BrowserWebSearchService: NSObject {
         try? await Task.sleep(nanoseconds: 250_000_000)
 
         let selector = Self.firstString(in: call, keys: ["selector", "css", "element"])
+        let nodeID = Self.firstString(in: call, keys: ["node_id", "nodeId", "accessibility_id", "accessibilityId"])
         let label = Self.firstString(in: call, keys: [
             "label", "field_label", "fieldLabel", "aria_label", "ariaLabel",
             "name", "title", "placeholder", "target"
@@ -1276,6 +1473,7 @@ final class BrowserWebSearchService: NSObject {
         let script = """
         (() => {
           const selector = \(Self.javascriptString(selector ?? ""));
+          const nodeId = \(Self.javascriptString(nodeID ?? ""));
           const desiredLabel = \(Self.javascriptString(label ?? ""));
           const x = \(x.map(String.init) ?? "null");
           const y = \(y.map(String.init) ?? "null");
@@ -1318,6 +1516,19 @@ final class BrowserWebSearchService: NSObject {
               }
             }
             return roots;
+          }
+          function findStoredNode(raw) {
+            if (!raw || !window.__iexaNodeStore) return null;
+            const item = window.__iexaNodeStore[raw];
+            if (!item) return null;
+            if (item.expiresAt && item.expiresAt < Date.now()) {
+              try { delete window.__iexaNodeStore[raw]; } catch (_) {}
+              return null;
+            }
+            const node = item.node;
+            if (node && document.documentElement && document.documentElement.contains(node)) return node;
+            try { delete window.__iexaNodeStore[raw]; } catch (_) {}
+            return null;
           }
           function deepQuerySelector(raw) {
             for (const root of allRoots()) {
@@ -1511,7 +1722,8 @@ final class BrowserWebSearchService: NSObject {
             };
           }
           const coordinateNode = (Number.isFinite(x) && Number.isFinite(y)) ? document.elementFromPoint(x, y) : null;
-          const explicitNode = editableTarget(findNode(selector))
+          const explicitNode = editableTarget(findStoredNode(nodeId))
+            || editableTarget(findNode(selector))
             || editableTarget(findByLabel(desiredLabel))
             || editableTarget(coordinateNode);
           const fallbackNode = explicitNode ? null : bestEditableFallback();
@@ -1545,6 +1757,7 @@ final class BrowserWebSearchService: NSObject {
               title: document.title || '',
               url: location.href,
               selector: selector || '',
+              node_id: nodeId || '',
               label: desiredLabel || '',
               tag: (node.tagName || node.nodeName || '').toLowerCase(),
               text: accessibleText(node).slice(0, 160)
@@ -1615,6 +1828,7 @@ final class BrowserWebSearchService: NSObject {
             title: document.title || '',
             url: location.href,
             selector: selector || '',
+            node_id: nodeId || '',
             label: desiredLabel || '',
             text: textOf(node).slice(0, 160),
             value: node.value || '',
@@ -1634,7 +1848,7 @@ final class BrowserWebSearchService: NSObject {
         }
         var payload = object
         payload["action"] = "browser.type"
-        let requiresVerification = Self.boolValue(payload["requires_user_verification"]) == true
+        let requiresVerification = Self.toolPayloadRequiresHumanVerification(payload)
         let typed = Self.boolValue(payload["ok"]) ?? false
         if requiresVerification {
             _ = await scrollToVisibleHumanVerification()
@@ -1679,7 +1893,31 @@ final class BrowserWebSearchService: NSObject {
         let isImageWorkflow = Self.browserAutoWorkflowLooksLikeImageGeneration(call: call, text: text)
         let isSearchWorkflow = Self.browserAutoWorkflowLooksLikeSearch(call: call, text: text)
         let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? isImageWorkflow
+        let explicitResultPolling = Self.boolValue(
+            call["poll_result"]
+                ?? call["pollResult"]
+                ?? call["wait_for_result"]
+                ?? call["waitForResult"]
+                ?? call["async_result"]
+                ?? call["asyncResult"]
+        )
+        let shouldPollForAsyncResult = explicitResultPolling ?? (!shouldWaitForImage && !isSearchWorkflow)
+        let resultPollTimeout = min(max(Self.intValue(
+            call["poll_timeout"]
+                ?? call["pollTimeout"]
+                ?? call["result_timeout"]
+                ?? call["resultTimeout"]
+                ?? call["async_timeout"]
+                ?? call["asyncTimeout"]
+        ) ?? 45, 5), 180)
+        let resultPollIntervalMS = min(max(Self.intValue(
+            call["poll_interval_ms"]
+                ?? call["pollIntervalMs"]
+                ?? call["result_poll_interval_ms"]
+                ?? call["resultPollIntervalMs"]
+        ) ?? 1200, 500), 5000)
         var imageBaselineSources: [String] = []
+        var submittedAction = false
 
         func appendStep(_ name: String, _ payload: [String: Any]) {
             steps.append(Self.workflowStep(name, payload))
@@ -1758,11 +1996,117 @@ final class BrowserWebSearchService: NSObject {
             return (Self.intValue(payload["new_candidate_count"] ?? payload["candidate_count"]) ?? 0) > 0
         }
 
+        func asyncResultLooksReady(state: [String: Any], textPayload: [String: Any]?, sawBusy: Bool) -> Bool {
+            if Self.boolValue(state["async_result_detected"]) == true {
+                return true
+            }
+            if (Self.intValue(state["new_candidate_count"] ?? state["candidate_count"]) ?? 0) > 0 {
+                return true
+            }
+            if (Self.intValue(state["download_link_count"]) ?? 0) > 0 {
+                return true
+            }
+            guard let textPayload,
+                  Self.boolValue(textPayload["ok"]) == true else {
+                return false
+            }
+            let pageText = (textPayload["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if pageText.count >= 240 && sawBusy {
+                return true
+            }
+            return false
+        }
+
+        func textSignature(_ payload: [String: Any]?) -> String {
+            guard let payload else { return "" }
+            let title = payload["title"] as? String ?? ""
+            let url = payload["url"] as? String ?? ""
+            let pageText = (payload["text"] as? String ?? "")
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            return [
+                title,
+                url,
+                String(pageText.count),
+                String(pageText.prefix(180)),
+                String(pageText.suffix(180))
+            ].joined(separator: "|")
+        }
+
+        func pollForAsyncPageResult() async -> [String: Any]? {
+            let deadline = Date().addingTimeInterval(TimeInterval(resultPollTimeout))
+            let pollSleep = UInt64(resultPollIntervalMS) * 1_000_000
+            var attempt = 0
+            var sawBusy = false
+            var stableReadySamples = 0
+            var lastSignature = ""
+            var bestText: [String: Any]?
+
+            while Date() < deadline {
+                let state = await probeWorkflowState(name: attempt == 0 ? "browser.workflow_state.poll_result" : "browser.workflow_state.poll_result_\(attempt)")
+                if let stop = verificationStopIfNeeded(state) {
+                    return stop
+                }
+                if let stop = generationFailedStopIfNeeded(state) {
+                    return stop
+                }
+
+                let generationState = (state["generation_state"] as? String ?? "").lowercased()
+                let busy = Self.boolValue(state["loading_visible"]) == true
+                    || ["generating", "waiting", "queued", "processing"].contains(generationState)
+                sawBusy = sawBusy || busy
+
+                var textCall = continuationCall
+                textCall["max_length"] = Self.intValue(call["max_length"] ?? call["limit"]) ?? 12_000
+                textCall["max_scrolls"] = min(Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 8, 12)
+                let textPayload = await executeNativeText(textCall)
+                appendStep(attempt == 0 ? "browser.text.poll_result" : "browser.text.poll_result_\(attempt)", textPayload)
+                if let stop = verificationStopIfNeeded(textPayload) {
+                    return stop
+                }
+                if Self.boolValue(textPayload["ok"]) == true {
+                    bestText = textPayload
+                }
+
+                let signature = textSignature(textPayload)
+                let changed = !lastSignature.isEmpty && signature != lastSignature
+                let ready = asyncResultLooksReady(state: state, textPayload: textPayload, sawBusy: sawBusy)
+                if ready && (!busy || changed || stableReadySamples > 0) {
+                    stableReadySamples += 1
+                } else if ready && busy {
+                    stableReadySamples = max(stableReadySamples, 1)
+                } else {
+                    stableReadySamples = 0
+                }
+
+                if stableReadySamples >= 2 || (ready && !busy && (sawBusy || changed) && explicitResultPolling != true) {
+                    appendStep("browser.poll_result.completed", [
+                        "ok": true,
+                        "attempts": attempt + 1,
+                        "saw_busy_state": sawBusy,
+                        "summary": "已轮询到网页异步结果。"
+                    ])
+                    return textPayload
+                }
+
+                lastSignature = signature
+                attempt += 1
+                try? await Task.sleep(nanoseconds: pollSleep)
+            }
+
+            appendStep("browser.poll_result.timeout", [
+                "ok": false,
+                "attempts": attempt,
+                "timeout": resultPollTimeout,
+                "summary": "异步结果轮询超时，继续读取当前页面。"
+            ])
+            return bestText
+        }
+
         func verificationStopIfNeeded(
             _ payload: [String: Any],
             summary: String = "网页需要先完成人机验证，已定位到验证区域。"
         ) -> [String: Any]? {
-            guard Self.boolValue(payload["requires_user_verification"]) == true else { return nil }
+            guard Self.toolPayloadRequiresHumanVerification(payload) else { return nil }
             return Self.workflowPayload(
                 ok: false,
                 steps: steps,
@@ -1897,6 +2241,7 @@ final class BrowserWebSearchService: NSObject {
                             "ok": true,
                             "summary": "输入并提交后已进入搜索结果页。"
                         ])
+                        submittedAction = true
                         searchResultDetectedAfterTyping = true
                         typedOK = true
                         break
@@ -2008,10 +2353,12 @@ final class BrowserWebSearchService: NSObject {
                 }
                 if shouldWaitForImage {
                     if afterClickLooksStarted(stateAfterClick) || Self.boolValue(clicked["ok"]) == true {
+                        submittedAction = true
                         clickedOK = true
                         break
                     }
                 } else if Self.boolValue(clicked["ok"]) == true {
+                    submittedAction = true
                     clickedOK = true
                     break
                 }
@@ -2033,6 +2380,7 @@ final class BrowserWebSearchService: NSObject {
                         "ok": true,
                         "summary": "输入后页面已进入搜索结果状态，跳过额外点击。"
                     ])
+                    submittedAction = true
                 } else {
                     return Self.workflowPayload(
                         ok: false,
@@ -2133,6 +2481,16 @@ final class BrowserWebSearchService: NSObject {
             )
         }
 
+        var polledFinalText: [String: Any]?
+        if shouldPollForAsyncResult && submittedAction {
+            if let polled = await pollForAsyncPageResult() {
+                if (polled["action"] as? String) == "browser.auto" {
+                    return polled
+                }
+                polledFinalText = polled
+            }
+        }
+
         let stable = await executeNativeWaitForDOMStable(continuationCall)
         appendStep("browser.wait_for_dom_stable", stable)
         let finalObserve = await executeNativeObserve(continuationCall)
@@ -2146,8 +2504,14 @@ final class BrowserWebSearchService: NSObject {
         var textCall = continuationCall
         textCall["max_length"] = Self.intValue(call["max_length"] ?? call["limit"]) ?? 12_000
         textCall["max_scrolls"] = Self.intValue(call["max_scrolls"] ?? call["maxScrolls"] ?? call["scroll_count"] ?? call["count"]) ?? 14
-        let finalText = await executeNativeText(textCall)
-        appendStep("browser.text.final", finalText)
+        let finalText: [String: Any]
+        if let polledFinalText {
+            finalText = polledFinalText
+            appendStep("browser.text.final.from_poll", polledFinalText)
+        } else {
+            finalText = await executeNativeText(textCall)
+            appendStep("browser.text.final", finalText)
+        }
         if let stop = verificationStopIfNeeded(finalText) {
             return stop
         }
@@ -2368,7 +2732,7 @@ final class BrowserWebSearchService: NSObject {
             "step": name,
             "ok": Self.boolValue(payload["ok"]) ?? false,
             "summary": payload["summary"] as? String ?? payload["error"] as? String ?? "",
-            "requires_user_verification": Self.boolValue(payload["requires_user_verification"]) ?? false,
+            "requires_user_verification": Self.toolPayloadRequiresHumanVerification(payload),
             "url": payload["url"] as? String ?? "",
             "title": payload["title"] as? String ?? "",
             "file_url": payload["file_url"] as? String ?? ""
@@ -2577,7 +2941,7 @@ final class BrowserWebSearchService: NSObject {
             )) else {
                 continue
             }
-            if Self.boolValue(object["requires_user_verification"]) == true {
+            if Self.toolPayloadRequiresHumanVerification(object) {
                 _ = await scrollToVisibleHumanVerification()
                 object["action"] = "browser.type"
                 object["auto_scanned_page"] = true
@@ -2626,7 +2990,7 @@ final class BrowserWebSearchService: NSObject {
             guard var object = await evaluateJSONObject(Self.clickVisibleElementScript(selector: selector, label: label)) else {
                 continue
             }
-            if Self.boolValue(object["requires_user_verification"]) == true {
+            if Self.toolPayloadRequiresHumanVerification(object) {
                 _ = await scrollToVisibleHumanVerification()
                 object["action"] = "browser.click"
                 object["auto_scanned_page"] = true
@@ -3011,10 +3375,18 @@ final class BrowserWebSearchService: NSObject {
         }
         try? await Task.sleep(nanoseconds: 250_000_000)
 
-        let defaultSelector = "a, button, input, textarea, select, [role='button'], [role='link'], [onclick], [tabindex], [aria-label]"
+        let defaultSelector = """
+        a[href], button, input, textarea, select, summary, label, iframe,
+        [role='button'], [role='link'], [role='menuitem'], [role='tab'], [role='option'],
+        [role='checkbox'], [role='radio'], [role='switch'], [role='textbox'], [role='searchbox'],
+        [onclick], [tabindex], [contenteditable],
+        [aria-label], [aria-labelledby], [aria-describedby], [title], [alt],
+        [data-testid], [data-test], [data-cy], [jsaction]
+        """
         let selector = Self.firstString(in: call, keys: ["selector", "css"]) ?? defaultSelector
         let limit = min(max(Self.intValue(call["limit"] ?? call["max_results"]) ?? 30, 1), 100)
         let intent = Self.findElementsIntent(in: call)
+        let filters = Self.findElementsFilters(in: call)
         let scanPage = Self.boolValue(call["scan_page"] ?? call["scanPage"] ?? call["full_page"] ?? call["fullPage"]) ?? true
         var captureVisuals = intent?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         for key in [
@@ -3035,11 +3407,12 @@ final class BrowserWebSearchService: NSObject {
                 limit: limit,
                 maxScrolls: maxScrolls,
                 intent: intent,
+                filters: filters,
                 captureVisuals: captureVisuals
             )
         }
 
-        let script = Self.elementCollectionScript(selector: selector, limit: limit, intent: intent)
+        let script = Self.elementCollectionScript(selector: selector, limit: limit, intent: intent, filters: filters)
         guard let object = await evaluateJSONObject(script) else {
             return [
                 "action": "browser.find_elements",
@@ -3058,6 +3431,7 @@ final class BrowserWebSearchService: NSObject {
         limit: Int,
         maxScrolls: Int,
         intent: String?,
+        filters: [String: Any],
         captureVisuals: Bool
     ) async -> [String: Any] {
         guard let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) else {
@@ -3153,7 +3527,8 @@ final class BrowserWebSearchService: NSObject {
             guard let snapshot = await evaluateJSONObject(Self.elementCollectionScript(
                 selector: selector,
                 limit: min(max(perViewportLimit * 3, 36), 120),
-                intent: intent
+                intent: intent,
+                filters: filters
             )),
                   let items = snapshot["items"] as? [[String: Any]] else {
                 continue
@@ -3194,13 +3569,12 @@ final class BrowserWebSearchService: NSObject {
 
         let returnedItems = Self.prioritizedElements(collected, limit: limit)
         let verification = humanVerification ?? ["detected": false]
-        let verificationDetected = Self.boolValue(verification["detected"]) == true
-        let verificationCompleted = Self.boolValue(verification["completed"]) == true
+        let verificationRequiresUser = Self.humanVerificationRequiresUser(verification)
         var focusedElement: [String: Any]?
         var focusedScrollY: Int?
         var focusedVisual: [String: Any]?
         let summary: String
-        if verificationDetected && !verificationCompleted {
+        if verificationRequiresUser {
             _ = await scrollToVisibleHumanVerification()
             summary = collected.isEmpty
                 ? "网页存在未完成的人机验证，整页扫描后未找到匹配网页元素。"
@@ -3244,7 +3618,7 @@ final class BrowserWebSearchService: NSObject {
             "scroll_height": scrollHeight,
             "viewport_height": viewportHeight,
             "human_verification": verification,
-            "requires_user_verification": verificationDetected && !verificationCompleted,
+            "requires_user_verification": verificationRequiresUser,
             "count": returnedItems.count,
             "total_count": collected.count,
             "viewport_contexts": viewportContexts,
@@ -3313,12 +3687,13 @@ final class BrowserWebSearchService: NSObject {
                 "error": "Missing required field: script"
             ]
         }
+        let scriptLiteral = Self.javaScriptStringLiteral(script)
         let wrapped = """
         (async () => {
           try {
-            const result = await (async () => {
-              \(script)
-            })();
+            const source = \(scriptLiteral);
+            const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+            const result = await AsyncFunction(source)();
             const safe = result === undefined ? null : result;
             return JSON.stringify({
               ok: true,
@@ -3336,11 +3711,16 @@ final class BrowserWebSearchService: NSObject {
           }
         })();
         """
-        guard let object = await evaluateJSONObject(wrapped) else {
+        let evaluation = await evaluateJavaScriptString(wrapped)
+        guard let json = evaluation.string,
+              let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return [
                 "action": "browser.execute_js",
                 "ok": false,
-                "error": "Unable to execute JavaScript"
+                "error": evaluation.error ?? "Unable to execute JavaScript",
+                "result_type": evaluation.resultType ?? "",
+                "result_preview": evaluation.resultPreview ?? ""
             ]
         }
         var payload = object
@@ -3729,6 +4109,7 @@ final class BrowserWebSearchService: NSObject {
         }
 
         let title = await currentPageTitle() ?? "新标签页"
+        notifyActiveBrowserDidChange()
         return [
             "action": "browser.new_tab",
             "ok": true,
@@ -3767,6 +4148,7 @@ final class BrowserWebSearchService: NSObject {
             mountActiveBrowserIfPresented()
         }
 
+        notifyActiveBrowserDidChange()
         return [
             "action": "browser.close_tab",
             "ok": true,
@@ -3825,6 +4207,28 @@ final class BrowserWebSearchService: NSObject {
         return object
     }
 
+    private struct JavaScriptEvaluation {
+        let string: String?
+        let error: String?
+        let resultType: String?
+        let resultPreview: String?
+    }
+
+    private static func javaScriptStringLiteral(_ value: String) -> String {
+        if let data = try? JSONEncoder().encode(value),
+           let encoded = String(data: data, encoding: .utf8) {
+            return encoded
+        }
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+        return "\"\(escaped)\""
+    }
+
     private func applyBrowserUserAgent(_ profile: String) {
         let normalized = profile.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let resolvedProfile = normalized.isEmpty ? "mobile_safari" : normalized
@@ -3836,11 +4240,29 @@ final class BrowserWebSearchService: NSObject {
         webView?.customUserAgent = userAgent
     }
 
+    private func browserCookieHeader(for url: URL, webView: WKWebView) async -> String? {
+        let cookies = await withCheckedContinuation { (continuation: CheckedContinuation<[HTTPCookie], Never>) in
+            webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { continuation.resume(returning: $0) }
+        }
+        let host = url.host?.lowercased() ?? ""
+        let siteRoot = Self.cookieSiteRoot(for: host)
+        let pairs = cookies.compactMap { cookie -> String? in
+            guard Self.cookieMatchesSite(cookie.domain, host: host, siteRoot: siteRoot) else { return nil }
+            let path = url.path.isEmpty ? "/" : url.path
+            guard path.hasPrefix(cookie.path) || cookie.path == "/" else { return nil }
+            if cookie.isSecure, url.scheme?.lowercased() != "https" { return nil }
+            return "\(cookie.name)=\(cookie.value)"
+        }
+        guard !pairs.isEmpty else { return nil }
+        return pairs.joined(separator: "; ")
+    }
+
     private func activateBrowserTab(_ tabID: Int) {
         guard let tab = browserTabs[tabID] else { return }
         activeBrowserTabID = tabID
         webView = tab
         mountActiveBrowserIfPresented()
+        notifyActiveBrowserDidChange()
     }
 
     private static func browserUserAgentOverride(profile: String) -> String? {
@@ -3885,7 +4307,7 @@ final class BrowserWebSearchService: NSObject {
             if hasURL { return "browser.navigate" }
             return "browser.screenshot"
         case "observe", "get_state", "state", "browser.observe", "browser.get_state":
-            return "browser.screenshot"
+            return "browser.observe"
         case "navigate", "open", "goto", "go", "go_to", "go_to_url", "browser.navigate", "browser.open":
             return "browser.navigate"
         case "readable", "get_readable", "read_webpage", "browser.readable":
@@ -3905,7 +4327,7 @@ final class BrowserWebSearchService: NSObject {
         case "type", "browser.type":
             return "browser.type"
         case "auto", "complete_task", "browser.auto", "browser.complete_task":
-            return "browser.screenshot"
+            return "browser.auto"
         case "hover", "browser.hover":
             return "browser.hover"
         case "scroll", "browser.scroll":
@@ -3927,7 +4349,7 @@ final class BrowserWebSearchService: NSObject {
         case "wait_for_dom_stable", "browser.wait_for_dom_stable":
             return "browser.wait_for_dom_stable"
         case "wait_for_image", "wait_image", "image_result", "browser.wait_for_image":
-            return "browser.screenshot"
+            return "browser.wait_for_image"
         case "new_tab", "browser.new_tab":
             return "browser.new_tab"
         case "close_tab", "browser.close_tab":
@@ -4212,15 +4634,66 @@ final class BrowserWebSearchService: NSObject {
         return intent.isEmpty ? nil : intent
     }
 
+    private static func findElementsFilters(in call: [String: Any]) -> [String: Any] {
+        var filters: [String: Any] = [:]
+        let stringAliases: [(String, [String])] = [
+            ("text", ["text"]),
+            ("text_contains", ["text_contains", "text-contains", "contains_text", "containsText"]),
+            ("desc", ["desc", "contentDesc", "content_desc", "aria_label", "ariaLabel"]),
+            ("desc_contains", ["desc_contains", "desc-contains", "content_desc_contains", "contentDescContains"]),
+            ("id", ["id", "resourceId", "resource_id", "resource-id"]),
+            ("class", ["class", "className", "class_name", "classes"]),
+            ("package", ["package", "packageName", "package_name", "host", "hostname"])
+        ]
+        for (canonical, aliases) in stringAliases {
+            guard let value = Self.firstString(in: call, keys: aliases),
+                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+            filters[canonical] = value
+        }
+        let boolAliases: [(String, [String])] = [
+            ("clickable", ["clickable"]),
+            ("editable", ["editable"]),
+            ("scrollable", ["scrollable"]),
+            ("checked", ["checked"]),
+            ("enabled", ["enabled"]),
+            ("visible", ["visible"]),
+            ("checkable", ["checkable"]),
+            ("selected", ["selected"])
+        ]
+        for (canonical, aliases) in boolAliases {
+            for alias in aliases {
+                if let value = Self.boolValue(call[alias]) {
+                    filters[canonical] = value
+                    break
+                }
+            }
+        }
+        return filters
+    }
+
+    private static func javascriptObject(_ value: [String: Any]) -> String {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: []),
+              let json = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return json
+    }
+
     private static func clickVisibleElementScript(selector: String?, label: String?) -> String {
         """
         (() => {
           const selector = \(Self.javascriptString(selector ?? ""));
           const desiredLabel = \(Self.javascriptString(label ?? ""));
           const clickableSelector = [
-            'button', 'a[href]', 'input', 'textarea', 'select', 'summary',
-            '[role="button"]', '[role="link"]', '[onclick]', '[tabindex]',
-            '[aria-label]', '[data-testid]', '[data-test]', '[data-cy]'
+            'button', 'a[href]', 'input', 'textarea', 'select', 'summary', 'label', 'iframe',
+            '[role="button"]', '[role="link"]', '[role="menuitem"]', '[role="tab"]',
+            '[role="option"]', '[role="checkbox"]', '[role="radio"]', '[role="switch"]',
+            '[onclick]', '[tabindex]', '[contenteditable]', '[jsaction]',
+            '[aria-label]', '[aria-labelledby]', '[aria-describedby]',
+            '[title]', '[alt]', '[data-testid]', '[data-test]', '[data-cy]'
           ].join(',');
           function norm(value) {
             return String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
@@ -4230,15 +4703,41 @@ final class BrowserWebSearchService: NSObject {
           }
           function accessibleText(node) {
             if (!node) return '';
+            const labelledBy = attr(node, 'aria-labelledby')
+              .split(/\\s+/)
+              .filter(Boolean)
+              .map(id => document.getElementById(id))
+              .map(text)
+              .join(' ');
+            const describedBy = attr(node, 'aria-describedby')
+              .split(/\\s+/)
+              .filter(Boolean)
+              .map(id => document.getElementById(id))
+              .map(text)
+              .join(' ');
+            const id = attr(node, 'id');
+            let labels = '';
+            if (id && window.CSS && CSS.escape) {
+              try {
+                labels = Array.from(document.querySelectorAll(`label[for="${CSS.escape(id)}"]`)).map(text).join(' ');
+              } catch (_) {}
+            }
             const parts = [
               text(node),
+              labelledBy,
+              describedBy,
+              labels,
               node.getAttribute ? node.getAttribute('aria-label') : '',
+              node.getAttribute ? node.getAttribute('aria-description') : '',
               node.getAttribute ? node.getAttribute('title') : '',
               node.getAttribute ? node.getAttribute('alt') : '',
               node.getAttribute ? node.getAttribute('name') : '',
               node.getAttribute ? node.getAttribute('value') : '',
               node.getAttribute ? node.getAttribute('placeholder') : '',
               node.getAttribute ? node.getAttribute('data-testid') : '',
+              node.getAttribute ? node.getAttribute('data-test') : '',
+              node.getAttribute ? node.getAttribute('data-cy') : '',
+              node.getAttribute ? node.getAttribute('jsaction') : '',
               node.value || '',
               node.placeholder || ''
             ];
@@ -4265,6 +4764,19 @@ final class BrowserWebSearchService: NSObject {
               }
             }
             return roots;
+          }
+          function findStoredNode(raw) {
+            if (!raw || !window.__iexaNodeStore) return null;
+            const item = window.__iexaNodeStore[raw];
+            if (!item) return null;
+            if (item.expiresAt && item.expiresAt < Date.now()) {
+              try { delete window.__iexaNodeStore[raw]; } catch (_) {}
+              return null;
+            }
+            const node = item.node;
+            if (node && document.documentElement && document.documentElement.contains(node)) return node;
+            try { delete window.__iexaNodeStore[raw]; } catch (_) {}
+            return null;
           }
           function deepQuerySelector(raw) {
             if (!raw) return null;
@@ -4313,7 +4825,7 @@ final class BrowserWebSearchService: NSObject {
           }
           function clickTarget(node) {
             if (!node) return null;
-            return node.closest && node.closest('button, a, input, textarea, select, summary, [contenteditable], [role="button"], [role="link"], [onclick], [tabindex]')
+            return node.closest && node.closest('button, a, input, textarea, select, summary, label, [contenteditable], [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"], [role="checkbox"], [role="radio"], [role="switch"], [onclick], [tabindex], [jsaction]')
               || node;
           }
           function clickableCandidates() {
@@ -4375,6 +4887,7 @@ final class BrowserWebSearchService: NSObject {
             if (tag === 'button') score += 120;
             if (tag === 'input' && ['submit', 'button', 'image'].includes(type)) score += 130;
             if (role === 'button') score += 90;
+            if (['menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch'].includes(role)) score += 60;
             if (tag === 'a') score += 35;
             if (/百度一下|搜索|搜一下|查找|提交|确定|确认|继续|下一步|完成|发送|生成|打开|search|submit|go|continue|next|ok|confirm|send|generate/.test(label + ' ' + key)) score += 260;
             const form = node.closest && node.closest('form');
@@ -4420,14 +4933,13 @@ final class BrowserWebSearchService: NSObject {
           const node = explicitNode || fallbackNode;
           if (!node) {
             const verification = humanVerificationState();
-            if (verification.detected && !verification.completed) {
-              return JSON.stringify({ ok: false, requires_user_verification: true, human_verification: verification, title: document.title || '', url: location.href });
-            }
             return JSON.stringify({
               ok: false,
               error: 'Element not found in current viewport',
               title: document.title || '',
               url: location.href,
+              human_verification: verification,
+              needs_visual_coordinates: true,
               searched_visible_clickables: true
             });
           }
@@ -4657,14 +5169,13 @@ final class BrowserWebSearchService: NSObject {
           const node = explicitNode || fallbackNode;
           if (!node) {
             const verification = humanVerificationState();
-            if (verification.detected && !verification.completed) {
-              return JSON.stringify({ ok: false, requires_user_verification: true, human_verification: verification, title: document.title || '', url: location.href });
-            }
             return JSON.stringify({
               ok: false,
               error: 'Element not found in current viewport',
               title: document.title || '',
               url: location.href,
+              human_verification: verification,
+              needs_visual_coordinates: true,
               searched_visible_editables: true
             });
           }
@@ -4718,12 +5229,13 @@ final class BrowserWebSearchService: NSObject {
         """
     }
 
-    private static func elementCollectionScript(selector: String, limit: Int, intent: String? = nil) -> String {
+    private static func elementCollectionScript(selector: String, limit: Int, intent: String? = nil, filters: [String: Any] = [:]) -> String {
         """
         (() => {
           const selector = \(Self.javascriptString(selector));
           const limit = \(limit);
           const intent = \(Self.javascriptString(intent ?? ""));
+          const filters = \(Self.javascriptObject(filters));
           function text(node) {
             return (node && (node.innerText || node.textContent) || '').replace(/\\s+/g, ' ').trim();
           }
@@ -4779,6 +5291,10 @@ final class BrowserWebSearchService: NSObject {
             return {
               x: Math.round(r.x),
               y: Math.round(r.y),
+              left: Math.round(r.left),
+              top: Math.round(r.top),
+              right: Math.round(r.right),
+              bottom: Math.round(r.bottom),
               page_x: Math.round(pageX),
               page_y: Math.round(pageY),
               page_center_x: Math.round(pageX + r.width / 2),
@@ -4830,6 +5346,73 @@ final class BrowserWebSearchService: NSObject {
               node.closest && node.closest('[disabled],[aria-disabled="true"]')
             );
           }
+          function clickableState(node) {
+            if (!node) return false;
+            const tag = norm(node.tagName || node.nodeName || '');
+            const role = norm(attr(node, 'role'));
+            const type = norm(attr(node, 'type'));
+            return tag === 'button'
+              || tag === 'a'
+              || tag === 'summary'
+              || tag === 'label'
+              || (tag === 'input' && ['button', 'submit', 'reset', 'image', 'checkbox', 'radio'].includes(type))
+              || ['button', 'link', 'menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch'].includes(role)
+              || Boolean(attr(node, 'onclick') || attr(node, 'jsaction'))
+              || (attr(node, 'tabindex') && attr(node, 'tabindex') !== '-1');
+          }
+          function editableState(node) {
+            if (!node) return false;
+            const tag = norm(node.tagName || node.nodeName || '');
+            const role = norm(attr(node, 'role'));
+            const type = norm(attr(node, 'type'));
+            if (node.isContentEditable || role === 'textbox' || role === 'searchbox') return true;
+            if (tag === 'textarea' || tag === 'select') return true;
+            if (tag !== 'input') return false;
+            return !['button', 'submit', 'reset', 'checkbox', 'radio', 'hidden', 'file', 'image'].includes(type);
+          }
+          function scrollableState(node) {
+            if (!node) return false;
+            try {
+              const style = getComputedStyle(node);
+              return /(auto|scroll)/.test(style.overflow + style.overflowY + style.overflowX)
+                && (node.scrollHeight > node.clientHeight + 2 || node.scrollWidth > node.clientWidth + 2);
+            } catch (_) {
+              return false;
+            }
+          }
+          function longClickableState(node) {
+            if (!node) return false;
+            return Boolean(attr(node, 'oncontextmenu') || attr(node, 'aria-haspopup') || attr(node, 'contextmenu'));
+          }
+          function domDepth(node) {
+            let depth = 0;
+            let current = node;
+            while (current && current.parentElement) {
+              depth += 1;
+              current = current.parentElement;
+            }
+            return depth;
+          }
+          function resourceId(node) {
+            return node && (
+              node.id ||
+              attr(node, 'data-testid') ||
+              attr(node, 'data-test') ||
+              attr(node, 'data-cy') ||
+              attr(node, 'name') ||
+              ''
+            );
+          }
+          function actionHints(node) {
+            const hints = [];
+            if (clickableState(node)) hints.push('click');
+            if (editableState(node)) hints.push('type');
+            if (scrollableState(node)) hints.push('scroll');
+            const role = norm(attr(node, 'role'));
+            const type = norm(attr(node, 'type'));
+            if (['checkbox', 'radio', 'switch'].includes(role) || ['checkbox', 'radio'].includes(type)) hints.push('toggle');
+            return hints;
+          }
           function humanVerificationState() {
             const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
             const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
@@ -4861,11 +5444,17 @@ final class BrowserWebSearchService: NSObject {
             const strong = norm([
               label,
               attr(node, 'aria-label'),
+              attr(node, 'aria-labelledby'),
+              attr(node, 'aria-describedby'),
               attr(node, 'title'),
               attr(node, 'alt'),
               attr(node, 'name'),
               attr(node, 'placeholder'),
               attr(node, 'value'),
+              attr(node, 'data-testid'),
+              attr(node, 'data-test'),
+              attr(node, 'data-cy'),
+              attr(node, 'jsaction'),
               node && node.value || '',
               node && node.placeholder || ''
             ].join(' '));
@@ -4899,6 +5488,53 @@ final class BrowserWebSearchService: NSObject {
             if (score > 0 && disabledState(node)) score -= 10;
             return Math.max(0, Math.round(score));
           }
+          function matchesText(actual, expected, contains) {
+            if (expected === undefined || expected === null || String(expected).trim() === '') return true;
+            const haystack = norm(actual);
+            const needle = norm(expected);
+            return contains ? haystack.includes(needle) : haystack === needle;
+          }
+          function matchesBoolean(actual, expected) {
+            if (expected === undefined || expected === null) return true;
+            return Boolean(actual) === Boolean(expected);
+          }
+          function matchesFilters(node, label, nodeHref) {
+            const role = attr(node, 'role');
+            const desc = [
+              attr(node, 'aria-label'),
+              attr(node, 'aria-labelledby'),
+              attr(node, 'aria-describedby'),
+              attr(node, 'title'),
+              attr(node, 'alt'),
+              attr(node, 'placeholder')
+            ].join(' ');
+            const idValue = resourceId(node);
+            const classValue = typeof node.className === 'string' ? node.className : '';
+            const packageValue = location.hostname || 'wkwebview';
+            const checked = Boolean(node.checked || attr(node, 'aria-checked') === 'true');
+            const selected = Boolean(node.selected || attr(node, 'aria-selected') === 'true');
+            const clickable = clickableState(node);
+            const editable = editableState(node);
+            const scrollable = scrollableState(node);
+            const checkable = ['checkbox', 'radio', 'switch'].includes(norm(role)) || ['checkbox', 'radio'].includes(norm(attr(node, 'type')));
+            const enabled = !disabledState(node);
+            if (!matchesText(label, filters.text, false)) return false;
+            if (!matchesText(label, filters.text_contains, true)) return false;
+            if (!matchesText(desc, filters.desc, false)) return false;
+            if (!matchesText(desc, filters.desc_contains, true)) return false;
+            if (!matchesText(idValue, filters.id, false) && !matchesText(idValue, filters.id, true)) return false;
+            if (!matchesText(classValue, filters.class, true)) return false;
+            if (!matchesText(packageValue, filters.package, true)) return false;
+            if (!matchesBoolean(clickable, filters.clickable)) return false;
+            if (!matchesBoolean(editable, filters.editable)) return false;
+            if (!matchesBoolean(scrollable, filters.scrollable)) return false;
+            if (!matchesBoolean(checkable, filters.checkable)) return false;
+            if (!matchesBoolean(checked, filters.checked)) return false;
+            if (!matchesBoolean(selected, filters.selected)) return false;
+            if (!matchesBoolean(enabled, filters.enabled)) return false;
+            if (!matchesBoolean(true, filters.visible)) return false;
+            return true;
+          }
           function itemY(item) {
             const value = item && item.rect ? Number(item.rect.page_y) : NaN;
             return Number.isFinite(value) ? value : 1000000000;
@@ -4911,30 +5547,78 @@ final class BrowserWebSearchService: NSObject {
             return (a.source_index || 0) - (b.source_index || 0);
           }
           const humanVerification = humanVerificationState();
-          const elements = findElements(selector).filter(visible);
+          window.__iexaNodeStore = window.__iexaNodeStore || {};
+          const expiresAt = Date.now() + 60000;
+          for (const key of Object.keys(window.__iexaNodeStore)) {
+            const item = window.__iexaNodeStore[key];
+            if (!item || item.expiresAt < Date.now()) {
+              try { delete window.__iexaNodeStore[key]; } catch (_) {}
+            }
+          }
+          const elements = findElements(selector)
+            .filter(visible)
+            .filter(node => matchesFilters(node, accessibleText(node), href(node)));
           let items = elements.map((node, sourceIndex) => {
+            const nodeId = `dom-${sourceIndex}`;
+            window.__iexaNodeStore[nodeId] = { node, expiresAt };
             const label = accessibleText(node);
             const nodeHref = href(node);
             const disabled = disabledState(node);
+            const nodeRect = rect(node);
+            const clickable = clickableState(node);
+            const editable = editableState(node);
+            const scrollable = scrollableState(node);
+            const role = attr(node, 'role');
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
             return {
               index: sourceIndex,
               source_index: sourceIndex,
-              tag: (node.tagName || node.nodeName || '').toLowerCase(),
+              node_id: nodeId,
+              nodeId,
+              tag,
+              className: tag,
               title: label.slice(0, 120),
               text: label.slice(0, 240),
+              contentDesc: label.slice(0, 240),
+              resourceId: resourceId(node),
+              packageName: location.hostname || 'wkwebview',
               href: nodeHref,
               id: node.id || '',
               classes: typeof node.className === 'string' ? node.className : '',
               placeholder: node.placeholder || '',
-              role: attr(node, 'role'),
+              role,
               aria_label: attr(node, 'aria-label'),
+              aria_labelledby: attr(node, 'aria-labelledby'),
+              aria_describedby: attr(node, 'aria-describedby'),
               name: attr(node, 'name'),
+              title_attr: attr(node, 'title'),
+              data_testid: attr(node, 'data-testid'),
+              data_test: attr(node, 'data-test'),
+              data_cy: attr(node, 'data-cy'),
+              jsaction: attr(node, 'jsaction'),
               value: attr(node, 'value') || node.value || '',
               type: attr(node, 'type'),
               disabled,
+              enabled: !disabled,
+              visible: true,
+              clickable,
+              longClickable: longClickableState(node),
+              editable,
+              scrollable,
+              checkable: ['checkbox', 'radio', 'switch'].includes(norm(role)) || ['checkbox', 'radio'].includes(norm(attr(node, 'type'))),
+              checked: Boolean(node.checked || attr(node, 'aria-checked') === 'true'),
+              selected: Boolean(node.selected || attr(node, 'aria-selected') === 'true'),
+              focusable: Boolean(attr(node, 'tabindex') || clickable || editable),
+              focused: document.activeElement === node,
+              depth: domDepth(node),
+              childCount: node.childElementCount || 0,
+              action_hints: actionHints(node),
+              actions: actionHints(node),
               blocked_by_human_verification: disabled && humanVerification.detected && !humanVerification.completed,
               match_score: scoreElement(node, label, nodeHref),
-              rect: rect(node)
+              center: nodeRect ? { x: nodeRect.center_x, y: nodeRect.center_y } : null,
+              bounds: nodeRect ? { left: nodeRect.left, top: nodeRect.top, right: nodeRect.right, bottom: nodeRect.bottom } : null,
+              rect: nodeRect
             };
           });
           if (intentNorm) items.sort(compareItems);
@@ -5032,15 +5716,41 @@ final class BrowserWebSearchService: NSObject {
           }
           function accessibleText(node) {
             if (!node) return '';
+            const labelledBy = attr(node, 'aria-labelledby')
+              .split(/\\s+/)
+              .filter(Boolean)
+              .map(id => document.getElementById(id))
+              .map(text)
+              .join(' ');
+            const describedBy = attr(node, 'aria-describedby')
+              .split(/\\s+/)
+              .filter(Boolean)
+              .map(id => document.getElementById(id))
+              .map(text)
+              .join(' ');
+            const id = attr(node, 'id');
+            let labels = '';
+            if (id && window.CSS && CSS.escape) {
+              try {
+                labels = Array.from(document.querySelectorAll(`label[for="${CSS.escape(id)}"]`)).map(text).join(' ');
+              } catch (_) {}
+            }
             return [
               text(node),
+              labelledBy,
+              describedBy,
+              labels,
               attr(node, 'aria-label'),
+              attr(node, 'aria-description'),
               attr(node, 'title'),
               attr(node, 'alt'),
               attr(node, 'name'),
               attr(node, 'value'),
               attr(node, 'placeholder'),
               attr(node, 'data-testid'),
+              attr(node, 'data-test'),
+              attr(node, 'data-cy'),
+              attr(node, 'jsaction'),
               node.value || '',
               node.placeholder || ''
             ].filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
@@ -5113,8 +5823,8 @@ final class BrowserWebSearchService: NSObject {
           const expectedNorm = norm(expectedPrompt);
           const promptNorm = norm(promptValue);
           const promptVerified = Boolean(expectedNorm && promptNorm && (promptNorm.includes(expectedNorm) || expectedNorm.includes(promptNorm)));
-          const actionPattern = /generate|create|submit|start|run|continue|next|send|free image|生成|开始|提交|继续|下一步|立即生成|生成图片|免费生成|发送/i;
-          const clickables = findElements('button, a[href], input[type="submit"], input[type="button"], [role="button"], [onclick], [tabindex], summary')
+          const actionPattern = /generate|create|submit|start|run|continue|next|send|free image|生成|开始|提交|继续|下一步|立即生成|生成图片|免费生成|发送|确定|查询|搜索/i;
+          const clickables = findElements('button, a[href], input[type="submit"], input[type="button"], [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"], [onclick], [tabindex], summary, label')
             .filter(visible)
             .map(node => {
               const label = accessibleText(node);
@@ -5155,6 +5865,7 @@ final class BrowserWebSearchService: NSObject {
           }
           const newImageSources = imageSources.filter(src => !excluded.has(src));
           const bodyText = norm(document.body && document.body.innerText || '');
+          const busyPattern = /生成中|正在生成|处理中|排队|队列|等待中|请稍候|加载中|正在加载|提交中|上传中|分析中|执行中|运行中|正在运行|loading|generating|processing|queued|queue|in progress|pending|running|submitting|uploading|analyzing|working|please wait/i;
           const visibleFailureNodes = findElements('button, [role="button"], a, div, section, article, p, span')
             .filter(visible)
             .map(node => text(node))
@@ -5163,10 +5874,39 @@ final class BrowserWebSearchService: NSObject {
           const failureText = visibleFailureNodes.join(' | ').slice(0, 240);
           const retryVisible = visibleFailureNodes.some(value => /点击重试|重试|try again|retry/i.test(value));
           const loadingVisible = Boolean(
-            /生成中|正在生成|处理中|排队|请稍候|loading|generating|processing|queued|in progress/.test(bodyText) ||
-            findElements('[aria-busy="true"], [role="progressbar"], progress, .loading, .spinner, [class*="loading" i], [class*="spinner" i]')
+            busyPattern.test(bodyText) ||
+            findElements('[aria-busy="true"], [role="progressbar"], [role="status"], progress, .loading, .spinner, .progress, [class*="loading" i], [class*="spinner" i], [class*="progress" i], [class*="skeleton" i], [data-state="loading"], [data-loading="true"]')
               .some(visible)
           );
+          const downloadNodes = findElements('a[href], button, [role="button"], [role="link"], [download]')
+            .filter(visible)
+            .filter(node => {
+              const label = norm(accessibleText(node) + ' ' + attr(node, 'href') + ' ' + attr(node, 'download'));
+              return /download|export|save|result|output|view|open|下载|导出|保存|结果|输出|查看|打开/.test(label);
+            })
+            .slice(0, 8);
+          const resultContainers = findElements([
+            '[aria-live]',
+            '[role="status"]',
+            '[role="log"]',
+            '[data-testid*="result" i]',
+            '[data-testid*="output" i]',
+            '[data-testid*="answer" i]',
+            '[class*="result" i]',
+            '[class*="output" i]',
+            '[class*="answer" i]',
+            '[class*="response" i]',
+            '[class*="preview" i]',
+            'main article',
+            'main section',
+            'article',
+            'section'
+          ].join(','))
+            .filter(visible)
+            .map(node => text(node))
+            .filter(value => value.length >= 80 && !busyPattern.test(value))
+            .slice(0, 5);
+          const asyncResultDetected = Boolean(downloadNodes.length > 0 || resultContainers.length > 0);
           const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || attr(frame, 'aria-label') || '').join(' ').toLowerCase();
           const challengeDetected = /turnstile|captcha|recaptcha|challenge/.test(frames) ||
             /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|验证您是真人|请验证您是真人|正在检查|人机验证/.test(bodyText);
@@ -5176,6 +5916,7 @@ final class BrowserWebSearchService: NSObject {
           let generationState = 'unknown';
           if (challengeBlocking) generationState = 'blocked_verification';
           else if (newImageSources.length > 0 && excluded.size > 0) generationState = 'success';
+          else if (asyncResultDetected && !loadingVisible) generationState = 'success';
           else if (loadingVisible || (promptVerified && generateNode && generateDisabled)) generationState = 'generating';
           else if (retryVisible) generationState = 'retry';
           else if (failureText) generationState = 'failed';
@@ -5198,6 +5939,10 @@ final class BrowserWebSearchService: NSObject {
             retry_visible: retryVisible,
             failure_text: failureText,
             loading_visible: loadingVisible,
+            async_result_detected: asyncResultDetected,
+            download_link_count: downloadNodes.length,
+            result_container_count: resultContainers.length,
+            result_text_preview: resultContainers.join(' | ').slice(0, 360),
             image_sources: imageSources.slice(0, 16),
             candidate_count: imageSources.length,
             new_candidate_count: newImageSources.length,
@@ -5308,6 +6053,7 @@ final class BrowserWebSearchService: NSObject {
           }
           function failureState() {
             const bodyText = norm(document.body && document.body.innerText || '');
+            const busyPattern = /生成中|正在生成|处理中|排队|队列|等待中|请稍候|加载中|正在加载|提交中|上传中|分析中|执行中|运行中|正在运行|loading|generating|processing|queued|queue|in progress|pending|running|submitting|uploading|analyzing|working|please wait/i;
             const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || frame.getAttribute('aria-label') || '').join(' ').toLowerCase();
             const challengeDetected = /turnstile|captcha|recaptcha|challenge/.test(frames) ||
               /prove you are human|verify you are human|checking if the site connection is secure|checking your browser|cf-challenge|captcha|turnstile|验证您是真人|请验证您是真人|正在检查|人机验证/.test(bodyText);
@@ -5318,8 +6064,8 @@ final class BrowserWebSearchService: NSObject {
               .slice(0, 4);
             const failureText = failureNodes.join(' | ').slice(0, 240);
             const retryVisible = failureNodes.some(value => /点击重试|重试|try again|retry/i.test(value));
-            const loadingVisible = /生成中|正在生成|处理中|排队|请稍候|loading|generating|processing|queued|in progress/.test(bodyText) ||
-              Array.from(document.querySelectorAll('[aria-busy="true"], [role="progressbar"], progress, .loading, .spinner, [class*="loading" i], [class*="spinner" i]')).some(visible);
+            const loadingVisible = busyPattern.test(bodyText) ||
+              Array.from(document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [role="status"], progress, .loading, .spinner, .progress, [class*="loading" i], [class*="spinner" i], [class*="progress" i], [class*="skeleton" i], [data-state="loading"], [data-loading="true"]')).some(visible);
             return {
               challengeDetected,
               retryVisible,
@@ -6234,6 +6980,43 @@ final class BrowserWebSearchService: NSObject {
             }
         }
         return nil
+    }
+
+    private static func humanVerificationRequiresUser(_ verification: [String: Any]) -> Bool {
+        let detected = boolValue(verification["detected"]) == true
+        let completed = boolValue(verification["completed"]) == true
+        guard detected && !completed else { return false }
+
+        if boolValue(verification["blocking"] ?? verification["challenge_blocking"]) == true {
+            return true
+        }
+
+        let hasDetailedProbe = verification.keys.contains("page_usable")
+            || verification.keys.contains("challenge_visible")
+            || verification.keys.contains("pending_state")
+            || verification.keys.contains("failed_state")
+        guard hasDetailedProbe else {
+            return false
+        }
+
+        let failed = boolValue(verification["failed_state"]) == true
+        let pending = boolValue(verification["pending_state"]) == true
+        let pageUsable = boolValue(verification["page_usable"]) == true
+        let challengeVisible = boolValue(verification["challenge_visible"]) == true
+        return !(pageUsable && !challengeVisible && !pending && !failed)
+    }
+
+    private static func toolPayloadRequiresHumanVerification(_ payload: [String: Any]) -> Bool {
+        guard boolValue(payload["requires_user_verification"]) == true else { return false }
+        if let verification = payload["human_verification"] as? [String: Any] {
+            if boolValue(payload["disabled"]) == true,
+               boolValue(verification["detected"]) == true,
+               boolValue(verification["completed"]) != true {
+                return true
+            }
+            return humanVerificationRequiresUser(verification)
+        }
+        return true
     }
 
     private static func unique(_ values: [String]) -> [String] {
@@ -7209,9 +7992,11 @@ final class BrowserWebSearchService: NSObject {
           const textOnlyChallenge = textChallenge && !challengeVisible && !hasChallengeWidget && !pendingText && !failedState;
           const completedState = tokenLength > 0 || successState || (!challengeVisible && !pendingText && !failedState && (!textChallenge || pageUsable));
           const challengeDetected = !completedState && (hasChallengeWidget || challengeVisible || pendingText || failedState || (textOnlyChallenge && !pageUsable));
+          const blocking = challengeDetected && !(pageUsable && !challengeVisible && !pendingText && !failedState);
           return JSON.stringify({
             detected: challengeDetected,
             completed: completedState,
+            blocking,
             failed_state: failedState && !completedState,
             pending_state: pendingText && !completedState,
             success_state: successState,
@@ -7243,10 +8028,34 @@ final class BrowserWebSearchService: NSObject {
             userInfo: [
                 "tab_id": activeBrowserTabID,
                 "url": webView?.url?.absoluteString ?? "",
-                "title": webView?.title ?? ""
+                "title": webView?.title ?? "",
+                "tabs": browserTabSnapshots()
+            ]
+        )
+        NotificationCenter.default.post(
+            name: .browserWebSearchServiceTabsDidChange,
+            object: webView,
+            userInfo: [
+                "active_tab_id": activeBrowserTabID,
+                "tabs": browserTabSnapshots()
             ]
         )
         scheduleLiveBrowserPreview(reason: "active_browser_changed", minimumInterval: 0.45)
+    }
+
+    private func browserTabSnapshots() -> [BrowserWebSearchTabSnapshot] {
+        browserTabs
+            .sorted { $0.key < $1.key }
+            .map { tabID, tab in
+                let title = tab.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let host = tab.url?.host?.replacingOccurrences(of: "www.", with: "") ?? ""
+                return BrowserWebSearchTabSnapshot(
+                    id: tabID,
+                    title: title?.isEmpty == false ? title! : (host.isEmpty ? "新标签页" : host),
+                    url: tab.url?.absoluteString ?? "",
+                    isActive: tabID == activeBrowserTabID
+                )
+            }
     }
 
     private func loadInitialAutomationURL(_ url: URL, in webView: WKWebView) {
@@ -7606,15 +8415,45 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func evaluateString(_ script: String) async -> String? {
-        guard let webView else { return nil }
+        (await evaluateJavaScriptString(script)).string
+    }
+
+    private func evaluateJavaScriptString(_ script: String) async -> JavaScriptEvaluation {
+        guard let webView else {
+            return JavaScriptEvaluation(
+                string: nil,
+                error: "Browser web view is not available",
+                resultType: nil,
+                resultPreview: nil
+            )
+        }
         return await withCheckedContinuation { continuation in
             webView.evaluateJavaScript(script) { result, error in
                 if let error {
                     self.logger.debug("Browser search JS failed: \(error.localizedDescription, privacy: .public)")
-                    continuation.resume(returning: nil)
+                    continuation.resume(returning: JavaScriptEvaluation(
+                        string: nil,
+                        error: error.localizedDescription,
+                        resultType: nil,
+                        resultPreview: nil
+                    ))
                     return
                 }
-                continuation.resume(returning: result as? String)
+                if let string = result as? String {
+                    continuation.resume(returning: JavaScriptEvaluation(
+                        string: string,
+                        error: nil,
+                        resultType: "string",
+                        resultPreview: nil
+                    ))
+                    return
+                }
+                continuation.resume(returning: JavaScriptEvaluation(
+                    string: nil,
+                    error: nil,
+                    resultType: result.map { String(describing: type(of: $0)) },
+                    resultPreview: result.map { String(String(describing: $0).prefix(500)) }
+                ))
             }
         }
     }
@@ -7625,6 +8464,40 @@ final class BrowserWebSearchService: NSObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func deviceDateAwareQueries(_ queries: [String]) -> [String] {
+        let normalized = unique(queries.map(normalizedQuery))
+        guard !normalized.isEmpty else { return [] }
+
+        let source = normalized.joined(separator: " ")
+        let now = Date()
+        let currentYear = Calendar.current.component(.year, from: now)
+        let isoDateText = isoSearchDateText(now)
+        let dateText = localizedSearchDateText(now)
+        let englishDateText = englishSearchDateText(now)
+        let hasExplicitRecentYear = source.range(
+            of: #"\b20(2[4-9]|3[0-9])\b"#,
+            options: .regularExpression
+        ) != nil
+        let forceDayScope = searchNeedsDayScope(source)
+        let forceFreshness = searchNeedsFreshness(source)
+
+        var expanded: [String] = []
+        for query in normalized {
+            let hasCJK = query.unicodeScalars.contains { (0x4E00...0x9FFF).contains(Int($0.value)) }
+            expanded.append(query)
+            if forceDayScope {
+                expanded.append(hasCJK ? "\(query) \(isoDateText) 今天 24小时" : "\(query) \(isoDateText) today past 24 hours")
+                expanded.append(hasCJK ? "\(query) \(dateText) 最新" : "\(query) \(englishDateText) latest")
+            } else if forceFreshness {
+                expanded.append(hasCJK ? "\(query) 最新 \(dateText)" : "\(query) latest \(englishDateText)")
+                expanded.append(hasCJK ? "\(query) 官方 更新 \(isoDateText)" : "\(query) official updated \(isoDateText)")
+            } else if !hasExplicitRecentYear {
+                expanded.append("\(query) \(currentYear)")
+            }
+        }
+        return unique(expanded)
+    }
+
     private static func freshnessExpandedQueries(
         _ queries: [String],
         originalQuery: String?
@@ -7632,7 +8505,7 @@ final class BrowserWebSearchService: NSObject {
         let source = ([originalQuery].compactMap { $0 } + queries)
             .joined(separator: " ")
         guard searchNeedsFreshness(source) else {
-            return unique(queries)
+            return deviceDateAwareQueries(queries)
         }
 
         var expanded: [String] = []
@@ -7910,6 +8783,8 @@ private struct SearchPage {
 extension Notification.Name {
     static let browserWebSearchServiceActiveBrowserDidChange =
         Notification.Name("BrowserWebSearchServiceActiveBrowserDidChange")
+    static let browserWebSearchServiceTabsDidChange =
+        Notification.Name("BrowserWebSearchServiceTabsDidChange")
     static let browserWebSearchServiceHumanVerificationStateDidChange =
         Notification.Name("BrowserWebSearchServiceHumanVerificationStateDidChange")
     static let browserWebSearchServiceLivePreviewDidChange =

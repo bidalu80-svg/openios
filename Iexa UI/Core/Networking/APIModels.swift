@@ -459,7 +459,53 @@ struct ChatCompletionRequest: Sendable {
                 continue
             }
 
+            if role == "tool" {
+                let toolUseId = (message["tool_call_id"] as? String)
+                    ?? (message["tool_use_id"] as? String)
+                    ?? ""
+                let text = (content as? String) ?? Self.renderedAnthropicText(from: content)
+                anthropicMessages.append([
+                    "role": "user",
+                    "content": [[
+                        "type": "tool_result",
+                        "tool_use_id": toolUseId,
+                        "content": text
+                    ]]
+                ])
+                continue
+            }
+
             let mappedRole = role == "assistant" ? "assistant" : "user"
+            if role == "assistant",
+               let toolCalls = message["tool_calls"] as? [[String: Any]],
+               !toolCalls.isEmpty {
+                var blocks: [[String: Any]] = []
+                if let text = content as? String, !text.isEmpty {
+                    blocks.append(["type": "text", "text": text])
+                } else if let parts = content as? [[String: Any]] {
+                    blocks.append(contentsOf: parts.compactMap(Self.anthropicContentBlock(from:)))
+                }
+                for call in toolCalls {
+                    guard let function = call["function"] as? [String: Any],
+                          let name = function["name"] as? String,
+                          !name.isEmpty else {
+                        continue
+                    }
+                    let input = Self.anthropicToolInput(from: function["arguments"])
+                    blocks.append([
+                        "type": "tool_use",
+                        "id": (call["id"] as? String) ?? UUID().uuidString,
+                        "name": name,
+                        "input": input
+                    ])
+                }
+                anthropicMessages.append([
+                    "role": "assistant",
+                    "content": blocks.isEmpty ? [["type": "text", "text": ""]] : blocks
+                ])
+                continue
+            }
+
             if let text = content as? String {
                 anthropicMessages.append([
                     "role": mappedRole,
@@ -481,6 +527,15 @@ struct ChatCompletionRequest: Sendable {
         ]
         if !systemParts.isEmpty {
             data["system"] = systemParts.joined(separator: "\n\n")
+        }
+        let anthropicTools = tools?.compactMap(Self.anthropicTool(from:)) ?? []
+        if !anthropicTools.isEmpty {
+            data["tools"] = anthropicTools
+        }
+        if !anthropicTools.isEmpty,
+           let toolChoice,
+           let anthropicToolChoice = Self.anthropicToolChoice(from: toolChoice) {
+            data["tool_choice"] = anthropicToolChoice
         }
         return data
     }
@@ -645,6 +700,28 @@ struct ChatCompletionRequest: Sendable {
         if type == "text" {
             return ["type": "text", "text": part["text"] as? String ?? ""]
         }
+        if type == "tool_use" {
+            guard let id = part["id"] as? String,
+                  let name = part["name"] as? String else {
+                return nil
+            }
+            return [
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": (part["input"] as? [String: Any]) ?? [:]
+            ]
+        }
+        if type == "tool_result" {
+            guard let toolUseId = part["tool_use_id"] as? String else {
+                return nil
+            }
+            return [
+                "type": "tool_result",
+                "tool_use_id": toolUseId,
+                "content": renderedAnthropicText(from: part["content"])
+            ]
+        }
         if type == "image_url",
            let imageURL = part["image_url"] as? [String: Any],
            let url = imageURL["url"] as? String,
@@ -665,6 +742,79 @@ struct ChatCompletionRequest: Sendable {
             ]
         }
         return nil
+    }
+
+    private nonisolated static func anthropicTool(from tool: [String: Any]) -> [String: Any]? {
+        let function = tool["function"] as? [String: Any] ?? tool
+        guard let name = function["name"] as? String,
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        var result: [String: Any] = [
+            "name": name,
+            "input_schema": (function["parameters"] as? [String: Any]) ?? [
+                "type": "object",
+                "properties": [:]
+            ]
+        ]
+        if let description = function["description"] as? String,
+           !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            result["description"] = description
+        }
+        return result
+    }
+
+    private nonisolated static func anthropicToolChoice(from value: String) -> [String: Any]? {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "", "auto":
+            return ["type": "auto"]
+        case "none":
+            return ["type": "none"]
+        case "required", "any":
+            return ["type": "any"]
+        default:
+            return nil
+        }
+    }
+
+    private nonisolated static func anthropicToolInput(from value: Any?) -> [String: Any] {
+        if let dict = value as? [String: Any] {
+            return dict
+        }
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return [:] }
+            if let data = trimmed.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data) {
+                if let dict = object as? [String: Any] {
+                    return dict
+                }
+                return ["value": object]
+            }
+            return ["value": trimmed]
+        }
+        guard let value else { return [:] }
+        return ["value": value]
+    }
+
+    private nonisolated static func renderedAnthropicText(from value: Any?) -> String {
+        guard let value else { return "" }
+        if let string = value as? String { return string }
+        if let array = value as? [Any] {
+            return array.map { renderedAnthropicText(from: $0) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+        }
+        if let dict = value as? [String: Any] {
+            if let text = dict["text"] as? String { return text }
+            if let content = dict["content"] { return renderedAnthropicText(from: content) }
+            if JSONSerialization.isValidJSONObject(dict),
+               let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
+               let string = String(data: data, encoding: .utf8) {
+                return string
+            }
+        }
+        return "\(value)"
     }
 }
 

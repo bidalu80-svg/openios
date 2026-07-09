@@ -234,7 +234,7 @@ struct TypingIndicator: View {
         Canvas { context, size in
             for index in 0..<3 {
                 let point = dotPoint(index: index, progress: progress)
-                let diameter = CGFloat(4.8) * dotScale(index: index, progress: progress)
+                let diameter = CGFloat(3.2) * dotScale(index: index, progress: progress)
                 let center = CGPoint(
                     x: size.width / 2 + point.x,
                     y: size.height / 2 + point.y

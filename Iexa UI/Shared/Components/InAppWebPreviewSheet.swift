@@ -38,6 +38,8 @@ struct InAppWebPreviewSheet: View {
     @State private var resolvedDouyinSourceID = ""
     @State private var resolvedXiaohongshuSourceID = ""
     @State private var automationControlState: AutomationBrowserControlState = .browsing
+    @State private var originalURLBeforeTranslation: URL?
+    @State private var automationTabs: [BrowserWebSearchTabSnapshot] = []
     @FocusState private var addressFocused: Bool
 
     var body: some View {
@@ -74,11 +76,16 @@ struct InAppWebPreviewSheet: View {
                     }
                 }
             }
-            .navigationTitle(state.title.isEmpty ? hostLabel : state.title)
+            .navigationTitle(state.title.isEmpty ? navigationFallbackTitle : state.title)
             .navigationBarTitleDisplayMode(.inline)
             .safeAreaInset(edge: .top, spacing: 0) {
-                if showsAddressBar {
-                    addressBar
+                VStack(spacing: 0) {
+                    if usesAutomationBrowser {
+                        browserTabStrip
+                    }
+                    if showsAddressBar {
+                        addressBar
+                    }
                 }
             }
             .toolbar {
@@ -99,6 +106,29 @@ struct InAppWebPreviewSheet: View {
                         Image(systemName: "arrow.clockwise")
                     }
 
+                    Menu {
+                        Button {
+                            translateCurrentPage(to: "zh-CN")
+                        } label: {
+                            Label("翻译成中文", systemImage: "translate")
+                        }
+                        Button {
+                            translateCurrentPage(to: "en")
+                        } label: {
+                            Label("翻译成英文", systemImage: "textformat")
+                        }
+                        if isViewingTranslatedPage {
+                            Button {
+                                restoreOriginalPage()
+                            } label: {
+                                Label("显示原网页", systemImage: "arrow.uturn.backward")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "translate")
+                    }
+                    .disabled(!canTranslateActivePage)
+
                     Button {
                         UIApplication.shared.open(state.currentURL ?? url)
                     } label: {
@@ -111,6 +141,7 @@ struct InAppWebPreviewSheet: View {
             await resolveSocialMediaIfNeeded()
         }
         .onAppear {
+            refreshAutomationTabs()
             addressText = Self.addressText(for: activeURL)
         }
         .onChange(of: state.pageVideoURL) { _, _ in
@@ -139,6 +170,14 @@ struct InAppWebPreviewSheet: View {
                 dismiss()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .browserWebSearchServiceTabsDidChange)) { _ in
+            guard usesAutomationBrowser else { return }
+            refreshAutomationTabs()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .browserWebSearchServiceActiveBrowserDidChange)) { _ in
+            guard usesAutomationBrowser else { return }
+            refreshAutomationTabs()
+        }
         .sheet(item: $playingVideo) { item in
             WebPreviewVideoPlayerSheet(url: item.url, refererURL: activeURL)
         }
@@ -162,7 +201,31 @@ struct InAppWebPreviewSheet: View {
     }
 
     private var activeURL: URL {
-        state.currentURL ?? url
+        if let currentURL = state.currentURL {
+            return currentURL
+        }
+        if usesAutomationBrowser {
+            return URL(string: "about:blank")!
+        }
+        return url
+    }
+
+    private var navigationFallbackTitle: String {
+        if usesAutomationBrowser && state.currentURL == nil {
+            return "新标签页"
+        }
+        return hostLabel
+    }
+
+    private var canTranslateActivePage: Bool {
+        guard !activeURL.isFileURL else { return false }
+        let scheme = activeURL.scheme?.lowercased()
+        return scheme == "http" || scheme == "https"
+    }
+
+    private var isViewingTranslatedPage: Bool {
+        guard let host = activeURL.host?.lowercased() else { return false }
+        return host.contains("translate.google.")
     }
 
     private var douyinTaskID: String {
@@ -207,6 +270,121 @@ struct InAppWebPreviewSheet: View {
             Rectangle()
                 .fill(theme.divider.opacity(0.7))
                 .frame(height: 0.5)
+        }
+    }
+
+    private var browserTabStrip: some View {
+        HStack(spacing: 8) {
+            Button {
+                Haptics.play(.light)
+                BrowserWebSearchService.shared.createAutomationBrowserTab()
+                refreshAutomationTabs()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 15, weight: .bold))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(canCreateAutomationTab ? theme.brandPrimary : theme.textTertiary.opacity(0.45))
+            .disabled(!canCreateAutomationTab)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(displayAutomationTabs) { tab in
+                        browserTabChip(tab)
+                    }
+                }
+                .padding(.vertical, 7)
+            }
+
+            Text(tabPageText)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(theme.textTertiary)
+                .monospacedDigit()
+                .frame(minWidth: 34, alignment: .trailing)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 43)
+        .background(theme.surfaceContainer)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(theme.divider.opacity(0.65))
+                .frame(height: 0.5)
+        }
+    }
+
+    private var displayAutomationTabs: [BrowserWebSearchTabSnapshot] {
+        if automationTabs.isEmpty {
+            return [
+                BrowserWebSearchTabSnapshot(
+                    id: 1,
+                    title: state.title.isEmpty ? navigationFallbackTitle : state.title,
+                    url: activeURL.absoluteString,
+                    isActive: true
+                )
+            ]
+        }
+        return automationTabs
+    }
+
+    private var activeAutomationTabIndex: Int {
+        displayAutomationTabs.firstIndex(where: { $0.isActive }) ?? 0
+    }
+
+    private var tabPageText: String {
+        "\(activeAutomationTabIndex + 1)/\(max(displayAutomationTabs.count, 1))"
+    }
+
+    private var canCreateAutomationTab: Bool {
+        displayAutomationTabs.count < 3
+    }
+
+    private func browserTabChip(_ tab: BrowserWebSearchTabSnapshot) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: tab.isActive ? "globe.asia.australia.fill" : "globe")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(tab.isActive ? theme.brandPrimary : theme.textTertiary)
+            Text(tab.title)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(tab.isActive ? theme.textPrimary : theme.textSecondary)
+                .frame(maxWidth: 132, alignment: .leading)
+
+            Button {
+                Haptics.play(.light)
+                BrowserWebSearchService.shared.closeAutomationBrowserTab(tab.id)
+                refreshAutomationTabs()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(theme.textTertiary)
+                    .frame(width: 16, height: 16)
+            }
+            .buttonStyle(.plain)
+            .disabled(displayAutomationTabs.count <= 1)
+            .opacity(displayAutomationTabs.count <= 1 ? 0.35 : 1)
+        }
+        .padding(.leading, 9)
+        .padding(.trailing, 5)
+        .frame(height: 28)
+        .background(
+            Capsule(style: .continuous)
+                .fill(tab.isActive
+                    ? theme.brandPrimary.opacity(theme.isDark ? 0.22 : 0.13)
+                    : theme.surfaceContainerHighest.opacity(theme.isDark ? 0.34 : 0.72))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(tab.isActive
+                    ? theme.brandPrimary.opacity(0.42)
+                    : theme.cardBorder.opacity(0.38), lineWidth: 0.75)
+        )
+        .contentShape(Capsule(style: .continuous))
+        .onTapGesture {
+            Haptics.play(.light)
+            BrowserWebSearchService.shared.activateAutomationBrowserTab(tab.id)
+            refreshAutomationTabs()
         }
     }
 
@@ -279,8 +457,41 @@ struct InAppWebPreviewSheet: View {
     private func navigateFromAddressBar() {
         guard let destination = Self.normalizedAddressURL(addressText) else { return }
         addressFocused = false
+        originalURLBeforeTranslation = nil
         addressText = Self.addressText(for: destination)
         state.webView?.load(URLRequest(url: destination))
+    }
+
+    private func refreshAutomationTabs() {
+        guard usesAutomationBrowser else { return }
+        automationTabs = BrowserWebSearchService.shared.currentTabSnapshots
+    }
+
+    private func translateCurrentPage(to language: String) {
+        guard canTranslateActivePage else { return }
+        let sourceURL = originalURLFromTranslatedPage(activeURL) ?? activeURL
+        guard let translatedURL = Self.googleTranslateURL(for: sourceURL, targetLanguage: language) else { return }
+        originalURLBeforeTranslation = sourceURL
+        addressFocused = false
+        addressText = Self.addressText(for: translatedURL)
+        state.webView?.load(URLRequest(url: translatedURL))
+    }
+
+    private func restoreOriginalPage() {
+        guard let original = originalURLBeforeTranslation ?? originalURLFromTranslatedPage(activeURL) else { return }
+        originalURLBeforeTranslation = nil
+        addressFocused = false
+        addressText = Self.addressText(for: original)
+        state.webView?.load(URLRequest(url: original))
+    }
+
+    private func originalURLFromTranslatedPage(_ translatedURL: URL) -> URL? {
+        guard let components = URLComponents(url: translatedURL, resolvingAgainstBaseURL: false),
+              components.host?.lowercased().contains("translate.google.") == true,
+              let raw = components.queryItems?.first(where: { $0.name == "u" })?.value else {
+            return nil
+        }
+        return URL(string: raw)
     }
 
     private static func addressText(for url: URL) -> String {
@@ -304,6 +515,16 @@ struct InAppWebPreviewSheet: View {
         let allowed = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+"))
         let encodedQuery = raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? raw
         return URL(string: "https://www.baidu.com/s?wd=\(encodedQuery)")
+    }
+
+    private static func googleTranslateURL(for sourceURL: URL, targetLanguage: String) -> URL? {
+        var components = URLComponents(string: "https://translate.google.com/translate")
+        components?.queryItems = [
+            URLQueryItem(name: "sl", value: "auto"),
+            URLQueryItem(name: "tl", value: targetLanguage),
+            URLQueryItem(name: "u", value: sourceURL.absoluteString)
+        ]
+        return components?.url
     }
 
     private var playableVideoURL: URL? {

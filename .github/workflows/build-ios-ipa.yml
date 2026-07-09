@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     env:
       IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
       IOS_SIGNING_IDENTITY: ${{ secrets.IOS_SIGNING_IDENTITY }}

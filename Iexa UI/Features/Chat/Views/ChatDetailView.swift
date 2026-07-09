@@ -189,6 +189,58 @@ private struct AgentActivityStep: Identifiable, Hashable {
     }
 }
 
+private enum AgentToolBlockStatus: String, Hashable {
+    case streaming
+    case pending
+    case running
+    case success
+    case failed
+    case cancelled
+    case timeout
+
+    var isRunning: Bool {
+        self == .streaming || self == .pending || self == .running
+    }
+
+    var isFailure: Bool {
+        self == .failed || self == .timeout || self == .cancelled
+    }
+}
+
+private struct AgentToolBlock: Identifiable, Hashable {
+    enum Kind: String, Hashable {
+        case thinking
+        case text
+        case toolUse
+        case info
+        case status
+        case file
+        case command
+    }
+
+    let id: String
+    let kind: Kind
+    let content: String
+    let status: AgentToolBlockStatus?
+    let title: String
+    let toolName: String
+    let toolArgs: String
+    let sortOrder: Double
+    let durationText: String?
+    let browserURL: String?
+    let imageFilePath: String?
+    let outputReference: String?
+    let outputByteCount: Int?
+    let outputLineCount: Int?
+    let file: LocalAlpineWrittenFile?
+    let filePaths: [String]
+    let command: String?
+    let cwd: String?
+    let previewThumbnailReference: String?
+    let previewOpenURL: String?
+    let previewFile: ChatMessageFile?
+}
+
 private struct CollapsedStatusGroup {
     let startIndex: Int
     let action: String
@@ -548,6 +600,282 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return nil
     }
 
+    private static func activityStep(from block: AgentToolBlock) -> AgentActivityStep {
+        let stepKind: AgentActivityStep.Kind
+        switch block.kind {
+        case .toolUse:
+            stepKind = .tool
+        case .file:
+            stepKind = .file
+        case .command:
+            stepKind = .command
+        case .thinking, .text, .info, .status:
+            stepKind = .status
+        }
+
+        let detail = block.toolArgs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? block.content
+            : block.toolArgs
+
+        return AgentActivityStep(
+            id: block.id,
+            sortOrder: block.sortOrder,
+            kind: stepKind,
+            title: block.title,
+            detail: detail,
+            isRunning: block.status?.isRunning == true,
+            failed: block.status?.isFailure == true,
+            outputPreview: block.content,
+            fullOutput: block.outputReference == nil ? block.content : nil,
+            outputReference: block.outputReference,
+            outputByteCount: block.outputByteCount,
+            outputLineCount: block.outputLineCount,
+            file: block.file,
+            filePaths: block.filePaths,
+            command: block.command,
+            cwd: block.cwd,
+            durationText: block.durationText,
+            previewThumbnailReference: block.previewThumbnailReference,
+            previewOpenURL: block.previewOpenURL,
+            previewFile: block.previewFile
+        )
+    }
+
+    private static func toolBlock(
+        for call: LocalAlpineToolCall,
+        file matchedFile: LocalAlpineWrittenFile?,
+        fallbackIndex: Int
+    ) -> AgentToolBlock {
+        let title = displayTitle(for: call, file: matchedFile)
+        let detail = call.displayDetail
+        let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let reference = call.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outputReference = reference?.isEmpty == false ? reference : nil
+
+        return AgentToolBlock(
+            id: "tool-\(call.id)",
+            kind: .toolUse,
+            content: output,
+            status: toolBlockStatus(for: call),
+            title: title,
+            toolName: call.name,
+            toolArgs: detail.isEmpty ? title : detail,
+            sortOrder: toolSortOrder(call, fallbackIndex: fallbackIndex),
+            durationText: durationText(for: call),
+            browserURL: call.browserURL,
+            imageFilePath: call.imageFilePath,
+            outputReference: outputReference,
+            outputByteCount: call.outputByteCount,
+            outputLineCount: call.outputLineCount,
+            file: matchedFile,
+            filePaths: call.filePaths,
+            command: call.command,
+            cwd: call.cwd,
+            previewThumbnailReference: toolCallThumbnailReference(for: call, file: matchedFile),
+            previewOpenURL: toolCallPreviewOpenTarget(for: call, file: matchedFile),
+            previewFile: nil
+        )
+    }
+
+    private static func fileBlock(for file: LocalAlpineWrittenFile, fallbackIndex: Int) -> AgentToolBlock {
+        AgentToolBlock(
+            id: "file-\(file.path)",
+            kind: .file,
+            content: file.previewLines(limit: 10).joined(separator: "\n"),
+            status: .success,
+            title: "写入 \(file.fileName)",
+            toolName: "file_write",
+            toolArgs: file.path,
+            sortOrder: fallbackStepSortOrder(index: fallbackIndex, bucket: 1),
+            durationText: nil,
+            browserURL: nil,
+            imageFilePath: isImagePath(file.path) ? file.path : nil,
+            outputReference: nil,
+            outputByteCount: nil,
+            outputLineCount: nil,
+            file: file,
+            filePaths: [file.path],
+            command: nil,
+            cwd: nil,
+            previewThumbnailReference: isImagePath(file.path) ? file.path : nil,
+            previewOpenURL: nil,
+            previewFile: nil
+        )
+    }
+
+    private static func commandBlock(for result: LocalAlpineAgentCommandResult, fallbackIndex: Int) -> AgentToolBlock? {
+        let command = result.command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty, command.lowercased() != "write_files" else { return nil }
+        let reference = result.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let outputReference = reference?.isEmpty == false ? reference : nil
+
+        return AgentToolBlock(
+            id: "command-\(fallbackIndex)-\(command.hashValue)",
+            kind: .command,
+            content: result.outputPreview,
+            status: result.failed ? .failed : .success,
+            title: commandStepTitle(for: command, failed: result.failed),
+            toolName: "shell_execute",
+            toolArgs: command,
+            sortOrder: fallbackStepSortOrder(index: fallbackIndex, bucket: 2),
+            durationText: nil,
+            browserURL: nil,
+            imageFilePath: nil,
+            outputReference: outputReference,
+            outputByteCount: result.outputByteCount,
+            outputLineCount: result.outputLineCount,
+            file: nil,
+            filePaths: [],
+            command: command,
+            cwd: result.cwd,
+            previewThumbnailReference: nil,
+            previewOpenURL: Self.localWebPreviewTarget(in: result.outputPreview),
+            previewFile: nil
+        )
+    }
+
+    private static func statusToolBlocks(
+        from statusHistory: [ChatStatusUpdate],
+        officePreviewReferences: [String],
+        officeDocumentFiles: [ChatMessageFile]
+    ) -> [AgentToolBlock] {
+        let groups = collapsedStatusGroups(from: statusHistory) { _, action in
+            if action.contains("local_alpine_agent") || action.contains("local_alpine_tool") {
+                return false
+            }
+            return action.contains("web_search")
+                || action.contains("browser_web_search")
+                || action == "browser_use"
+                || action.hasPrefix("browser.")
+                || action.contains("code_interpreter")
+                || action.contains("image_generation")
+                || action.contains("get_readable")
+                || action.contains("readable")
+                || action.contains("local_native_tool")
+                || action.contains("local_office_agent")
+        }
+
+        return groups.compactMap { group in
+            guard let status = group.statuses.last else { return nil }
+            let action = group.action
+            let title = title(for: status, action: action)
+            let detail = statusDetail(
+                for: group.statuses,
+                fallbackTitle: title
+            )
+            let output = statusPreviewText(for: group.statuses)
+            let statusValue = statusBlockStatus(for: group.statuses)
+            let previewFile = action.contains("local_office_agent") ? officeDocumentFiles.first : nil
+
+            return AgentToolBlock(
+                id: "status-\(group.startIndex)-\(group.key)",
+                kind: .status,
+                content: output.isEmpty ? detail : output,
+                status: statusValue,
+                title: title,
+                toolName: action,
+                toolArgs: detail,
+                sortOrder: statusSortOrder(group),
+                durationText: durationText(for: group.statuses, isRunning: statusValue.isRunning),
+                browserURL: statusOpenURL(for: group.statuses, action: action),
+                imageFilePath: nil,
+                outputReference: nil,
+                outputByteCount: nil,
+                outputLineCount: nil,
+                file: nil,
+                filePaths: [],
+                command: nil,
+                cwd: nil,
+                previewThumbnailReference: statusThumbnailReference(
+                    for: group.statuses,
+                    action: action,
+                    officePreviewReferences: officePreviewReferences
+                ),
+                previewOpenURL: statusOpenURL(for: group.statuses, action: action),
+                previewFile: previewFile
+            )
+        }
+    }
+
+    private static func localStatusToolBlocks(from statusHistory: [ChatStatusUpdate]) -> [AgentToolBlock] {
+        let groups = collapsedStatusGroups(from: statusHistory) { _, action in
+            action == "local_alpine"
+                || action == "local_alpine_agent"
+                || action == "local_alpine_tool"
+        }
+
+        return groups.compactMap { group in
+            guard let status = group.statuses.last else { return nil }
+            let action = group.action
+            guard isConcreteLocalStatus(status, action: action) else { return nil }
+
+            let title = title(for: status, action: action)
+            let detail = status.description?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? status.status?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? title
+            let statusValue = statusBlockStatus(for: group.statuses)
+
+            return AgentToolBlock(
+                id: "local-status-\(group.startIndex)-\(group.key)",
+                kind: .status,
+                content: detail,
+                status: statusValue,
+                title: title,
+                toolName: action,
+                toolArgs: detail == title ? "" : detail,
+                sortOrder: statusSortOrder(group),
+                durationText: durationText(for: group.statuses, isRunning: statusValue.isRunning),
+                browserURL: nil,
+                imageFilePath: nil,
+                outputReference: nil,
+                outputByteCount: nil,
+                outputLineCount: nil,
+                file: nil,
+                filePaths: [],
+                command: nil,
+                cwd: nil,
+                previewThumbnailReference: nil,
+                previewOpenURL: nil,
+                previewFile: nil
+            )
+        }
+    }
+
+    private static func toolBlockStatus(for call: LocalAlpineToolCall) -> AgentToolBlockStatus {
+        if call.failed { return .failed }
+        if call.isRunning { return .running }
+        return .success
+    }
+
+    private static func statusBlockStatus(for statuses: [ChatStatusUpdate]) -> AgentToolBlockStatus {
+        let text = statuses
+            .map(statusText(_:))
+            .joined(separator: " ")
+            .lowercased()
+
+        if containsAny(text, ["timeout", "timed out", "超时"]) {
+            return .timeout
+        }
+        if containsAny(text, ["cancelled", "canceled", "已取消", "取消执行"]) {
+            return .cancelled
+        }
+        if containsAny(text, ["failed", "failure", "error", "exception", "失败", "错误", "报错", "异常"]) {
+            return .failed
+        }
+        guard let latest = statuses.last else { return .success }
+        if latest.done != true {
+            if containsAny(text, ["pending", "waiting", "queued", "等待", "排队"]) {
+                return .pending
+            }
+            return .running
+        }
+        return .success
+    }
+
+    private static func containsAny(_ text: String, _ needles: [String]) -> Bool {
+        needles.contains { text.contains($0) }
+    }
+
     private static func steps(
         toolCalls: [LocalAlpineToolCall],
         writtenFiles: [LocalAlpineWrittenFile],
@@ -558,71 +886,21 @@ private struct AgentActivityItem: Identifiable, Hashable {
         officePreviewReferences: [String],
         officeDocumentFiles: [ChatMessageFile]
     ) -> [AgentActivityStep] {
-        var steps: [AgentActivityStep] = statusSteps(
+        var blocks = statusToolBlocks(
             from: statusHistory,
             officePreviewReferences: officePreviewReferences,
             officeDocumentFiles: officeDocumentFiles
         )
-        let localStatusPlaceholders = localStatusSteps(from: statusHistory)
-        steps.append(contentsOf: toolCalls.enumerated().map { index, call in
+        let localStatusPlaceholderBlocks = localStatusToolBlocks(from: statusHistory)
+
+        blocks.append(contentsOf: toolCalls.enumerated().map { index, call in
             let matchedFile = file(for: call, in: writtenFiles)
-            let title = displayTitle(for: call, file: matchedFile)
-            let detail = call.displayDetail
-            let output = call.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let reference = call.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let hasReference = !(reference?.isEmpty ?? true)
-            let previewThumbnail = toolCallThumbnailReference(for: call, file: matchedFile)
-            let previewOpenURL = toolCallPreviewOpenTarget(for: call, file: matchedFile)
-            return AgentActivityStep(
-                id: "tool-\(call.id)",
-                sortOrder: toolSortOrder(call, fallbackIndex: index),
-                kind: .tool,
-                title: title,
-                detail: detail.isEmpty ? title : detail,
-                isRunning: call.isRunning,
-                failed: call.failed,
-                outputPreview: output,
-                fullOutput: hasReference ? nil : output,
-                outputReference: hasReference ? reference : nil,
-                outputByteCount: call.outputByteCount,
-                outputLineCount: call.outputLineCount,
-                file: matchedFile,
-                filePaths: call.filePaths,
-                command: call.command,
-                cwd: call.cwd,
-                durationText: durationText(for: call),
-                previewThumbnailReference: previewThumbnail,
-                previewOpenURL: previewOpenURL,
-                previewFile: nil
-            )
+            return toolBlock(for: call, file: matchedFile, fallbackIndex: index)
         })
 
-        let existingFilePaths = Set(steps.compactMap { $0.file?.path })
+        let existingFilePaths = Set(blocks.compactMap { $0.file?.path })
         for (index, file) in writtenFiles.filter({ !existingFilePaths.contains($0.path) }).enumerated() {
-            steps.append(
-                AgentActivityStep(
-                    id: "file-\(file.path)",
-                    sortOrder: fallbackStepSortOrder(index: index, bucket: 1),
-                    kind: .file,
-                    title: "写入 \(file.fileName)",
-                    detail: file.path,
-                    isRunning: false,
-                    failed: false,
-                    outputPreview: file.previewLines(limit: 10).joined(separator: "\n"),
-                    fullOutput: nil,
-                    outputReference: nil,
-                    outputByteCount: nil,
-                    outputLineCount: nil,
-                    file: file,
-                    filePaths: [file.path],
-                    command: nil,
-                    cwd: nil,
-                    durationText: nil,
-                    previewThumbnailReference: nil,
-                    previewOpenURL: nil,
-                    previewFile: nil
-                )
-            )
+            blocks.append(fileBlock(for: file, fallbackIndex: index))
         }
 
         let existingCommands = Set(toolCalls.compactMap { call -> String? in
@@ -635,35 +913,12 @@ private struct AgentActivityItem: Identifiable, Hashable {
             guard !command.isEmpty, command.lowercased() != "write_files" else { continue }
             guard !existingCommands.contains(command) else { continue }
             guard !Self.commandDuplicatesStructuredTool(command, toolPathsByName: structuredToolPathsByName) else { continue }
-            let reference = result.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let hasReference = !(reference?.isEmpty ?? true)
-            let previewOpenURL = Self.localWebPreviewTarget(in: result.outputPreview)
-            steps.append(
-                AgentActivityStep(
-                    id: "command-\(index)-\(command.hashValue)",
-                    sortOrder: fallbackStepSortOrder(index: index, bucket: 2),
-                    kind: .command,
-                    title: commandStepTitle(for: command, failed: result.failed),
-                    detail: command,
-                    isRunning: false,
-                    failed: result.failed,
-                    outputPreview: result.outputPreview,
-                    fullOutput: hasReference ? nil : result.outputPreview,
-                    outputReference: hasReference ? reference : nil,
-                    outputByteCount: result.outputByteCount,
-                    outputLineCount: result.outputLineCount,
-                    file: nil,
-                    filePaths: [],
-                    command: command,
-                    cwd: result.cwd,
-                    durationText: nil,
-                    previewThumbnailReference: nil,
-                    previewOpenURL: previewOpenURL,
-                    previewFile: nil
-                )
-            )
+            if let block = commandBlock(for: result, fallbackIndex: index) {
+                blocks.append(block)
+            }
         }
 
+        let steps = blocks.map { activityStep(from: $0) }
         let concreteSteps = steps.filter { step in
             switch step.kind {
             case .status:
@@ -676,7 +931,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 return true
             }
         }
-        let visibleSteps = concreteSteps.isEmpty ? localStatusPlaceholders : concreteSteps
+        let visibleSteps = concreteSteps.isEmpty
+            ? localStatusPlaceholderBlocks.map { activityStep(from: $0) }
+            : concreteSteps
         return orderedActivitySteps(visibleSteps)
     }
 
@@ -2295,6 +2552,10 @@ struct ChatDetailView: View {
     /// Keeps a newly sent turn anchored at the top of the viewport until
     /// the user explicitly follows the bottom again.
     @State private var pinCurrentTurnStartForLatestTurn = false
+    /// Stable user-message anchor for the currently pinned turn. Without this,
+    /// assistant placeholders/tool rows appended after send can re-resolve the
+    /// "current turn" and occasionally fall back to bottom pinning.
+    @State private var pinnedCurrentTurnStartMessageId: String?
     /// Set when the user explicitly follows the bottom during streaming.
     /// This prevents the current-turn-start pin from pulling the transcript
     /// back upward when the stream finishes.
@@ -4000,6 +4261,7 @@ struct ChatDetailView: View {
         if loadedCount > 0 {
             isScrolledUp = false
             pinCurrentTurnStartForLatestTurn = false
+            pinnedCurrentTurnStartMessageId = nil
             try? await Task.sleep(nanoseconds: 60_000_000) // 60ms layout settle
             scrollPosition.scrollTo(edge: .bottom)
         }
@@ -4251,13 +4513,8 @@ struct ChatDetailView: View {
         // Populates the chat input and sends immediately — same pattern as suggestion taps.
         .onReceive(NotificationCenter.default.publisher(for: .vizSendPrompt)) { notification in
             guard let text = notification.userInfo?["text"] as? String, !text.isEmpty else { return }
-            if viewModel.isStreaming {
-                // Queue the prompt — set input but don't send while the model is busy
-                viewModel.inputText = text
-            } else {
-                viewModel.inputText = text
-                Task { await viewModel.sendMessage() }
-            }
+            viewModel.inputText = text
+            Task { await viewModel.sendMessage() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .textSelectionActionRequested)) { notification in
             handleTextSelectionAction(notification)
@@ -4634,8 +4891,12 @@ struct ChatDetailView: View {
                 text: $vm.inputText,
                 attachments: $vm.attachments,
                 placeholder: placeholderText,
-                isEnabled: !vm.isStreaming || vm.canSendWhileStreaming,
+                isEnabled: true,
                 onSend: {
+                    isScrolledUp = false
+                    pinCurrentTurnStartForLatestTurn = true
+                    pinnedCurrentTurnStartMessageId = nil
+                    userRequestedBottomFollowDuringStreaming = false
                     beginPostSendWaitingUIDelayIfNeeded()
                     Task { await viewModel.sendMessage() }
                 },
@@ -4938,6 +5199,7 @@ struct ChatDetailView: View {
             let latestVisibleRole = snapshotMessages.last?.role
             if latestVisibleRole == .user {
                 pinCurrentTurnStartForLatestTurn = true
+                pinnedCurrentTurnStartMessageId = newIds.last
                 userRequestedBottomFollowDuringStreaming = false
                 if keyboard.isVisible {
                     repinToCurrentTurnStartIfFollowing(after: 0.06)
@@ -4949,6 +5211,7 @@ struct ChatDetailView: View {
             } else if oldIds.isEmpty && !keyboard.isVisible {
                 // First visible assistant/content in a new chat — smooth ease-out.
                 pinCurrentTurnStartForLatestTurn = false
+                pinnedCurrentTurnStartMessageId = nil
                 userRequestedBottomFollowDuringStreaming = false
                 withAnimation(.easeOut(duration: 0.3)) {
                     scrollPosition.scrollTo(edge: .bottom)
@@ -5005,6 +5268,7 @@ struct ChatDetailView: View {
             if oldValue == true && newValue == false && isAnyMessageVisuallyStreaming {
                 userRequestedBottomFollowDuringStreaming = true
                 pinCurrentTurnStartForLatestTurn = false
+                pinnedCurrentTurnStartMessageId = nil
                 lastProgrammaticScrollTime = Date()
                 scrollPosition.scrollTo(edge: .bottom)
             }
@@ -5042,6 +5306,7 @@ struct ChatDetailView: View {
                 if isAnyMessageVisuallyStreaming {
                     userRequestedBottomFollowDuringStreaming = true
                     pinCurrentTurnStartForLatestTurn = false
+                    pinnedCurrentTurnStartMessageId = nil
                 }
                 if !scrollRuntime.isNearBottom {
                     scrollRuntime.isNearBottom = true
@@ -5100,10 +5365,9 @@ struct ChatDetailView: View {
                 viewState_containerHeight = newSize.height
             }
 
-            // Smooth scroll-to-bottom during active streaming:
-            // When the content height grows (new tokens pushed layout taller)
-            // and the user hasn't scrolled up, animate to the bottom so new
-            // content slides in smoothly instead of snapping.
+            // Keep the bottom pinned during active streaming. This must be a
+            // non-animated correction: repeatedly animating scrollTo(bottom)
+            // fights SwiftUI's layout measurement and creates visible jitter.
             let grew = newSize.width > oldContentHeight + 1
             if grew
                 && isAnyMessageVisuallyStreaming
@@ -5111,17 +5375,12 @@ struct ChatDetailView: View {
                 && (!pinCurrentTurnStartForLatestTurn || userRequestedBottomFollowDuringStreaming) {
                 if userRequestedBottomFollowDuringStreaming {
                     pinCurrentTurnStartForLatestTurn = false
+                    pinnedCurrentTurnStartMessageId = nil
                 }
                 let now = Date()
-                if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.32 {
+                if now.timeIntervalSince(lastProgrammaticScrollTime) > 0.08 {
                     lastProgrammaticScrollTime = now
-                    if keyboard.isVisible {
-                        scrollToLatestMessageWithoutAnimation(anchor: .bottom)
-                    } else {
-                        withAnimation(.easeOut(duration: 0.12)) {
-                            scrollPosition.scrollTo(edge: .bottom)
-                        }
-                    }
+                    scrollToLatestMessageWithoutAnimation(anchor: .bottom)
                 }
             }
         }
@@ -5152,6 +5411,7 @@ struct ChatDetailView: View {
                     // Disengage auto-scroll lock first so the streaming pump
                     // doesn't fight the scroll animation we're about to start.
                     pinCurrentTurnStartForLatestTurn = false
+                    pinnedCurrentTurnStartMessageId = nil
                     userRequestedBottomFollowDuringStreaming = true
                     isScrolledUp = false
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
@@ -5366,7 +5626,9 @@ struct ChatDetailView: View {
     }
 
     private func scrollToCurrentTurnStart(anchor: UnitPoint = .top) {
-        let turnStartId = transcriptMessages.last(where: { $0.role == .user })?.id
+        let turnStartId = pinnedCurrentTurnStartMessageId.flatMap { pinnedId in
+            transcriptMessages.contains(where: { $0.id == pinnedId }) ? pinnedId : nil
+        } ?? transcriptMessages.last(where: { $0.role == .user })?.id
             ?? transcriptMessages.last?.id
         guard let turnStartId = turnStartId else {
             scrollToBottomWithoutAnimation()
@@ -5388,6 +5650,7 @@ struct ChatDetailView: View {
             let shouldFollowBottom = userRequestedBottomFollowDuringStreaming || !pinCurrentTurnStartForLatestTurn
             guard !isScrolledUp, shouldFollowBottom, !transcriptMessages.isEmpty else { return }
             pinCurrentTurnStartForLatestTurn = false
+            pinnedCurrentTurnStartMessageId = nil
             userRequestedBottomFollowDuringStreaming = false
             lastProgrammaticScrollTime = Date()
             scrollToBottomWithoutAnimation()
@@ -5555,6 +5818,14 @@ struct ChatDetailView: View {
                     .padding(.top, Spacing.xs)
             }
 
+            if shouldShowPendingInterjection(after: message),
+               let pending = viewModel.pendingInterjection {
+                pendingInterjectionBubble(text: pending.text)
+                    .padding(.horizontal, Spacing.screenPadding)
+                    .padding(.top, Spacing.xs)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .trailing)))
+            }
+
             // ── Tool-generated images ──
             if message.role == .assistant && !isMessageVisuallyStreaming(message) {
                 let vIdx = activeVersionIndex[message.id] ?? -1
@@ -5656,6 +5927,63 @@ struct ChatDetailView: View {
         .accessibilityLabel(Text("\(message.role == .user ? "You" : "Assistant"): \(message.content.prefix(200))"))
         .transaction { transaction in
             transaction.animation = nil
+        }
+    }
+
+    private func shouldShowPendingInterjection(after message: ChatMessage) -> Bool {
+        guard viewModel.pendingInterjection != nil,
+              message.role == .assistant,
+              isMessageVisuallyStreaming(message) else {
+            return false
+        }
+        if viewModel.streamingStore.isActive,
+           let streamingMessageId = viewModel.streamingStore.streamingMessageId {
+            return message.id == streamingMessageId
+        }
+        return message.id == viewModel.messages.last(where: { candidate in
+            candidate.role == .assistant && candidate.isStreaming
+        })?.id
+    }
+
+    private func pendingInterjectionBubble(text: String) -> some View {
+        HStack(alignment: .center, spacing: 6) {
+            Spacer(minLength: 40)
+
+            Text(text)
+                .scaledFont(size: 14, weight: .medium)
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.trailing)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(theme.background.opacity(theme.isDark ? 0.82 : 0.96), in: Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(
+                            style: StrokeStyle(
+                                lineWidth: 1,
+                                lineCap: .round,
+                                dash: [4, 4]
+                            )
+                        )
+                        .foregroundStyle(theme.textTertiary.opacity(0.42))
+                )
+
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    viewModel.cancelPendingInterjection()
+                }
+                Haptics.play(.light)
+            } label: {
+                Image(systemName: "xmark")
+                    .scaledFont(size: 9, weight: .bold)
+                    .foregroundStyle(.white)
+                    .frame(width: 18, height: 18)
+                    .background(Color.red, in: Circle())
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("取消插话")
         }
     }
 
@@ -9430,6 +9758,22 @@ private extension View {
     }
 }
 
+private struct StreamingPlainTextTail: View {
+    let content: String
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Text(content)
+            .scaledFont(size: 16, context: .content)
+            .foregroundStyle(theme.textPrimary)
+            .lineSpacing(3.5)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .transaction { $0.animation = nil }
+    }
+}
+
 // MARK: - Isolated Assistant Message (Observation Isolation)
 
 /// Isolates ALL streaming store reads for assistant message content into
@@ -9609,23 +9953,17 @@ private struct IsolatedAssistantMessage: View {
                                 deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
                             )
                             if !liveProsTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                StreamingMarkdownView(
+                                streamingLiveTextView(
                                     content: liveProsTail,
-                                    isStreaming: true,
                                     authToken: authToken,
-                                    serverBaseURL: serverBaseURL,
-                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
-                                    deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
+                                    serverBaseURL: serverBaseURL
                                 )
                             }
                         } else {
-                            StreamingMarkdownView(
+                            streamingLiveTextView(
                                 content: liveTail,
-                                isStreaming: true,
                                 authToken: authToken,
-                                serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
-                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
+                                serverBaseURL: serverBaseURL
                             )
                         }
                     }
@@ -9678,23 +10016,17 @@ private struct IsolatedAssistantMessage: View {
                             )
                             // Live tail: current paragraph only, changes every tick.
                             if !liveProse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                StreamingMarkdownView(
+                                streamingLiveTextView(
                                     content: liveProse,
-                                    isStreaming: true,
                                     authToken: authToken,
-                                    serverBaseURL: serverBaseURL,
-                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
-                                    deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
+                                    serverBaseURL: serverBaseURL
                                 )
                             }
                         } else {
-                            StreamingMarkdownView(
+                            streamingLiveTextView(
                                 content: displayContent,
-                                isStreaming: true,
                                 authToken: authToken,
-                                serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
-                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
+                                serverBaseURL: serverBaseURL
                             )
                         }
                     }
@@ -9740,6 +10072,58 @@ private struct IsolatedAssistantMessage: View {
             || lower.contains("<|end_of_thought|>")
             || text.contains("◁think▷")
             || text.contains("◁/think▷")
+    }
+
+    @ViewBuilder
+    private func streamingLiveTextView(
+        content: String,
+        authToken: String?,
+        serverBaseURL: String?
+    ) -> some View {
+        if Self.shouldUsePlainStreamingText(content) {
+            StreamingPlainTextTail(content: content)
+        } else {
+            StreamingMarkdownView(
+                content: content,
+                isStreaming: true,
+                authToken: authToken,
+                serverBaseURL: serverBaseURL,
+                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
+            )
+        }
+    }
+
+    private static func shouldUsePlainStreamingText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let lower = trimmed.lowercased()
+        if lower.contains("@@@viz-start")
+            || lower.contains("<details")
+            || lower.contains("<think")
+            || lower.contains("</think")
+            || lower.contains("<table")
+            || lower.contains("<pre")
+            || lower.contains("<code") {
+            return false
+        }
+
+        let inlineMarkers = ["```", "`", "](", "![", "|", "$$", "\\(", "\\[", "**", "__", "~~"]
+        if inlineMarkers.contains(where: { trimmed.contains($0) }) {
+            return false
+        }
+
+        let blockPrefixes = ["# ", "## ", "### ", "- ", "* ", "> "]
+        if blockPrefixes.contains(where: { trimmed.hasPrefix($0) || trimmed.contains("\n\($0)") }) {
+            return false
+        }
+
+        if trimmed.range(of: #"(^|\n)\d+\.\s"#, options: .regularExpression) != nil {
+            return false
+        }
+
+        return true
     }
 
     private func assistantRenderableContentSignature(

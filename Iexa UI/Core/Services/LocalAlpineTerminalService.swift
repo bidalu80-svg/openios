@@ -1845,14 +1845,18 @@ actor LocalAlpineTerminalService {
         let etcURL = dataURL.appendingPathComponent("etc", isDirectory: true)
         let resolvURL = etcURL.appendingPathComponent("resolv.conf")
         let resolver = """
+        # managed by Iexa Local Alpine
+        nameserver 223.5.5.5
+        nameserver 119.29.29.29
         nameserver 1.1.1.1
-        nameserver 8.8.8.8
-        options timeout:2 attempts:2
+        options timeout:2 attempts:3
 
         """
 
         if let existing = try? String(contentsOf: resolvURL, encoding: .utf8),
-           existing.contains("nameserver") {
+           existing.contains("# managed by Iexa Local Alpine"),
+           existing.contains("nameserver 223.5.5.5"),
+           existing.contains("nameserver 119.29.29.29") {
             return
         }
 
@@ -3728,9 +3732,10 @@ actor LocalAlpineTerminalService {
         }
         iexa_refresh_dns() {
           cat > /etc/resolv.conf <<'EOF'
-        nameserver 1.1.1.1
-        nameserver 8.8.8.8
+        # managed by Iexa Local Alpine
         nameserver 223.5.5.5
+        nameserver 119.29.29.29
+        nameserver 1.1.1.1
         options timeout:2 attempts:3
         EOF
         }

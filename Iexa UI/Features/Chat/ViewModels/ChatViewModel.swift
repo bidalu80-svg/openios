@@ -223,6 +223,12 @@ private enum LocalContextOffloadStore {
 /// Instances are held by `ActiveChatStore` so they survive navigation transitions.
 @MainActor @Observable
 final class ChatViewModel {
+    struct PendingInterjection: Identifiable, Equatable {
+        let id: UUID
+        let text: String
+        let createdAt: Date
+    }
+
     // MARK: - Published State
 
     private static let chatWebSearchEnabledKey = "chatWebSearchEnabled"
@@ -277,6 +283,7 @@ final class ChatViewModel {
     var errorMessage: String?
     var inputText: String = ""
     var attachments: [ChatAttachment] = []
+    var pendingInterjection: PendingInterjection?
     private var lastContextBudgetRefreshSignature: String = ""
     func updateLiveContextBudgetPreview(force: Bool = false) {
         let messageFingerprint = conversation?.messages.reduce(into: 0) { total, message in
@@ -2610,12 +2617,12 @@ final class ChatViewModel {
         ),
         LocalAlpineToolCapability(
             name: "browser_use",
-            description: "Operate the shared iOS browser session with the full Minis-style primitive browser toolset.",
-            arguments: ["action navigate/screenshot/click/type/get_text/scroll/get_page_info/execute_js/find_elements/hover/get_readable/set_user_agent/set_viewport/get_backbone/fetch/new_tab/close_tab/list_tabs/get_cookies/scroll_and_collect/wait_for_dom_stable", "url?", "selector?", "label/button_text?", "text?", "coordinate_x/y?", "direction?", "amount?", "item_selector?", "scroll_count?", "keywords?", "fuzzy?", "tab_id?", "viewport_width/height?", "reset?", "full_page?", "attach_preview?", "save_to?", "timeout?", "aliases: web_fetch/fetch_url/open_url"]
+            description: "Operate the shared iPhone-size mobile Safari/WKWebView session with the full Minis-style primitive browser toolset; desktop mode is an explicit fallback only.",
+            arguments: ["action navigate/screenshot/click/type/get_text/scroll/get_page_info/execute_js/find_elements/hover/get_readable/set_user_agent/set_viewport/get_backbone/fetch/new_tab/close_tab/list_tabs/get_cookies/scroll_and_collect/wait_for_dom_stable/wait_for_image", "url?", "selector?", "node_id/nodeId?", "label/button_text?", "text?", "coordinate_x/y?", "direction?", "amount?", "find filters: text/text-contains/desc/desc-contains/id/class/package/clickable/editable/scrollable/checked/enabled", "item_selector?", "scroll_count?", "keywords?", "fuzzy?", "tab_id?", "viewport_width/height?", "reset?", "full_page?", "attach_preview?", "save_to?", "timeout?", "aliases: web_fetch/fetch_url/open_url"]
         ),
         LocalAlpineToolCapability(
             name: "web_search",
-            description: "Search the live web with the built-in browser and return source-backed results.",
+            description: "Search the live web with the built-in browser and return source-backed results. Build queries from the current device date/time, not model training-cutoff dates.",
             arguments: ["query", "queries optional", "limit optional", "screenshot optional", "aliases: search_web/browser_search"]
         ),
         LocalAlpineToolCapability(
@@ -2682,13 +2689,13 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "web_search",
-                    "description": "Search the live web with the built-in browser and return source-backed results.",
+                    "description": "Search the live web with the built-in browser and return source-backed results. Anchor relative/current queries to the current device date/time, not model training-cutoff dates.",
                     "parameters": [
                         "type": "object",
                         "properties": [
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
-                            "query": ["type": "string", "description": "Search query."],
-                            "queries": ["type": "array", "items": ["type": "string"], "description": "Optional alternate queries."],
+                            "query": ["type": "string", "description": "Search query. Include the current device year/date for current/latest/today/time-sensitive requests."],
+                            "queries": ["type": "array", "items": ["type": "string"], "description": "Optional alternate queries, preferably including a device-date/current-year variant when freshness matters."],
                             "limit": ["type": "integer", "description": "Maximum result count, 1-8."],
                             "screenshot": ["type": "boolean", "description": "Capture a thumbnail for the top result when helpful."]
                         ],
@@ -2768,7 +2775,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "browser_use",
-                    "description": "Minis-style browser automation backed by the shared iOS WKWebView session. Use primitive navigate/screenshot/action/screenshot loops; the tool-only screenshot is primary visual state and DOM/text is auxiliary.",
+                    "description": "Minis-style browser automation backed by the shared iOS WKWebView session. Default environment is iPhone-size mobile Safari/WKWebView, not desktop Chrome. Use primitive navigate/screenshot/action/screenshot loops; the tool-only screenshot is primary visual state and DOM/text is auxiliary. Fetch downloads through the current browser session. After clicking generate/export/download controls, use wait_for_image or wait_for_dom_stable before deciding the task is stuck. Switch to desktop_chrome or a wide desktop viewport only when the user explicitly asks for desktop mode or the mobile page hides the required control.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2779,18 +2786,31 @@ final class ChatViewModel {
                                     "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
                                     "scroll", "scroll_and_collect", "find_elements", "get_page_info",
                                     "get_backbone", "fetch", "new_tab", "close_tab", "list_tabs",
-                                    "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "execute_js"
+                                    "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "wait_for_image", "execute_js"
                                 ],
                                 "description": "Browser action to perform."
                             ],
                             "url": ["type": "string", "description": "HTTP, HTTPS, or file URL. Required for navigate/fetch or when loading a page before another action."],
                             "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
+                            "node_id": ["type": "string", "description": "For click/type/hover/scroll: Minis-style node id returned by find_elements."],
+                            "nodeId": ["type": "string", "description": "Compatibility alias for node_id."],
                             "label": ["type": "string", "description": "Visible control text, field label, accessible label, placeholder, name, or target hint for click/type/hover when no selector is known."],
                             "field_label": ["type": "string", "description": "For type: visible label or placeholder of the input field."],
                             "button_text": ["type": "string", "description": "For click: compatibility alias for label."],
                             "aria_label": ["type": "string", "description": "For click/type: aria-label text to match."],
                             "placeholder": ["type": "string", "description": "For type/find_elements: input placeholder to match."],
                             "target": ["type": "string", "description": "Natural-language target hint for the page element to find, click, or type into."],
+                            "text_contains": ["type": "string", "description": "For find_elements: Minis-style text-contains filter."],
+                            "desc": ["type": "string", "description": "For find_elements: exact accessible description filter."],
+                            "desc_contains": ["type": "string", "description": "For find_elements: Minis-style desc-contains filter."],
+                            "id": ["type": "string", "description": "For find_elements: DOM/resource id filter."],
+                            "class": ["type": "string", "description": "For find_elements: class/className filter."],
+                            "package": ["type": "string", "description": "For find_elements: hostname/packageName filter."],
+                            "clickable": ["type": "boolean", "description": "For find_elements: return only clickable/non-clickable elements."],
+                            "editable": ["type": "boolean", "description": "For find_elements: return only editable/non-editable elements."],
+                            "scrollable": ["type": "boolean", "description": "For find_elements: return only scrollable/non-scrollable elements."],
+                            "checked": ["type": "boolean", "description": "For find_elements: return only checked/unchecked elements."],
+                            "enabled": ["type": "boolean", "description": "For find_elements: return only enabled/disabled elements."],
                             "text": ["type": "string", "description": "Text to type into the selected element."],
                             "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click/type/hover fallback."],
                             "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click/type/hover fallback."],
@@ -2801,15 +2821,15 @@ final class ChatViewModel {
                             "full_page": ["type": "boolean", "description": "For screenshot: capture the full scrollable page instead of the current viewport."],
                             "attach_preview": ["type": "boolean", "description": "For screenshot: attach the image to chat. Defaults to false for browser observation screenshots."],
                             "script": ["type": "string", "description": "JavaScript body for execute_js."],
-                            "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile."],
+                            "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile. Default is mobile_safari. Do not use desktop_chrome unless the user asks for desktop mode or the mobile site cannot expose the needed control."],
                             "max_depth": ["type": "integer", "description": "DOM backbone depth."],
                             "scroll_count": ["type": "integer", "description": "Number of scroll/collect iterations."],
                             "item_selector": ["type": "string", "description": "Selector for scroll_and_collect items."],
                             "tab_id": ["type": "integer", "description": "Target browser tab id."],
                             "keywords": ["type": "string", "description": "Cookie name keywords."],
                             "fuzzy": ["type": "boolean", "description": "Fuzzy cookie keyword matching."],
-                            "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport."],
-                            "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport."],
+                            "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport. Default mobile viewport is 390; avoid desktop-sized widths unless explicitly needed."],
+                            "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport. Default mobile viewport is 720; avoid desktop-sized heights unless explicitly needed."],
                             "reset": ["type": "boolean", "description": "Reset viewport to default."],
                             "save_to": ["type": "string", "description": "Optional output path/name for fetch/download compatibility."],
                             "output": ["type": "string", "description": "Compatibility alias for save_to."],
@@ -2868,18 +2888,27 @@ final class ChatViewModel {
         let memoryRule = includeMemoryTools
             ? "- Memory: use `memory_write` only for durable preferences/context; use `memory_get` to recall it. Never save secrets.\n        "
             : ""
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = .current
+        let nowText = formatter.string(from: Date())
+        let timezoneName = TimeZone.current.identifier
         return """
         [Local Alpine native tools]
         Tools: `file_read`, `file_write`, `file_edit`, `read_image`, `browser_use`\(memoryToolNames), `shell_execute`. Iexa executes them in Local Alpine and returns real results.
         Rules:
+        - Current device time: \(nowText), timezone: \(timezoneName). For web/search/browser tasks involving current, latest, today, now, prices, releases, schedules, news, weather, or other time-sensitive data, build queries from this device time. Never use model training-cutoff dates as search dates.
         - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` (model read/write for local `SKILL.md` skills), `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
         - RootFS Management in Iexa has already written the selected mirrors into the active Alpine rootfs: `/etc/apk/repositories`, `/etc/pip.conf`, `/root/.config/pip/pip.conf`, `/etc/npmrc`, and `/root/.npmrc`. Trust those settings and install packages normally with `apk add --no-cache <pkg>`, `python3 -m pip install ...`, and `npm install ...`; if a package install is slow or fails, inspect those config files or suggest changing mirrors/resetting RootFS Management instead of guessing a different OS.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
-        - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
-        - Browser override: use `browser_use` like Minis: navigate/open the page, use `screenshot` to see the real viewport, decide the next primitive action, then call `click`, `type`, `scroll`, `find_elements`, `get_text`, `get_readable`, `get_backbone`, `scroll_and_collect`, or `wait_for_dom_stable`, and screenshot/read again. DOM/text is auxiliary; the hidden tool-only screenshot is the primary state for visual interaction. Do not use browser automation as an image-generation state machine.
-        - Browser interaction: treat click/type/scroll/find success as intermediate only. Continue bounded primitive `browser_use` steps in the same turn until the user's page task is complete, a final file/result is available, or the tool explicitly returns `requires_user_verification:true`. Use `find_elements` with `scan_page:true` to discover controls across the full page; if DOM matching misses a visible control, scroll it into view and click by viewport coordinates from the screenshot. Use `get_readable`, `get_text`, or `scroll_and_collect` before summarizing long pages; do not conclude from the first viewport. Screenshots are tool-only by default; do not set `attach_preview`, `show_in_chat`, or `attach_file` unless the user asks to save/download/show a screenshot. Human-verification words visible on the page are not a failure; pause only when the tool explicitly returns `requires_user_verification:true`. After the user completes verification, continue from the same shared page using the next screenshot/read result; do not reopen or reload the same URL unless required.
+        - Tool call style: when a listed tool can complete the user's request, call it directly instead of explaining that you could do it. Infer intent from the user's latest wording, prior tool results, current page/workspace context, and reasonable safe defaults. Ask only when the target/action is genuinely ambiguous, needs private credentials, or could affect data outside the requested scope.
+        - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
+        - Browser override: use `browser_use` like Minis: navigate/open the page, use `screenshot` to see the real viewport, decide the next primitive action, then call `click`, `type`, `scroll`, `find_elements`, `get_text`, `get_readable`, `get_backbone`, `scroll_and_collect`, `wait_for_dom_stable`, `wait_for_image`, or `fetch`, and screenshot/read again. DOM/text is auxiliary; the hidden tool-only screenshot is the primary state for visual interaction. After pressing a generate/export/download button, wait for the real result with `wait_for_image`, `wait_for_dom_stable`, or `fetch`; do not stop at the click.
+        - Browser interaction: treat click/type/scroll/find success as intermediate only. Continue bounded primitive `browser_use` steps in the same turn until the user's page task is complete, a final file/result is available, or the tool explicitly returns `requires_user_verification:true`. Use `find_elements` with `scan_page:true` to discover controls across the full page; when an item returns `nodeId`/`node_id`, pass that id to the next click/type/hover instead of inventing a selector. If DOM matching misses a visible control, scroll it into view and click by viewport coordinates from the screenshot. Use `get_readable`, `get_text`, or `scroll_and_collect` before summarizing long pages; do not conclude from the first viewport. Screenshots are tool-only by default; do not set `attach_preview`, `show_in_chat`, or `attach_file` unless the user asks to save/download/show a screenshot. Human-verification words visible on the page are not a failure; pause only when the tool explicitly returns `requires_user_verification:true`. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. After the user completes verification, continue from the same shared page using the next screenshot/read result; do not reopen or reload the same URL unless required.
+        - Browser auth limits: if `browser_use` reaches Google/OAuth login pages (`accounts.google.com`, `signin.google.com`, `myaccount.google.com`, `oauth2.googleapis.com`) or the page says `disallowed_useragent`, 403, or "browser is not secure", do not retry login loops. Tell the user this must be completed in system Safari/Chrome, provide the https link as a normal Markdown link, and ask them to paste the needed result back into chat.
+        - Iexa URLs: `iexa://` links are app-internal deep links. Do not pass settings/action deep links to `browser_use`; render them as Markdown links or use `iexa_open` for previewable resources. Use `browser_use` for http/https/file pages and interactive web browsing.
         - For image generation requests, use the app image-generation tool when available instead of turning `browser_use` into a generated-image-only workflow.
         - Website/app preview: for static HTML/SVG/files, use `iexa-open <path>` directly so Iexa opens the in-app preview. Use `iexa-serve <directory-or-file> <port>` or a framework dev server only when the project actually requires localhost; start long-running servers in the background with stdout/stderr redirected to a log, verify quickly, run `iexa-open http://localhost:<port>/`, and give that URL. Never run a foreground long-lived server as a normal shell step.
         \(memoryRule)- Large outputs may include `output_reference`; read that path only if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
@@ -2957,15 +2986,15 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": "web_search",
-                        "description": "Search the live web with the iOS built-in browser when the answer may require current, recent, external, source-backed, or uncertain information. Infer the search query from the user's natural language; the user does not need to say search/browse explicitly.",
+                        "description": "Search the live web with the iOS built-in browser when the answer may require current, recent, external, source-backed, or uncertain information. Infer the search query from the user's natural language and anchor relative/current queries to the current device date/time, not model training-cutoff dates; include today's date/year when freshness matters.",
                         "parameters": [
                             "type": "object",
                             "properties": [
-                                "query": ["type": "string", "description": "A concise search query extracted from the user's request."],
+                            "query": ["type": "string", "description": "A concise search query extracted from the user's request; use the current device date/year for current/latest/today/time-sensitive requests."],
                                 "queries": [
                                     "type": "array",
                                     "items": ["type": "string"],
-                                    "description": "Optional alternate search queries for better recall."
+                                    "description": "Optional alternate search queries for better recall, including a current device date/year variant when freshness matters."
                                 ],
                                 "limit": ["type": "integer", "description": "Number of sources to return, 1-8."],
                                 "screenshot": ["type": "boolean", "description": "Whether to capture a page thumbnail for the source card."]
@@ -2994,7 +3023,7 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": "browser_use",
-                        "description": "Minis-style interactive browser tool backed by the shared iOS WKWebView. Supports up to 3 tabs and primitive actions: navigate, screenshot, click, type, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, get_cookies, wait_for_dom_stable, execute_js, set_user_agent, and set_viewport. Use screenshot to see the real page, then click/type/scroll/find/read, then screenshot/read again. Treat click/type/scroll/find success as intermediate, not as page-task completion.",
+                        "description": "Minis-style interactive browser tool backed by the shared iOS WKWebView. Default environment is iPhone-size mobile Safari/WKWebView, not desktop Chrome. Supports up to 3 tabs and primitive actions: navigate, screenshot, click, type, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, get_cookies, wait_for_dom_stable, wait_for_image, execute_js, set_user_agent, and set_viewport. Use screenshot to see the real page, then click/type/scroll/find/read, then screenshot/read again. After clicking a generate/export/download button, use wait_for_image or wait_for_dom_stable before deciding the task is stuck. Treat click/type/scroll/find success as intermediate, not as page-task completion. Switch to desktop_chrome or a wide desktop viewport only when the user explicitly asks for desktop mode or the mobile page hides the required control.",
                         "parameters": [
                             "type": "object",
                             "properties": [
@@ -3005,15 +3034,30 @@ final class ChatViewModel {
                                         "navigate", "screenshot", "click", "type", "hover", "get_text", "get_readable",
                                         "scroll", "scroll_and_collect", "find_elements", "get_page_info",
                                         "get_backbone", "fetch", "new_tab", "close_tab", "list_tabs",
-                                        "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "execute_js"
+                                        "set_user_agent", "set_viewport", "get_cookies", "wait_for_dom_stable", "wait_for_image", "execute_js"
                                     ],
                                     "description": "Browser action to perform."
                                 ],
                                 "url": ["type": "string", "description": "HTTP, HTTPS, or file URL. Required for navigate/fetch or when loading a new page before another action."],
                                 "selector": ["type": "string", "description": "CSS selector or XPath for click/type/text/scroll/find actions."],
+                                "node_id": ["type": "string", "description": "For click/type/hover/scroll: Minis-style node id returned by find_elements."],
+                                "nodeId": ["type": "string", "description": "Compatibility alias for node_id."],
                                 "label": ["type": "string", "description": "For click: visible button/control text or accessible label when no selector is known."],
                                 "button_text": ["type": "string", "description": "For click: compatibility alias for label."],
                                 "aria_label": ["type": "string", "description": "For click: aria-label text to match."],
+                                "placeholder": ["type": "string", "description": "For type/find_elements: input placeholder to match."],
+                                "target": ["type": "string", "description": "Natural-language target hint for the page element to find, click, or type into."],
+                                "text_contains": ["type": "string", "description": "For find_elements: Minis-style text-contains filter."],
+                                "desc": ["type": "string", "description": "For find_elements: exact accessible description filter."],
+                                "desc_contains": ["type": "string", "description": "For find_elements: Minis-style desc-contains filter."],
+                                "id": ["type": "string", "description": "For find_elements: DOM/resource id filter."],
+                                "class": ["type": "string", "description": "For find_elements: class/className filter."],
+                                "package": ["type": "string", "description": "For find_elements: hostname/packageName filter."],
+                                "clickable": ["type": "boolean", "description": "For find_elements: return only clickable/non-clickable elements."],
+                                "editable": ["type": "boolean", "description": "For find_elements: return only editable/non-editable elements."],
+                                "scrollable": ["type": "boolean", "description": "For find_elements: return only scrollable/non-scrollable elements."],
+                                "checked": ["type": "boolean", "description": "For find_elements: return only checked/unchecked elements."],
+                                "enabled": ["type": "boolean", "description": "For find_elements: return only enabled/disabled elements."],
                                 "text": ["type": "string", "description": "Text to type into the selected element."],
                                 "coordinate_x": ["type": "integer", "description": "Viewport x coordinate for click fallback."],
                                 "coordinate_y": ["type": "integer", "description": "Viewport y coordinate for click fallback."],
@@ -3024,7 +3068,7 @@ final class ChatViewModel {
                                 "full_page": ["type": "boolean", "description": "For screenshot: capture the full scrollable page instead of the current viewport."],
                                 "attach_preview": ["type": "boolean", "description": "For screenshot: attach the image to chat. Defaults to false for browser observation screenshots."],
                                 "script": ["type": "string", "description": "JavaScript body for execute_js."],
-                                "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile."],
+                                "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile. Default is mobile_safari. Do not use desktop_chrome unless the user asks for desktop mode or the mobile site cannot expose the needed control."],
                                 "max_depth": ["type": "integer", "description": "DOM backbone depth."],
                                 "scroll_count": ["type": "integer", "description": "Number of scroll/collect iterations."],
                                 "item_selector": ["type": "string", "description": "Selector for scroll_and_collect items."],
@@ -3032,8 +3076,8 @@ final class ChatViewModel {
                                 "keywords": ["type": "string", "description": "Cookie name keywords."],
                                 "fuzzy": ["type": "boolean", "description": "Fuzzy cookie keyword matching."],
                                 "timeout": ["type": "integer", "description": "Timeout in seconds."],
-                                "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport."],
-                                "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport."],
+                                "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport. Default mobile viewport is 390; avoid desktop-sized widths unless explicitly needed."],
+                                "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport. Default mobile viewport is 720; avoid desktop-sized heights unless explicitly needed."],
                                 "reset": ["type": "boolean", "description": "Reset viewport to default."]
                             ],
                             "required": ["tool_title", "action"]
@@ -6502,10 +6546,37 @@ final class ChatViewModel {
 
     // MARK: - Sending Messages
 
+    @discardableResult
+    private func beginPendingInterjection(text: String) -> UUID {
+        let pending = PendingInterjection(id: UUID(), text: text, createdAt: .now)
+        pendingInterjection = pending
+        inputText = ""
+        return pending.id
+    }
+
+    private func clearPendingInterjection(id: UUID? = nil) {
+        guard let id else {
+            pendingInterjection = nil
+            return
+        }
+        if pendingInterjection?.id == id {
+            pendingInterjection = nil
+        }
+    }
+
+    func cancelPendingInterjection() {
+        guard let pending = pendingInterjection else { return }
+        pendingInterjection = nil
+        if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            inputText = pending.text
+        }
+    }
+
     func sendMessage() async {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let manager else { return }
+        var pendingInterjectionId: UUID?
         let isLocalAlpineInterjection = Self.isLocalAlpineInterjection(text)
         let isExplicitLocalAlpineResume = Self.isExplicitLocalAlpineResumeRequest(text)
         if isStreaming,
@@ -6514,7 +6585,9 @@ final class ChatViewModel {
                 errorMessage = "本地任务执行中可以先发送文字指导；附件请等当前步骤结束后再发。"
                 return
             }
+            let pendingId = beginPendingInterjection(text: text)
             await appendLocalAlpineGuidanceMessage(text: text)
+            clearPendingInterjection(id: pendingId)
             return
         }
         if isLocalAlpineInterjection && !isExplicitLocalAlpineResume {
@@ -6536,10 +6609,17 @@ final class ChatViewModel {
             return
         }
         if isStreaming {
-            guard canSendWhileStreaming else { return }
-            guard canStartIndependentDirectMediaGeneration(modelId: modelId, text: text) else {
-                errorMessage = "当前仍有图片/视频生成任务在进行；可以继续提交新的图片/视频生成请求，普通对话请先停止或等待完成。"
-                return
+            if isOnlyDirectMediaGenerationActive {
+                guard canStartIndependentDirectMediaGeneration(modelId: modelId, text: text) else {
+                    errorMessage = "当前仍有图片/视频生成任务在进行；可以继续提交新的图片/视频生成请求，普通对话请先停止或等待完成。"
+                    return
+                }
+            } else {
+                pendingInterjectionId = beginPendingInterjection(text: text)
+                await interruptStreamingBeforeUserInterjection()
+                guard pendingInterjection?.id == pendingInterjectionId else {
+                    return
+                }
             }
         }
         // Process audio attachments depending on transcription mode.
@@ -6776,9 +6856,14 @@ final class ChatViewModel {
             // intentionally skipped — they failed at attach-time and must be retried or removed.
         }
         if let fallbackUploadFailure {
+            clearPendingInterjection(id: pendingInterjectionId)
             inputText = currentText
             attachments = currentAttachments
             errorMessage = "Attachment upload failed: \(fallbackUploadFailure)"
+            return
+        }
+        if let pendingInterjectionId,
+           pendingInterjection?.id != pendingInterjectionId {
             return
         }
 
@@ -6900,6 +6985,7 @@ final class ChatViewModel {
         } else {
             conversation?.messages.append(userMessage)
         }
+        clearPendingInterjection(id: pendingInterjectionId)
 
         // Assistant placeholder
         let assistantMessageId = UUID().uuidString
@@ -7217,7 +7303,7 @@ final class ChatViewModel {
                     if !currentSkillIds.isEmpty { request.skillIds = currentSkillIds }
                     if useLocalAlpineNativeToolsForThisTurn {
                         do {
-                            exactUsage = try await self.streamOpenAICompatibleLocalAlpineNativeLoop(
+                            exactUsage = try await self.streamProviderLocalAlpineNativeLoop(
                                 manager: manager,
                                 initialRequest: request,
                                 assistantMessageId: assistantMessageId,
@@ -7250,7 +7336,7 @@ final class ChatViewModel {
                         }
                     } else if Self.requestUsesLocalNativeFunctionTools(request) {
                         do {
-                            exactUsage = try await self.streamOpenAICompatibleLocalNativeFunctionLoop(
+                            exactUsage = try await self.streamProviderLocalNativeFunctionLoop(
                                 manager: manager,
                                 initialRequest: request,
                                 assistantMessageId: assistantMessageId,
@@ -9634,12 +9720,14 @@ final class ChatViewModel {
         ]
         if isIPDiagnosticRequest(trimmed) {
             return """
-            printf '== local interfaces ==\\n'
-            (ip -o -4 addr show 2>/dev/null || ifconfig 2>/dev/null || hostname -I 2>/dev/null || true)
-            printf '\\n== default route ==\\n'
-            (ip route 2>/dev/null || route -n 2>/dev/null || true)
-            printf '\\n== public ip ==\\n'
+            printf '== public egress ip ==\\n'
             (curl -fsS https://api.ipify.org 2>/dev/null || wget -qO- https://api.ipify.org 2>/dev/null || true)
+            printf '\\n\\n== dns resolver ==\\n'
+            cat /etc/resolv.conf 2>/dev/null || true
+            printf '\\n== sandbox/internal interfaces, not public IP ==\\n'
+            (ip -o -4 addr show 2>/dev/null || ifconfig 2>/dev/null || hostname -I 2>/dev/null || true)
+            printf '\\n== sandbox/internal default route ==\\n'
+            (ip route 2>/dev/null || route -n 2>/dev/null || true)
             printf '\\n'
             """
         }
@@ -9941,6 +10029,75 @@ final class ChatViewModel {
         Task {
             await self.syncToServerViaTree()
         }
+    }
+
+    private func interruptStreamingBeforeUserInterjection() async {
+        streamingTask?.cancel()
+        streamingTask = nil
+
+        let interruptedTaskId = activeTaskId
+        let interruptedChatId = conversationId ?? conversation?.id
+        let apiClient = manager?.apiClient
+        Task { [interruptedTaskId, interruptedChatId, apiClient] in
+            if let taskId = interruptedTaskId, let apiClient {
+                try? await apiClient.stopTask(taskId: taskId)
+                self.logger.info("Server task interrupted by user interjection: \(taskId)")
+            } else if let chatId = interruptedChatId, let apiClient {
+                do {
+                    let taskIds = try await apiClient.getTasksForChat(chatId: chatId)
+                    for taskId in taskIds {
+                        try? await apiClient.stopTask(taskId: taskId)
+                        self.logger.info("External server task interrupted by user interjection: \(taskId)")
+                    }
+                } catch {
+                    self.logger.warning("Failed to fetch tasks for interjection stop \(chatId): \(error.localizedDescription)")
+                }
+            }
+        }
+
+        let interruptedStatus = ChatStatusUpdate(
+            action: "interruption",
+            description: "已被新消息打断",
+            done: true,
+            occurredAt: .now
+        )
+
+        if streamingStore.isActive,
+           let messageId = streamingStore.streamingMessageId,
+           let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) {
+            let result = streamingStore.abortStreaming()
+            var statusHistory = result.statusHistory
+            statusHistory.append(interruptedStatus)
+            conversation?.messages[index].content = result.content
+            conversation?.messages[index].isStreaming = false
+            conversation?.messages[index].statusHistory = statusHistory
+            if !result.sources.isEmpty {
+                conversation?.messages[index].sources = result.sources
+            }
+            conversation?.history.updateNode(id: messageId) { node in
+                node.content = result.content
+                node.done = true
+                node.statusHistory = statusHistory
+                if !result.sources.isEmpty {
+                    node.sources = result.sources
+                }
+            }
+        } else if let index = conversation?.messages.lastIndex(where: { $0.role == .assistant && $0.isStreaming }) {
+            let messageId = conversation?.messages[index].id
+            var statusHistory = conversation?.messages[index].statusHistory ?? []
+            statusHistory.append(interruptedStatus)
+            conversation?.messages[index].isStreaming = false
+            conversation?.messages[index].statusHistory = statusHistory
+            if let messageId {
+                conversation?.history.updateNode(id: messageId) { node in
+                    node.done = true
+                    node.statusHistory = statusHistory
+                }
+            }
+        }
+
+        cleanupStreaming()
+        await syncToServerViaTree()
     }
 
     @discardableResult
@@ -11648,6 +11805,7 @@ final class ChatViewModel {
             }
 
             absorbToolCalls(json["tool_calls"], replaceArguments: true)
+            absorbAnthropicToolUse(json)
         }
 
         func completedCalls() -> [LocalAlpineNativeToolCall] {
@@ -11735,6 +11893,68 @@ final class ChatViewModel {
             }
         }
 
+        private func absorbAnthropicToolUse(_ json: [String: Any]) {
+            guard let type = Self.stringValue(json["type"]) else { return }
+            switch type {
+            case "content_block_start":
+                guard let index = Self.intValue(json["index"]),
+                      let block = json["content_block"] as? [String: Any],
+                      Self.stringValue(block["type"]) == "tool_use" else {
+                    return
+                }
+                if !order.contains(index) {
+                    order.append(index)
+                }
+                var partial = partials[index] ?? Partial()
+                if let id = Self.stringValue(block["id"]), !id.isEmpty {
+                    partial.id = id
+                }
+                if let name = Self.stringValue(block["name"]), !name.isEmpty {
+                    partial.name = name
+                }
+                if let input = Self.argumentString(block["input"]), input != "{}" {
+                    partial.arguments = input
+                }
+                partials[index] = partial
+
+            case "content_block_delta":
+                guard let index = Self.intValue(json["index"]),
+                      let delta = json["delta"] as? [String: Any] else {
+                    return
+                }
+                let deltaType = Self.stringValue(delta["type"]) ?? ""
+                guard deltaType == "input_json_delta" else { return }
+                if !order.contains(index) {
+                    order.append(index)
+                }
+                var partial = partials[index] ?? Partial()
+                if let fragment = Self.stringValue(delta["partial_json"]), !fragment.isEmpty {
+                    partial.arguments += fragment
+                    partials[index] = partial
+                }
+
+            case "content_block_stop":
+                guard let index = Self.intValue(json["index"]),
+                      var partial = partials[index],
+                      partial.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+                    return
+                }
+                if partial.arguments.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    partial.arguments = "{}"
+                }
+                partials[index] = partial
+
+            case "message_delta":
+                if let delta = json["delta"] as? [String: Any],
+                   Self.stringValue(delta["stop_reason"]) == "tool_use" {
+                    sawToolFinish = true
+                }
+
+            default:
+                break
+            }
+        }
+
         private static func stringValue(_ value: Any?) -> String? {
             switch value {
             case let string as String:
@@ -11771,7 +11991,7 @@ final class ChatViewModel {
         }
     }
 
-    private func streamOpenAICompatibleLocalAlpineNativeLoop(
+    private func streamProviderLocalAlpineNativeLoop(
         manager: ConversationManager,
         initialRequest: ChatCompletionRequest,
         assistantMessageId: String,
@@ -11872,7 +12092,10 @@ final class ChatViewModel {
             }
             executedAnyTool = true
 
-            apiMessages.append(Self.openAIToolCallAssistantMessage(for: calls))
+            apiMessages.append(Self.toolCallAssistantMessage(
+                for: calls,
+                providerType: currentProviderType
+            ))
             var blockedLoopMessage: String?
             var shouldSkipRemainingCalls = false
             var skipRemainingToolMessage: String?
@@ -11883,11 +12106,12 @@ final class ChatViewModel {
                     let message = skipRemainingToolMessage
                         ?? Self.localAlpineNativeLoopGuardModelMessage(blockedLoopMessage)
                         ?? "本地工具已经返回足够结果。请直接回答用户，不要继续调用工具。"
-                    apiMessages.append([
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": message
-                    ])
+                    Self.appendToolResultMessage(
+                        callID: call.id,
+                        content: message,
+                        providerType: currentProviderType,
+                        to: &apiMessages
+                    )
                     continue
                 }
 
@@ -11899,11 +12123,12 @@ final class ChatViewModel {
                         blockedLoopMessage = decision.message
                         shouldSkipRemainingCalls = true
                     }
-                    apiMessages.append([
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": message
-                    ])
+                    Self.appendToolResultMessage(
+                        callID: call.id,
+                        content: message,
+                        providerType: currentProviderType,
+                        to: &apiMessages
+                    )
                     continue
                 }
 
@@ -11932,11 +12157,12 @@ final class ChatViewModel {
                     blockedLoopMessage = postExecutionDecision.message
                     shouldSkipRemainingCalls = true
                 }
-                apiMessages.append([
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": content
-                ])
+                Self.appendToolResultMessage(
+                    callID: call.id,
+                    content: content,
+                    providerType: currentProviderType,
+                    to: &apiMessages
+                )
                 if Self.localAlpineNativeToolShouldStopAfterResult(
                     call,
                     result: result,
@@ -12034,7 +12260,7 @@ final class ChatViewModel {
         }
     }
 
-    private func streamOpenAICompatibleLocalNativeFunctionLoop(
+    private func streamProviderLocalNativeFunctionLoop(
         manager: ConversationManager,
         initialRequest: ChatCompletionRequest,
         assistantMessageId: String,
@@ -12144,18 +12370,22 @@ final class ChatViewModel {
                 updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
             }
 
-            apiMessages.append(Self.openAIToolCallAssistantMessage(for: calls))
+            apiMessages.append(Self.toolCallAssistantMessage(
+                for: calls,
+                providerType: currentProviderType
+            ))
             var needsFinalAnswerWithoutTools = false
             var finalAnswerFallback: String?
             var pendingVisualContextMessages: [[String: Any]] = []
             for call in calls {
                 if needsFinalAnswerWithoutTools {
                     let message = "本地工具已经返回足够结果。请直接根据已有工具结果回答用户，不要继续调用工具。"
-                    apiMessages.append([
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": message
-                    ])
+                    Self.appendToolResultMessage(
+                        callID: call.id,
+                        content: message,
+                        providerType: currentProviderType,
+                        to: &apiMessages
+                    )
                     continue
                 }
 
@@ -12172,11 +12402,12 @@ final class ChatViewModel {
                     原因：本轮已经用相同参数执行过这个工具。
                     请直接根据前一次工具结果回答用户，不要继续调用同一个工具。
                     """
-                    apiMessages.append([
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": message
-                    ])
+                    Self.appendToolResultMessage(
+                        callID: call.id,
+                        content: message,
+                        providerType: currentProviderType,
+                        to: &apiMessages
+                    )
                     needsFinalAnswerWithoutTools = true
                     finalAnswerFallback = Self.localNativeFunctionLoopBlockedFallbackMessage(message)
                     continue
@@ -12192,11 +12423,12 @@ final class ChatViewModel {
                     原因：当前用户消息已经有足够的搜索/网页结果可以回答。
                     请直接根据已有网页结果回答用户，不要继续调用浏览器工具。
                     """
-                    apiMessages.append([
-                        "role": "tool",
-                        "tool_call_id": call.id,
-                        "content": message
-                    ])
+                    Self.appendToolResultMessage(
+                        callID: call.id,
+                        content: message,
+                        providerType: currentProviderType,
+                        to: &apiMessages
+                    )
                     needsFinalAnswerWithoutTools = true
                     finalAnswerFallback = Self.localNativeFunctionLoopBlockedFallbackMessage(message)
                     continue
@@ -12212,11 +12444,12 @@ final class ChatViewModel {
                 if execution.completedAssistantTurn {
                     return exactUsage
                 }
-                apiMessages.append([
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": execution.toolContent
-                ])
+                Self.appendToolResultMessage(
+                    callID: call.id,
+                    content: execution.toolContent,
+                    providerType: currentProviderType,
+                    to: &apiMessages
+                )
                 if let visualMessage = execution.modelVisualContextMessage {
                     pendingVisualContextMessages.append(visualMessage)
                 }
@@ -13688,7 +13921,82 @@ final class ChatViewModel {
         ]
     }
 
-    private static func localAlpineOpenAIToolHistoryMessages(for message: ChatMessage) -> [[String: Any]]? {
+    private static func anthropicToolCallAssistantMessage(for calls: [LocalAlpineNativeToolCall]) -> [String: Any] {
+        [
+            "role": "assistant",
+            "content": calls.map { call in
+                [
+                    "type": "tool_use",
+                    "id": call.id,
+                    "name": call.name,
+                    "input": jsonObjectFromToolArguments(call.arguments) as? [String: Any] ?? [:]
+                ]
+            }
+        ]
+    }
+
+    private static func toolCallAssistantMessage(
+        for calls: [LocalAlpineNativeToolCall],
+        providerType: ServerConfig.ProviderType?
+    ) -> [String: Any] {
+        providerType == .anthropic
+            ? anthropicToolCallAssistantMessage(for: calls)
+            : openAIToolCallAssistantMessage(for: calls)
+    }
+
+    private static func toolResultMessage(
+        callID: String,
+        content: String,
+        providerType: ServerConfig.ProviderType?
+    ) -> [String: Any] {
+        if providerType == .anthropic {
+            return [
+                "role": "user",
+                "content": [[
+                    "type": "tool_result",
+                    "tool_use_id": callID,
+                    "content": content
+                ]]
+            ]
+        }
+        return [
+            "role": "tool",
+            "tool_call_id": callID,
+            "content": content
+        ]
+    }
+
+    private static func appendToolResultMessage(
+        callID: String,
+        content: String,
+        providerType: ServerConfig.ProviderType?,
+        to messages: inout [[String: Any]]
+    ) {
+        if providerType == .anthropic,
+           var last = messages.last,
+           (last["role"] as? String) == "user",
+           var blocks = last["content"] as? [[String: Any]],
+           blocks.allSatisfy({ ($0["type"] as? String) == "tool_result" }) {
+            blocks.append([
+                "type": "tool_result",
+                "tool_use_id": callID,
+                "content": content
+            ])
+            last["content"] = blocks
+            messages[messages.count - 1] = last
+            return
+        }
+        messages.append(toolResultMessage(
+            callID: callID,
+            content: content,
+            providerType: providerType
+        ))
+    }
+
+    private static func localAlpineToolHistoryMessages(
+        for message: ChatMessage,
+        providerType: ServerConfig.ProviderType?
+    ) -> [[String: Any]]? {
         let nativeCalls = LocalAlpineNativeToolCall.decodeMetadata(
             message.metadata?["iexa_local_alpine_native_calls"]
         )
@@ -13701,14 +14009,17 @@ final class ChatViewModel {
                 redactedLocalAlpineInternalPaths(in: rawResult),
                 maxCharacters: 16_000
             )
-        var messages: [[String: Any]] = [openAIToolCallAssistantMessage(for: nativeCalls)]
-        messages.append(contentsOf: nativeCalls.map { call in
-            [
-                "role": "tool",
-                "tool_call_id": call.id,
-                "content": toolResultContent
-            ]
-        })
+        var messages: [[String: Any]] = [
+            toolCallAssistantMessage(for: nativeCalls, providerType: providerType)
+        ]
+        for call in nativeCalls {
+            appendToolResultMessage(
+                callID: call.id,
+                content: toolResultContent,
+                providerType: providerType,
+                to: &messages
+            )
+        }
         return messages
     }
 
@@ -14342,10 +14653,6 @@ final class ChatViewModel {
             in: arguments,
             keys: ["continuation_stage", "continuationStage"]
         )?.lowercased() ?? ""
-        if action == "browser.screenshot",
-           continuationStage == "focused_element_view" {
-            return nil
-        }
         for key in ["url", "link", "href", "page_url", "source", "input_url"] {
             arguments.removeValue(forKey: key)
         }
@@ -18751,7 +19058,7 @@ final class ChatViewModel {
             ? "- Shortcuts: `shortcuts.run` with `name` and optional `input`; `shortcuts.open` with `name`; `shortcuts.create` only opens the system creation screen.\n"
             : ""
         let browserActionExamples = includeBrowserTools
-            ? "- Browser fallback actions: `web.search`, `browser.readable`, `browser.screenshot`, `browser.fetch`, and `browser_use` with `browser_use_action` plus fields such as `url`, `selector`, `text`, `script`, `tab_id`, `timeout`, `screenshot`, `full_page`, `attach_preview`, and `max_length`.\n"
+            ? "- Browser fallback actions: `web.search`, `browser.readable`, `browser.screenshot`, `browser.fetch`, `browser.wait_for_image`, and `browser_use` with `browser_use_action` plus fields such as `url`, `selector`, `text`, `script`, `tab_id`, `timeout`, `screenshot`, `full_page`, `attach_preview`, and `max_length`.\n"
             : ""
         let officeActionExamples = includeOfficeTools
             ? "- Office/PDF fallback actions: `office.create_excel`, `office.create_ppt`, `office.create_word`, `office.create_pdf`, `office.delete`. Include `title`, `file_name`, structured content (`sheets`, `slides`, or `sections`), optional `theme`, and for deletion `file_url` or `latest:true`.\n"
@@ -18761,9 +19068,13 @@ final class ChatViewModel {
             : ""
         let browserInstructions = includeBrowserTools ? """
 
-        Browser override: use `browser_use` like Minis. For interactive pages, open/navigate first, use `screenshot` to see the current viewport, then issue one primitive action (`click`, `type`, `scroll`, `find_elements`, `get_text`, `get_readable`, `get_backbone`, `scroll_and_collect`, `wait_for_dom_stable`, `fetch`) and screenshot/read again. The hidden tool-only screenshot is primary evidence for visual interaction; DOM/text is auxiliary.
+        Browser override: use `browser_use` like Minis. The shared browser is an iPhone-size mobile Safari/WKWebView by default, not desktop Chrome. Do not switch to `desktop_chrome` or desktop-sized viewport unless the user explicitly asks for desktop mode or the mobile page hides the required control. For interactive pages, open/navigate first, use `screenshot` to see the current viewport, then issue one primitive action (`click`, `type`, `scroll`, `find_elements`, `get_text`, `get_readable`, `get_backbone`, `scroll_and_collect`, `wait_for_dom_stable`, `wait_for_image`, `fetch`) and screenshot/read again. After pressing a page generate/export/download button, wait for the real result with `wait_for_image` or `wait_for_dom_stable`; do not stop at the click. The hidden tool-only screenshot is primary evidence for visual interaction; DOM/text is auxiliary.
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use `browser_use` for interactive page work. Use `find_elements` with `scan_page:true` to discover controls across the full page, `screenshot` for visual state, and viewport coordinates when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or the tool explicitly returns `requires_user_verification:true`. If verification is required, the shared browser stays on the same page; after the user completes it, continue from the next screenshot/read result without reopening/reloading the same URL.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. Use `browser_use` for interactive page work. Use `find_elements` with `scan_page:true` to discover controls across the full page, reuse returned `nodeId`/`node_id` for the next click/type/hover, use `screenshot` for visual state, and use viewport coordinates when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or the tool explicitly returns `requires_user_verification:true`. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. If verification is required, the shared browser stays on the same page; after the user completes it, continue from the next screenshot/read result without reopening/reloading the same URL.
+
+        Tool call style: when a real or fallback browser/native tool can satisfy the user's request, call it directly instead of only explaining. Infer the search query, URL target, page control, or follow-up intent from the latest user message and visible context; use reasonable safe defaults; ask only when the request is genuinely ambiguous, needs credentials, or would affect data outside the requested scope.
+
+        Browser auth limits: if the shared WKWebView reaches Google/OAuth login pages (`accounts.google.com`, `signin.google.com`, `myaccount.google.com`, `oauth2.googleapis.com`) or a page reports `disallowed_useragent`, 403, or "browser is not secure", do not retry the same login flow. Tell the user to complete it in system Safari/Chrome via a normal Markdown https link and paste the needed result back into chat. `iexa://` URLs are app-internal deep links: do not pass settings/action links to `browser_use`; render them as Markdown links or use `iexa_open` for previewable resources.
         """ : ""
         let officeInstructions = includeOfficeTools ? """
 
@@ -18775,7 +19086,7 @@ final class ChatViewModel {
         """ : ""
         return """
         Iexa has on-device native iOS tools for \(joinedToolDescription). These run locally on the user's device and do not require the remote server.
-        Current device time: \(nowText), timezone: \(timezoneName). For relative requests such as "今天", "现在", "明天", or "查看日历", calculate the date range from this current device time. Do not reuse stale sample dates.
+        Current device time: \(nowText), timezone: \(timezoneName). For relative requests such as "今天", "现在", "明天", or "查看日历", calculate the date range from this current device time. For web/search/browser queries, this is the authoritative current date; do not reuse stale sample dates or model training-cutoff dates.
 
         Use them only when the user asks to \(nativeUseDescription). Do not emit this tool for ordinary conversation.
         \(officeVsAlpineInstruction)\(functionToolInstruction)If real function tools are not available, use the Markdown fallback by outputting exactly one fenced `iexa_native` JSON block and no fake tool-call syntax.
@@ -18823,6 +19134,7 @@ final class ChatViewModel {
         - Treat imperative shorthand as execution requests when the complete conversation and Local Alpine observations identify a current file, command, project, or workspace target.
         - Use the full Local Alpine observation history supplied in the request as real tool-result context. Do not ignore prior local outputs or ask the user to restate information that is already present in those observations.
         - If a demo request omits a URL, filename, or sample input, choose safe defaults and proceed: `example.com`/`example.org` for network demos and simple names like `test.lua`, `main.cpp`, or `simple_spider.py`.
+        - When a listed local, browser, or native tool can complete the user's request, use it directly. Infer follow-up intent from the current conversation, visible page, latest workspace state, and prior observations; ask only when the target/action is genuinely ambiguous, needs credentials, or could affect data outside the requested scope.
         - Do not ask for confirmation for explicit `/mnt/iexa/shared` deletes, edits, reads, checks, runs, or reruns. Ask only when the target is outside `/mnt/iexa`, destructive across many files, or genuinely unknown.
         - If the user asks you to write/run/fix/check a project or script, operate under `/mnt/iexa/shared`, verify with a bounded command, and then summarize the real result.
         - If verification/build/run fails because a command or library is missing, do one bounded Alpine dependency step such as `command -v make >/dev/null 2>&1 || apk add --no-cache make`, then rerun the relevant check. Use language package managers only for project dependencies after their runtime exists.
@@ -18982,7 +19294,7 @@ final class ChatViewModel {
             let generated = try await apiClient.generateSearchQueries(
                 model: taskModel,
                 query: query,
-                context: recentUserContextForSearch(excluding: query),
+                context: searchQueryGenerationContext(excluding: query),
                 maxQueries: 3
             )
             return Self.freshnessAwareWebSearchQueries(
@@ -19002,6 +19314,16 @@ final class ChatViewModel {
         }
     }
 
+    private func searchQueryGenerationContext(excluding query: String) -> String {
+        [
+            Self.webSearchDeviceDateContextLine(),
+            recentUserContextForSearch(excluding: query)
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
     private func recentUserContextForSearch(excluding query: String) -> String? {
         guard let conversation else { return nil }
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -19014,6 +19336,15 @@ final class ChatViewModel {
             .suffix(3)
             .joined(separator: "\n")
         return context.isEmpty ? nil : String(context.prefix(2_000))
+    }
+
+    private static func webSearchDeviceDateContextLine() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy年M月d日 EEEE HH:mm:ss zzz"
+        let nowText = formatter.string(from: Date())
+        return "Current device time for search query generation: \(nowText), timezone: \(TimeZone.current.identifier). Use this date/year for current/latest/today/time-sensitive searches; do not use model training-cutoff dates."
     }
 
     private func runAgenticWebSearch(
@@ -20414,7 +20745,10 @@ final class ChatViewModel {
             if isLocalAlpineResult,
                shouldIncludeLocalAlpineContext,
                isOpenAICompatibleProvider,
-               let exactToolHistory = Self.localAlpineOpenAIToolHistoryMessages(for: message) {
+               let exactToolHistory = Self.localAlpineToolHistoryMessages(
+                for: message,
+                providerType: currentProviderType
+               ) {
                 apiMessages.append(contentsOf: exactToolHistory)
                 continue
             }
@@ -23580,7 +23914,7 @@ final class ChatViewModel {
                         }
                     } else {
                         do {
-                            exactUsage = try await self.streamOpenAICompatibleLocalAlpineNativeLoop(
+                            exactUsage = try await self.streamProviderLocalAlpineNativeLoop(
                                 manager: manager,
                                 initialRequest: request,
                                 assistantMessageId: assistantMessageId,
