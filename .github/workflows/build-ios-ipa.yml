@@ -212,7 +212,6 @@ jobs:
         if: env.HAS_SIGNING_SECRETS == 'true'
         continue-on-error: true
         run: |
-          set -o pipefail
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
           xcodebuild \
             -project "Open UI.xcodeproj" \
@@ -267,7 +266,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee "$RUNNER_TEMP/unsigned-xcodebuild.log"
+            build
 
           APP_PATH="$(find "$RUNNER_TEMP/unsigned-build-app" -maxdepth 1 -name '*.app' | head -n 1)"
           if [ -z "$APP_PATH" ]; then
