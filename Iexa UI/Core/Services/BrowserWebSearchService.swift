@@ -3718,18 +3718,47 @@ final class BrowserWebSearchService: NSObject {
             ]
         }
         let scriptLiteral = Self.javaScriptStringLiteral(script)
-        let wrapped = """
-        (async () => {
+        let serializer = Self.safeJavaScriptResultSerializer()
+        let asyncBody = """
+        \(serializer)
+        try {
+          const source = \(scriptLiteral);
+          const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+          const result = await AsyncFunction(source)();
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            result: __iexaSerializeJavaScriptResult(result)
+          });
+        } catch (error) {
+          return JSON.stringify({
+            ok: false,
+            title: document.title || '',
+            url: location.href,
+            error: String(error && error.message ? error.message : error)
+          });
+        }
+        """
+        let syncWrapped = """
+        (() => {
+          \(serializer)
           try {
             const source = \(scriptLiteral);
-            const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-            const result = await AsyncFunction(source)();
-            const safe = result === undefined ? null : result;
+            const result = Function(source)();
+            if (result && typeof result.then === 'function') {
+              return JSON.stringify({
+                ok: false,
+                title: document.title || '',
+                url: location.href,
+                error: 'JavaScript returned a Promise, but async JavaScript execution is unavailable in this WebKit context.'
+              });
+            }
             return JSON.stringify({
               ok: true,
               title: document.title || '',
               url: location.href,
-              result: safe
+              result: __iexaSerializeJavaScriptResult(result)
             });
           } catch (error) {
             return JSON.stringify({
@@ -3741,7 +3770,7 @@ final class BrowserWebSearchService: NSObject {
           }
         })();
         """
-        let evaluation = await evaluateJavaScriptString(wrapped)
+        let evaluation = await evaluateAsyncJavaScriptString(asyncBody, fallbackScript: syncWrapped)
         guard let json = evaluation.string,
               let data = json.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -4257,6 +4286,67 @@ final class BrowserWebSearchService: NSObject {
             .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
             .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
         return "\"\(escaped)\""
+    }
+
+    private static func safeJavaScriptResultSerializer() -> String {
+        """
+        function __iexaSerializeJavaScriptResult(value) {
+          const seen = typeof WeakSet === 'function' ? new WeakSet() : null;
+          function textOf(input, limit) {
+            return String(input == null ? '' : input).replace(/\\s+/g, ' ').trim().slice(0, limit || 1200);
+          }
+          function serialize(input, depth) {
+            if (input === undefined || input === null) return null;
+            const type = typeof input;
+            if (type === 'string') return input.slice(0, 12000);
+            if (type === 'boolean') return input;
+            if (type === 'number') return Number.isFinite(input) ? input : String(input);
+            if (type === 'bigint' || type === 'symbol' || type === 'function') return String(input);
+            if (depth > 4) return textOf(input, 1000);
+            if (input instanceof Date) return input.toISOString();
+            if (typeof Node !== 'undefined' && input instanceof Node) {
+              const element = input.nodeType === 1 ? input : input.parentElement;
+              const rect = element && element.getBoundingClientRect ? element.getBoundingClientRect() : null;
+              return {
+                node_type: input.nodeType,
+                tag: element && element.tagName ? element.tagName.toLowerCase() : '',
+                id: element && element.id ? element.id : '',
+                class: element && element.className ? textOf(element.className, 500) : '',
+                text: textOf(input.innerText || input.textContent || '', 2000),
+                value: element && 'value' in element ? textOf(element.value, 1000) : '',
+                href: element && element.href ? String(element.href).slice(0, 2000) : '',
+                rect: rect ? {
+                  x: Math.round(rect.x),
+                  y: Math.round(rect.y),
+                  width: Math.round(rect.width),
+                  height: Math.round(rect.height)
+                } : null
+              };
+            }
+            if (Array.isArray(input)) {
+              return input.slice(0, 80).map(item => serialize(item, depth + 1));
+            }
+            if (type === 'object') {
+              if (seen) {
+                if (seen.has(input)) return '[Circular]';
+                seen.add(input);
+              }
+              const output = {};
+              const keys = Object.keys(input).slice(0, 80);
+              for (const key of keys) {
+                try {
+                  output[key] = serialize(input[key], depth + 1);
+                } catch (error) {
+                  output[key] = String(error && error.message ? error.message : error);
+                }
+              }
+              return output;
+            }
+            return textOf(input, 1000);
+          }
+          return serialize(value, 0);
+        }
+        """
     }
 
     private func applyBrowserUserAgent(_ profile: String) {
@@ -8458,6 +8548,55 @@ final class BrowserWebSearchService: NSObject {
 
     private func evaluateString(_ script: String) async -> String? {
         (await evaluateJavaScriptString(script)).string
+    }
+
+    private func evaluateAsyncJavaScriptString(_ script: String, fallbackScript: String) async -> JavaScriptEvaluation {
+        guard let webView else {
+            return JavaScriptEvaluation(
+                string: nil,
+                error: "Browser web view is not available",
+                resultType: nil,
+                resultPreview: nil
+            )
+        }
+        if #available(iOS 14.0, *) {
+            return await withCheckedContinuation { continuation in
+                webView.callAsyncJavaScript(
+                    script,
+                    arguments: [:],
+                    in: nil,
+                    contentWorld: .page
+                ) { result in
+                    switch result {
+                    case .success(let value):
+                        if let string = value as? String {
+                            continuation.resume(returning: JavaScriptEvaluation(
+                                string: string,
+                                error: nil,
+                                resultType: "string",
+                                resultPreview: nil
+                            ))
+                        } else {
+                            continuation.resume(returning: JavaScriptEvaluation(
+                                string: nil,
+                                error: nil,
+                                resultType: String(describing: type(of: value)),
+                                resultPreview: String(String(describing: value).prefix(500))
+                            ))
+                        }
+                    case .failure(let error):
+                        self.logger.debug("Browser async JS failed: \(error.localizedDescription, privacy: .public)")
+                        continuation.resume(returning: JavaScriptEvaluation(
+                            string: nil,
+                            error: error.localizedDescription,
+                            resultType: nil,
+                            resultPreview: nil
+                        ))
+                    }
+                }
+            }
+        }
+        return await evaluateJavaScriptString(fallbackScript)
     }
 
     private func evaluateJavaScriptString(_ script: String) async -> JavaScriptEvaluation {
