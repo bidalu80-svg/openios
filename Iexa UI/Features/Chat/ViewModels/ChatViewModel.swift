@@ -13299,9 +13299,12 @@ final class ChatViewModel {
         }
         let latestPrompt = latestUserBrowserAutomationPrompt() ?? ""
         let shouldOperate = Self.browserPromptLooksLikeCurrentPageContinuation(latestPrompt)
+        let inputText = Self.browserAutomationInputText(from: latestPrompt)
+            .flatMap { Self.browserAutomationOperandLooksLikeSiteOnly($0) ? nil : $0 }
+        let clickTarget = Self.browserAutomationClickTarget(from: latestPrompt)
         var arguments: [String: Any] = [
             "tool_title": shouldOperate ? "继续操作当前网页" : "观察当前网页",
-            "action": shouldOperate ? "auto" : "find_elements",
+            "action": "find_elements",
             "scan_page": true,
             "screenshot": true,
             "capture_visuals": true,
@@ -13314,16 +13317,18 @@ final class ChatViewModel {
             "user_prompt": latestPrompt
         ]
         if shouldOperate,
-           arguments["text"] == nil,
-           let inputText = Self.browserAutomationInputText(from: latestPrompt),
-           !Self.browserAutomationOperandLooksLikeSiteOnly(inputText) {
+           let inputText {
             arguments["text"] = inputText
+            arguments["press_enter"] = true
+            arguments["continuation_stage"] = "find_input"
         }
         if shouldOperate,
-           arguments["button_text"] == nil,
-           let clickTarget = Self.browserAutomationClickTarget(from: latestPrompt) {
+           let clickTarget {
             arguments["button_text"] = clickTarget
             arguments["target"] = clickTarget
+            if inputText == nil {
+                arguments["continuation_stage"] = "find_click_target"
+            }
         }
         guard JSONSerialization.isValidJSONObject(arguments),
               let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
@@ -13841,7 +13846,7 @@ final class ChatViewModel {
             )?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
             let openLikeAction = toolName == "browser_readable"
                 || action.isEmpty
-                || ["open", "navigate", "browser.open", "browser.navigate", "readable", "get_readable", "browser.readable"].contains(action)
+                || ["open", "navigate", "browser.open", "browser.navigate", "readable", "get_readable", "browser.readable", "auto", "browser.auto", "complete_task", "browser.complete_task"].contains(action)
             if let upgraded = browserAutomationUpgradeArguments(
                 from: arguments,
                 latestUserPrompt: latestUserPrompt,
@@ -13871,13 +13876,14 @@ final class ChatViewModel {
         }
 
         var upgraded = arguments
-        for key in ["action", "browser_action", "browser_use_action", "operation", "op", "type"] {
-            upgraded.removeValue(forKey: key)
-        }
-        upgraded["action"] = "auto"
+        let hasURL = firstNonEmptyString(in: upgraded, keys: ["url", "link", "href", "page_url", "source", "input_url"]) != nil
+        upgraded["action"] = hasURL ? "navigate" : "find_elements"
         upgraded["force_reload"] = false
         upgraded["forceReload"] = false
         upgraded["reload"] = false
+        upgraded["screenshot"] = true
+        upgraded["capture_visuals"] = true
+        upgraded["scan_page"] = true
 
         let existingText = firstNonEmptyString(
             in: upgraded,
@@ -13886,13 +13892,16 @@ final class ChatViewModel {
         if existingText == nil,
            let extractedText = browserAutomationInputText(from: prompt) {
             upgraded["text"] = extractedText
+            upgraded["press_enter"] = true
         }
 
         if firstNonEmptyString(in: upgraded, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"]) == nil,
            let clickTarget = browserAutomationClickTarget(from: prompt) {
             upgraded["button_text"] = clickTarget
+            upgraded["target"] = clickTarget
         }
 
+        upgraded["continuation_stage"] = hasURL ? "automation_start" : "find_input"
         upgraded["user_prompt"] = prompt
         return upgraded
     }
@@ -14969,6 +14978,14 @@ final class ChatViewModel {
             in: arguments,
             keys: ["continuation_stage", "continuationStage"]
         )?.lowercased() ?? ""
+        let requestedText = firstNonEmptyString(
+            in: arguments,
+            keys: ["text", "value", "input", "content", "message", "prompt", "query", "q", "keyword", "keywords"]
+        ).flatMap { browserAutomationOperandLooksLikeSiteOnly($0) ? nil : $0 }
+        let requestedClickTarget = firstNonEmptyString(
+            in: arguments,
+            keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel", "target", "label"]
+        )
         for key in ["url", "link", "href", "page_url", "source", "input_url"] {
             arguments.removeValue(forKey: key)
         }
@@ -14976,7 +14993,65 @@ final class ChatViewModel {
         arguments["forceReload"] = false
         arguments["reload"] = false
 
-        if ["browser.click", "browser.type", "browser.execute_js"].contains(action),
+        if continuationStage == "automation_start",
+           requestedText != nil {
+            arguments["action"] = "find_elements"
+            arguments["scan_page"] = true
+            arguments["screenshot"] = true
+            arguments["capture_visuals"] = true
+            arguments["target"] = "search input textarea textbox query keyword 搜索 输入"
+            arguments["editable"] = true
+            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 10, 10)
+            arguments["continuation_stage"] = "find_input"
+        } else if continuationStage == "find_input",
+                  let requestedText {
+            arguments["action"] = "type"
+            arguments["text"] = requestedText
+            arguments["target"] = "search input textarea textbox query keyword 搜索 输入"
+            arguments["press_enter"] = true
+            arguments["clear"] = true
+            arguments["continuation_stage"] = "typed_query"
+        } else if continuationStage == "typed_query",
+                  anyJSONBoolValue(in: toolContent, key: "ok", equals: true) {
+            arguments["action"] = "wait_for_dom_stable"
+            arguments["timeout"] = max(nativeToolIntValue(arguments["timeout"]) ?? 8, 8)
+            arguments["continuation_stage"] = "after_query_wait"
+        } else if continuationStage == "after_query_wait",
+                  let requestedClickTarget,
+                  !requestedClickTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            arguments["action"] = "find_elements"
+            arguments["scan_page"] = true
+            arguments["screenshot"] = true
+            arguments["capture_visuals"] = true
+            arguments["target"] = requestedClickTarget
+            arguments["button_text"] = requestedClickTarget
+            arguments["clickable"] = true
+            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 12, 12)
+            arguments["continuation_stage"] = "find_click_target"
+        } else if continuationStage == "after_query_wait" {
+            arguments["action"] = "get_text"
+            arguments["max_length"] = max(nativeToolIntValue(arguments["max_length"] ?? arguments["limit"]) ?? 32_000, 32_000)
+            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 18, 18)
+            arguments["continuation_stage"] = "final_read"
+        } else if continuationStage == "find_click_target",
+                  let requestedClickTarget,
+                  !requestedClickTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            arguments["action"] = "click"
+            arguments["label"] = requestedClickTarget
+            arguments["button_text"] = requestedClickTarget
+            arguments["target"] = requestedClickTarget
+            arguments["continuation_stage"] = "clicked_target"
+        } else if continuationStage == "clicked_target",
+                  anyJSONBoolValue(in: toolContent, key: "ok", equals: true) {
+            arguments["action"] = "wait_for_dom_stable"
+            arguments["timeout"] = max(nativeToolIntValue(arguments["timeout"]) ?? 8, 8)
+            arguments["continuation_stage"] = "after_click_wait"
+        } else if continuationStage == "after_click_wait" {
+            arguments["action"] = "get_text"
+            arguments["max_length"] = max(nativeToolIntValue(arguments["max_length"] ?? arguments["limit"]) ?? 32_000, 32_000)
+            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 20, 20)
+            arguments["continuation_stage"] = "final_read"
+        } else if ["browser.click", "browser.type", "browser.execute_js"].contains(action),
            anyJSONBoolValue(in: toolContent, key: "ok", equals: true) {
             arguments["action"] = "wait_for_dom_stable"
             arguments["timeout"] = max(nativeToolIntValue(arguments["timeout"]) ?? 8, 8)
