@@ -6110,7 +6110,7 @@ actor LocalAlpineAgentService {
         } else if Self.commandMatches(normalized, pattern: #"\bsed\b[^;&|]*\s-i\s+''"#) {
             issue = "`sed -i ''` is macOS/BSD sed syntax; BusyBox sed uses a different in-place form."
             replacement = "Use structured `edit_file`/`patch_file`, or BusyBox-safe `sed -i 's/old/new/g' file` only for simple non-code edits."
-        } else if normalized.contains("[[") || normalized.contains("]]") {
+        } else if Self.containsBashDoubleBracketConditional(normalized) {
             issue = "`[[ ... ]]` is a Bash conditional; the Local Alpine shell is BusyBox ash."
             replacement = "Use POSIX `[ ... ]`/`test`, or emit a structured `verify` tool."
         } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)source\s+"#) {
@@ -6119,7 +6119,7 @@ actor LocalAlpineAgentService {
         } else if Self.commandMatches(normalized, pattern: #"(^|[;&|]\s*)(mapfile|readarray)\b"#) {
             issue = "`mapfile`/`readarray` are Bash builtins and are not available in BusyBox ash."
             replacement = "Use `while IFS= read -r line; do ...; done`."
-        } else if normalized.contains("<(") || normalized.contains(">(") {
+        } else if Self.containsBashProcessSubstitution(normalized) {
             issue = "Process substitution `<(...)`/`>(...)` is Bash-only and is not available in BusyBox ash."
             replacement = "Write a temporary file under `/mnt/iexa` or explicitly under `/mnt/iexa/shared`, or pipe commands directly."
         } else if Self.commandMatches(normalized, pattern: #"\btime\.sleep\s*\("#) {
@@ -6444,7 +6444,7 @@ actor LocalAlpineAgentService {
                 "Use `grep -E`, the structured `grep` wrapper, or Python's `re` module."
             )
         }
-        if isShell && (normalized.contains("[[") || normalized.contains("]]")) {
+        if isShell && containsBashDoubleBracketConditional(normalized) {
             return (
                 "`[[ ... ]]` is Bash-only; Local Alpine shell scripts run under BusyBox ash.",
                 "Use POSIX `[ ... ]`/`test`."
@@ -6464,7 +6464,7 @@ actor LocalAlpineAgentService {
                 "Use `while IFS= read -r line; do ...; done`."
             )
         }
-        if isShell && (normalized.contains("<(") || normalized.contains(">(")) {
+        if isShell && containsBashProcessSubstitution(normalized) {
             return (
                 "Process substitution `<(...)`/`>(...)` is Bash-only.",
                 "Write a temporary file under `/mnt/iexa` or explicitly under `/mnt/iexa/shared`, or pipe commands directly."
@@ -6475,6 +6475,67 @@ actor LocalAlpineAgentService {
 
     private nonisolated static func commandMatches(_ command: String, pattern: String) -> Bool {
         command.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private nonisolated static func containsBashDoubleBracketConditional(_ command: String) -> Bool {
+        var stripped = shellSyntaxSurface(command)
+        for pattern in [
+            #"\[\[:[A-Za-z_][A-Za-z0-9_]*:\]\]"#,
+            #"\[\[\.[^\]]+\.\]\]"#,
+            #"\[\[=[^\]]+=\]\]"#
+        ] {
+            stripped = stripped.replacingOccurrences(
+                of: pattern,
+                with: "",
+                options: .regularExpression
+            )
+        }
+
+        return commandMatches(stripped, pattern: #"(^|[\s;&|(){}])\[\[(?=$|[\s;])"#)
+            || commandMatches(stripped, pattern: #"(^|[\s;&|(){}])\]\](?=$|[\s;&|(){}])"#)
+    }
+
+    private nonisolated static func containsBashProcessSubstitution(_ command: String) -> Bool {
+        let surface = shellSyntaxSurface(command)
+        return surface.range(of: #"(?:^|[\s;&|])(?:<|>)\("#, options: .regularExpression) != nil
+    }
+
+    private nonisolated static func shellSyntaxSurface(_ command: String) -> String {
+        var output = ""
+        output.reserveCapacity(command.count)
+        var inSingleQuote = false
+        var inDoubleQuote = false
+        var escaping = false
+
+        for character in command {
+            if escaping {
+                output.append(" ")
+                escaping = false
+                continue
+            }
+
+            if character == "\\", !inSingleQuote {
+                output.append(" ")
+                escaping = true
+                continue
+            }
+
+            if character == "'", !inDoubleQuote {
+                inSingleQuote.toggle()
+                output.append(" ")
+                continue
+            }
+
+            if character == "\"", !inSingleQuote {
+                inDoubleQuote.toggle()
+                output.append(" ")
+                continue
+            }
+
+            output.append((inSingleQuote || inDoubleQuote) ? " " : character)
+        }
+
+        return output
     }
 
     private nonisolated static func commandsByConvertingCatHeredocWrites(

@@ -2,6 +2,13 @@ import SwiftUI
 import Photos
 import ImageIO
 
+enum AuthenticatedImageActionLayout: Equatable {
+    case none
+    case compactTopTrailing
+    case compactBottomTrailing
+    case singleBottomOverlay
+}
+
 /// Loads and displays an image from the server using authenticated API calls.
 /// Supports:
 /// - Tap to view full screen with pinch-to-zoom
@@ -11,6 +18,10 @@ struct AuthenticatedImageView: View {
     let apiClient: APIClient?
     let onEdit: ((UIImage) -> Void)?
     let onPreview: (() -> Void)?
+    /// `.fill` is used by compact image grids; the default keeps a full generated image visible.
+    let contentMode: ContentMode
+    let actionLayout: AuthenticatedImageActionLayout
+    let adaptiveThumbnailWidth: CGFloat?
 
     @State private var loadedImage: UIImage?
     @State private var isLoading = true
@@ -44,16 +55,31 @@ struct AuthenticatedImageView: View {
         let displayCost: Int
     }
 
+    private struct CompactActionMetrics {
+        let isVertical: Bool
+        let buttonSize: CGFloat
+        let iconSize: CGFloat
+        let spacing: CGFloat
+        let containerPadding: CGFloat
+        let backgroundOpacity: Double
+    }
+
     init(
         fileId: String,
         apiClient: APIClient?,
         onEdit: ((UIImage) -> Void)? = nil,
-        onPreview: (() -> Void)? = nil
+        onPreview: (() -> Void)? = nil,
+        contentMode: ContentMode = .fit,
+        actionLayout: AuthenticatedImageActionLayout = .compactTopTrailing,
+        adaptiveThumbnailWidth: CGFloat? = nil
     ) {
         self.fileId = fileId
         self.apiClient = apiClient
         self.onEdit = onEdit
         self.onPreview = onPreview
+        self.contentMode = contentMode
+        self.actionLayout = actionLayout
+        self.adaptiveThumbnailWidth = adaptiveThumbnailWidth
     }
 
     /// In-memory cache for file-based images. Prevents re-fetching when
@@ -72,119 +98,94 @@ struct AuthenticatedImageView: View {
     }
 
     var body: some View {
-        // Use a fixed-height container for ALL states (loading, loaded, error)
-        // to prevent layout shifts that cause scroll position jumps.
-        // The image is constrained to the same height as the placeholder
-        // so the scroll view never needs to re-layout when images finish loading.
-        ZStack(alignment: .topTrailing) {
-            Group {
-                if let image = loadedImage {
-                    Image(uiImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .opacity(imageIsRevealed ? 1 : 0)
-                        .scaleEffect(imageIsRevealed || reduceMotion ? 1 : 0.985)
-                        .onTapGesture {
-                            openPreview()
-                        }
-                        .contextMenu {
-                            Button {
-                                Task {
-                                    let imageForAction = await loadOriginalImageForAction() ?? image
-                                    await MainActor.run {
-                                        UIPasteboard.general.image = imageForAction
-                                        Haptics.notify(.success)
-                                    }
-                                }
-                            } label: {
-                                Label("复制图片", systemImage: "doc.on.doc")
-                            }
-
-                            Button {
-                                Task { await saveImageToPhotos() }
-                            } label: {
-                                Label("保存到相册", systemImage: "photo")
-                            }
-
-                            Button {
-                                Task {
-                                    await shareImage(await loadOriginalImageForAction() ?? image)
-                                }
-                            } label: {
-                                Label("分享", systemImage: "square.and.arrow.up")
-                            }
-
-                            if let onEdit {
-                                Button {
-                                    Task {
-                                        let imageForAction = await loadOriginalImageForAction() ?? image
-                                        await MainActor.run {
-                                            onEdit(imageForAction)
-                                        }
-                                    }
-                                } label: {
-                                    Label("编辑", systemImage: "wand.and.stars")
-                                }
-                            }
-
-                            Button {
-                                openPreview()
-                            } label: {
-                                Label("全屏查看", systemImage: "arrow.up.left.and.arrow.down.right")
-                            }
-                        }
-                } else if isLoading {
-                    imageLoadingPlaceholder
-                } else if hasError {
-                    // Tap-to-retry error state — tapping bumps the retryTrigger
-                    // which causes the `.task(id:)` to re-fire and attempt loading again.
-                    VStack(spacing: Spacing.xs) {
-                        Image(systemName: "arrow.clockwise.circle")
-                            .scaledFont(size: 28)
-                            .foregroundStyle(theme.brandPrimary.opacity(0.7))
-                        Text("点击重试")
-                            .scaledFont(size: 12, weight: .medium)
-                            .foregroundStyle(theme.textTertiary)
-                    }
-                    .frame(height: placeholderHeight)
-                    .frame(maxWidth: .infinity)
-                    .background(theme.surfaceContainer.opacity(0.5))
-                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-                    .onTapGesture {
-                        retryTrigger += 1
-                    }
-                }
-            }
-
+        Group {
             if let image = loadedImage {
-                HStack(spacing: 4) {
-                    if let onEdit {
+                let thumbnailSize = adaptiveThumbnailSize(for: image) ?? singlePortraitThumbnailSize(for: image)
+                displayImage(image, thumbnailSize: thumbnailSize)
+                    .opacity(imageIsRevealed ? 1 : 0)
+                    .scaleEffect(imageIsRevealed || reduceMotion ? 1 : 0.985)
+                    .onTapGesture {
+                        openPreview()
+                    }
+                    .contextMenu {
                         Button {
                             Task {
                                 let imageForAction = await loadOriginalImageForAction() ?? image
                                 await MainActor.run {
-                                    onEdit(imageForAction)
-                                    Haptics.play(.light)
+                                    UIPasteboard.general.image = imageForAction
+                                    Haptics.notify(.success)
                                 }
                             }
                         } label: {
-                            imageActionLabel(icon: "wand.and.stars", accessibilityLabel: "编辑图片")
+                            Label("复制图片", systemImage: "doc.on.doc")
                         }
-                        .buttonStyle(.plain)
-                    }
 
-                    Button {
-                        Task { await saveImageToPhotos() }
-                    } label: {
-                        imageActionLabel(
-                            icon: saveIcon,
-                            accessibilityLabel: saveLabel,
-                            isLoading: saveState == .saving
-                        )
+                        Button {
+                            Task { await saveImageToPhotos() }
+                        } label: {
+                            Label("保存到相册", systemImage: "photo")
+                        }
+
+                        Button {
+                            Task {
+                                await shareImage(await loadOriginalImageForAction() ?? image)
+                            }
+                        } label: {
+                            Label("分享", systemImage: "square.and.arrow.up")
+                        }
+
+                        if let onEdit {
+                            Button {
+                                Task {
+                                    let imageForAction = await loadOriginalImageForAction() ?? image
+                                    await MainActor.run {
+                                        onEdit(imageForAction)
+                                    }
+                                }
+                            } label: {
+                                Label("编辑", systemImage: "wand.and.stars")
+                            }
+                        }
+
+                        Button {
+                            openPreview()
+                        } label: {
+                            Label("全屏查看", systemImage: "arrow.up.left.and.arrow.down.right")
+                        }
                     }
-                    .buttonStyle(.plain)
+                    .overlay {
+                        if actionLayout != .none {
+                            GeometryReader { geometry in
+                                imageActions(for: image, availableSize: geometry.size)
+                                    .padding(actionOverlayPadding(for: geometry.size))
+                                    .frame(
+                                        maxWidth: .infinity,
+                                        maxHeight: .infinity,
+                                        alignment: actionOverlayAlignment(for: geometry.size)
+                                    )
+                            }
+                        }
+                    }
+            } else if isLoading {
+                imageLoadingPlaceholder
+            } else if hasError {
+                // Tap-to-retry error state — tapping bumps the retryTrigger
+                // which causes the `.task(id:)` to re-fire and attempt loading again.
+                VStack(spacing: Spacing.xs) {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .scaledFont(size: 28)
+                        .foregroundStyle(theme.brandPrimary.opacity(0.7))
+                    Text("点击重试")
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
                 }
-                .padding(5)
+                .frame(height: placeholderHeight)
+                .frame(maxWidth: .infinity)
+                .background(theme.surfaceContainer.opacity(0.5))
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                .onTapGesture {
+                    retryTrigger += 1
+                }
             }
         }
         // Combine fileId + retryTrigger so that:
@@ -248,6 +249,42 @@ struct AuthenticatedImageView: View {
             .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
     }
 
+    @ViewBuilder
+    private func displayImage(_ image: UIImage, thumbnailSize: CGSize?) -> some View {
+        if let thumbnailSize {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(width: thumbnailSize.width, height: thumbnailSize.height)
+        } else {
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: contentMode)
+        }
+    }
+
+    private func adaptiveThumbnailSize(for image: UIImage) -> CGSize? {
+        guard let targetWidth = adaptiveThumbnailWidth, targetWidth > 0 else { return nil }
+        let width = image.size.width
+        let height = image.size.height
+        guard width > 0, height > 0 else { return nil }
+        let aspectRatio = width / height
+        guard aspectRatio > 0 else { return nil }
+        return CGSize(width: targetWidth, height: targetWidth / aspectRatio)
+    }
+
+    private func singlePortraitThumbnailSize(for image: UIImage) -> CGSize? {
+        guard actionLayout == .singleBottomOverlay, contentMode == .fit else { return nil }
+        let width = image.size.width
+        let height = image.size.height
+        guard width > 0, height > 0 else { return nil }
+        let aspectRatio = width / height
+        guard aspectRatio > 0 else { return nil }
+
+        let targetWidth: CGFloat = 340
+        return CGSize(width: targetWidth, height: targetWidth / aspectRatio)
+    }
+
     /// Maximum number of automatic retry attempts before showing the error state.
     /// Each attempt uses exponential backoff (1s, 2s, 4s) to avoid hammering
     /// the server while still recovering quickly from transient failures.
@@ -270,23 +307,192 @@ struct AuthenticatedImageView: View {
         }
     }
 
+    private func actionOverlayAlignment(for size: CGSize) -> Alignment {
+        switch actionLayout {
+        case .none:
+            return .center
+        case .compactTopTrailing:
+            return .topTrailing
+        case .compactBottomTrailing, .singleBottomOverlay:
+            return .bottomTrailing
+        }
+    }
+
+    private func actionOverlayPadding(for size: CGSize) -> CGFloat {
+        switch actionLayout {
+        case .none:
+            return 0
+        case .compactTopTrailing:
+            return compactActionMetrics(for: size).buttonSize <= 18 ? 6 : 10
+        case .compactBottomTrailing:
+            let metrics = compactActionMetrics(for: size)
+            return metrics.buttonSize <= 18 ? 6 : 9
+        case .singleBottomOverlay:
+            return 14
+        }
+    }
+
+    @ViewBuilder
+    private func imageActions(for image: UIImage, availableSize: CGSize) -> some View {
+        switch actionLayout {
+        case .none:
+            EmptyView()
+        case .compactTopTrailing, .compactBottomTrailing:
+            compactImageActionButtons(for: image, availableSize: availableSize)
+        case .singleBottomOverlay:
+            HStack(alignment: .bottom) {
+                if let onEdit {
+                    Button {
+                        Task {
+                            let imageForAction = await loadOriginalImageForAction() ?? image
+                            await MainActor.run {
+                                onEdit(imageForAction)
+                                Haptics.play(.light)
+                            }
+                        }
+                    } label: {
+                        Text("编辑")
+                            .scaledFont(size: 17, weight: .semibold)
+                            .foregroundStyle(theme.textPrimary)
+                            .padding(.horizontal, 18)
+                            .frame(height: 48)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Spacer(minLength: 0)
+
+                Button {
+                    Task {
+                        await shareImage(await loadOriginalImageForAction() ?? image)
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .scaledFont(size: 22, weight: .semibold)
+                        .foregroundStyle(theme.textPrimary)
+                        .frame(width: 52, height: 52)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private func compactImageActionButtons(for image: UIImage, availableSize: CGSize) -> some View {
+        let metrics = compactActionMetrics(for: availableSize)
+        Group {
+            if metrics.isVertical {
+                VStack(spacing: metrics.spacing) {
+                    compactImageActionButtonContent(for: image, metrics: metrics)
+                }
+            } else {
+                HStack(spacing: metrics.spacing) {
+                    compactImageActionButtonContent(for: image, metrics: metrics)
+                }
+            }
+        }
+        .padding(metrics.containerPadding)
+        .background(.black.opacity(metrics.backgroundOpacity), in: Capsule())
+    }
+
+    @ViewBuilder
+    private func compactImageActionButtonContent(for image: UIImage, metrics: CompactActionMetrics) -> some View {
+        if let onEdit {
+            Button {
+                Task {
+                    let imageForAction = await loadOriginalImageForAction() ?? image
+                    await MainActor.run {
+                        onEdit(imageForAction)
+                        Haptics.play(.light)
+                    }
+                }
+            } label: {
+                imageActionLabel(
+                    icon: "wand.and.stars",
+                    accessibilityLabel: "编辑图片",
+                    iconSize: metrics.iconSize,
+                    buttonSize: metrics.buttonSize
+                )
+            }
+            .buttonStyle(.plain)
+        }
+
+        Button {
+            Task { await saveImageToPhotos() }
+        } label: {
+            imageActionLabel(
+                icon: saveIcon,
+                accessibilityLabel: saveLabel,
+                isLoading: saveState == .saving,
+                iconSize: metrics.iconSize,
+                buttonSize: metrics.buttonSize
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func compactActionMetrics(for size: CGSize) -> CompactActionMetrics {
+        let width = max(size.width, 1)
+        let height = max(size.height, 1)
+        let isTiny = width < 116 || height < 112
+        let isCompact = width < 150 || height < 138
+        let isTallNarrow = width < 136 && height > width * 1.18
+
+        if isTiny {
+            return CompactActionMetrics(
+                isVertical: isTallNarrow,
+                buttonSize: 18,
+                iconSize: 8.5,
+                spacing: 1,
+                containerPadding: 2.5,
+                backgroundOpacity: 0.20
+            )
+        }
+
+        if isCompact {
+            return CompactActionMetrics(
+                isVertical: isTallNarrow,
+                buttonSize: 21,
+                iconSize: 9.5,
+                spacing: 2,
+                containerPadding: 3,
+                backgroundOpacity: 0.22
+            )
+        }
+
+        return CompactActionMetrics(
+            isVertical: false,
+            buttonSize: 24,
+            iconSize: 10.5,
+            spacing: 3,
+            containerPadding: 4,
+            backgroundOpacity: 0.24
+        )
+    }
+
     private func imageActionLabel(
         icon: String,
         accessibilityLabel: String,
-        isLoading: Bool = false
+        isLoading: Bool = false,
+        iconSize: CGFloat? = nil,
+        buttonSize: CGFloat = 28
     ) -> some View {
-        Group {
+        let resolvedIconSize = iconSize ?? (buttonSize <= 24 ? 10.5 : 12)
+        return Group {
             if isLoading {
                 ProgressView()
                     .controlSize(.mini)
                     .tint(.white)
             } else {
                 Image(systemName: icon)
-                    .scaledFont(size: 12, weight: .semibold)
+                    .scaledFont(size: resolvedIconSize, weight: .semibold)
             }
         }
         .foregroundStyle(.white)
-        .frame(width: 28, height: 28)
+        .frame(width: buttonSize, height: buttonSize)
         .background(.black.opacity(0.58), in: Capsule())
         .accessibilityLabel(accessibilityLabel)
     }
@@ -778,6 +984,52 @@ struct AuthenticatedImageGalleryPresentation: Identifiable {
     let initialItemId: String
 }
 
+private enum FullScreenImageSaveState {
+    case idle
+    case saving
+    case saved
+    case failed
+}
+
+private func fullScreenSaveIcon(for state: FullScreenImageSaveState) -> String {
+    switch state {
+    case .idle, .saving: return "square.and.arrow.down"
+    case .saved: return "checkmark"
+    case .failed: return "exclamationmark.triangle"
+    }
+}
+
+@ViewBuilder
+private func fullScreenImageActionButton(
+    icon: String,
+    size: CGFloat = 18,
+    weight: Font.Weight = .medium,
+    isLoading: Bool = false,
+    action: @escaping () -> Void
+) -> some View {
+    Button(action: action) {
+        Group {
+            if isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+            } else {
+                Image(systemName: icon)
+                    .scaledFont(size: size, weight: weight)
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(width: 44, height: 44)
+        .background(.ultraThinMaterial)
+        .clipShape(Circle())
+    }
+    .buttonStyle(.plain)
+}
+
+private func fullScreenImageControlsTopPadding(safeAreaTop: CGFloat) -> CGFloat {
+    max(safeAreaTop + 14, 72)
+}
+
 struct FullScreenImageGalleryView: View {
     let items: [AuthenticatedImageGalleryItem]
     let initialItemId: String
@@ -787,6 +1039,7 @@ struct FullScreenImageGalleryView: View {
     @State private var currentItemId: String?
     @State private var zoomResetGeneration = 0
     @State private var loadedImages: [String: UIImage] = [:]
+    @State private var saveState: FullScreenImageSaveState = .idle
 
     init(
         items: [AuthenticatedImageGalleryItem],
@@ -800,7 +1053,7 @@ struct FullScreenImageGalleryView: View {
     }
 
     var body: some View {
-        GeometryReader { _ in
+        GeometryReader { geometry in
             ZStack {
                 Color.black.ignoresSafeArea()
 
@@ -836,6 +1089,7 @@ struct FullScreenImageGalleryView: View {
                     .onChange(of: currentItemId) { _, newValue in
                         if newValue != nil {
                             zoomResetGeneration += 1
+                            saveState = .idle
                         }
                     }
                 }
@@ -844,30 +1098,23 @@ struct FullScreenImageGalleryView: View {
                     HStack {
                         Spacer()
 
-                        Button {
-                            Task { await shareCurrentImage() }
-                        } label: {
-                            Image(systemName: "square.and.arrow.up")
-                                .scaledFont(size: 18, weight: .medium)
-                                .foregroundStyle(.white)
-                                .frame(width: 44, height: 44)
-                                .background(.ultraThinMaterial)
-                                .clipShape(Circle())
+                        fullScreenImageActionButton(
+                            icon: fullScreenSaveIcon(for: saveState),
+                            isLoading: saveState == .saving
+                        ) {
+                            Task { await saveCurrentImage() }
                         }
 
-                        Button {
+                        fullScreenImageActionButton(icon: "square.and.arrow.up") {
+                            Task { await shareCurrentImage() }
+                        }
+
+                        fullScreenImageActionButton(icon: "xmark", size: 16, weight: .bold) {
                             dismiss()
-                        } label: {
-                            Image(systemName: "xmark")
-                                .scaledFont(size: 16, weight: .bold)
-                                .foregroundStyle(.white)
-                                .frame(width: 44, height: 44)
-                                .background(.ultraThinMaterial)
-                                .clipShape(Circle())
                         }
                     }
                     .padding(.horizontal)
-                    .padding(.top, 8)
+                    .padding(.top, fullScreenImageControlsTopPadding(safeAreaTop: geometry.safeAreaInsets.top))
 
                     Spacer()
                 }
@@ -878,24 +1125,55 @@ struct FullScreenImageGalleryView: View {
     }
 
     @MainActor
-    private func shareCurrentImage() async {
+    private func currentImageForAction() async -> UIImage? {
         let selectedId = currentItemId ?? initialItemId
-        guard let item = items.first(where: { $0.id == selectedId }) ?? items.first else { return }
-        let image: UIImage?
+        guard let item = items.first(where: { $0.id == selectedId }) ?? items.first else { return nil }
         if let cached = loadedImages[item.id] {
-            image = cached
-        } else {
-            image = await AuthenticatedImageView.loadImageValue(
-                fileId: item.fileId,
-                apiClient: apiClient,
-                preferOriginal: true
-            )
-            if let image {
-                loadedImages[item.id] = image
-            }
+            return cached
         }
-        guard let image else { return }
+        let image = await AuthenticatedImageView.loadImageValue(
+            fileId: item.fileId,
+            apiClient: apiClient,
+            preferOriginal: true
+        )
+        if let image {
+            loadedImages[item.id] = image
+        }
+        return image
+    }
+
+    @MainActor
+    private func shareCurrentImage() async {
+        guard let image = await currentImageForAction() else { return }
         presentShareSheet(for: image)
+    }
+
+    @MainActor
+    private func saveCurrentImage() async {
+        guard saveState != .saving else { return }
+        saveState = .saving
+        guard let image = await currentImageForAction() else {
+            saveState = .failed
+            return
+        }
+        await saveImageToPhotoLibrary(image)
+    }
+
+    @MainActor
+    private func saveImageToPhotoLibrary(_ image: UIImage) async {
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        if status == .notDetermined {
+            _ = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        }
+
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAsset(from: image)
+            }
+            saveState = .saved
+        } catch {
+            saveState = .failed
+        }
     }
 
     @MainActor
@@ -981,60 +1259,55 @@ struct FullScreenImageView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var image: UIImage?
     @State private var didFail = false
+    @State private var saveState: FullScreenImageSaveState = .idle
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        GeometryReader { proxy in
+            ZStack {
+                Color.black.ignoresSafeArea()
 
-            if let image {
-                // Zoomable image using UIScrollView for proper pinch-to-zoom
-                ZoomableImageView(image: image)
-                    .ignoresSafeArea()
-            } else if didFail {
-                Image(systemName: "photo")
-                    .scaledFont(size: 34, weight: .medium)
-                    .foregroundStyle(.white.opacity(0.55))
-            } else {
-                ProgressView()
-                    .controlSize(.large)
-                    .tint(.white)
-            }
-
-            // Top bar with close and share buttons
-            VStack {
-                HStack {
-                    Spacer()
-
-                    // Share button
-                    Button {
-                        shareImage()
-                    } label: {
-                        Image(systemName: "square.and.arrow.up")
-                            .scaledFont(size: 18, weight: .medium)
-                            .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                    }
-
-                    // Close button
-                    Button {
-                        dismiss()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .scaledFont(size: 16, weight: .bold)
-                            .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                    }
+                if let image {
+                    // Zoomable image using UIScrollView for proper pinch-to-zoom
+                    ZoomableImageView(image: image)
+                        .ignoresSafeArea()
+                } else if didFail {
+                    Image(systemName: "photo")
+                        .scaledFont(size: 34, weight: .medium)
+                        .foregroundStyle(.white.opacity(0.55))
+                } else {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
                 }
-                .padding(.horizontal)
-                .padding(.top, 8)
 
-                Spacer()
+                // Top bar with save, share, and close buttons
+                VStack {
+                    HStack {
+                        Spacer()
+
+                        fullScreenImageActionButton(
+                            icon: fullScreenSaveIcon(for: saveState),
+                            isLoading: saveState == .saving
+                        ) {
+                            Task { await saveImage() }
+                        }
+
+                        fullScreenImageActionButton(icon: "square.and.arrow.up") {
+                            shareImage()
+                        }
+
+                        fullScreenImageActionButton(icon: "xmark", size: 16, weight: .bold) {
+                            dismiss()
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, fullScreenImageControlsTopPadding(safeAreaTop: proxy.safeAreaInsets.top))
+
+                    Spacer()
+                }
             }
         }
+        .ignoresSafeArea()
         .statusBarHidden()
         .task(id: fileId) {
             await loadImage()
@@ -1055,6 +1328,35 @@ struct FullScreenImageView: View {
             }
             activityVC.popoverPresentationController?.sourceView = topVC.view
             topVC.present(activityVC, animated: true)
+        }
+    }
+
+    @MainActor
+    private func saveImage() async {
+        guard saveState != .saving else { return }
+        saveState = .saving
+        let imageForSaving = await AuthenticatedImageView.loadImageValue(
+            fileId: fileId,
+            apiClient: apiClient,
+            preferOriginal: true
+        ) ?? image
+        guard let imageForSaving else {
+            saveState = .failed
+            return
+        }
+
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        if status == .notDetermined {
+            _ = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        }
+
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAsset(from: imageForSaving)
+            }
+            saveState = .saved
+        } catch {
+            saveState = .failed
         }
     }
 

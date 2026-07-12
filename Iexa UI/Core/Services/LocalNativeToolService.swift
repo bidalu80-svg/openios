@@ -127,8 +127,29 @@ final class LocalNativeToolService {
     }
 
     static func visibleContent(from content: String) -> String {
-        stripNativeToolBlocks(from: content)
+        let visible = stripNativeToolBlocks(from: content)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        return isToolResultPayloadOnly(visible) ? "" : visible
+    }
+
+    private static func isToolResultPayloadOnly(_ content: String) -> Bool {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{"), trimmed.hasSuffix("}") else { return false }
+        let lower = trimmed.lowercased()
+        guard lower.contains(#""results""#) || lower.contains(#""browser_action""#) || lower.contains(#""browser_use_action""#) else {
+            return false
+        }
+        let toolMarkers = [
+            #""action"\s*:\s*"browser_use""#,
+            #""action"\s*:\s*"browser\.use""#,
+            #""browser_action"\s*:\s*"browser\."#,
+            #""browser_use_action"\s*:\s*"browser\."#,
+            #""focused_element"\s*:"#,
+            #""blocked_by_human_verification"\s*:"#
+        ]
+        return toolMarkers.contains { pattern in
+            trimmed.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+        }
     }
 
     static func containsNativeToolBlock(_ content: String) -> Bool {
@@ -289,6 +310,17 @@ final class LocalNativeToolService {
             return await executeCreateCalendarEvent(call)
         case "delete_calendar_event", "calendar.delete_event":
             return await executeDeleteCalendarEvent(call)
+        case "update_calendar_event", "calendar.update_event":
+            return await executeUpdateCalendarEvent(call)
+        case "calendar.free_busy", "calendar.freebusy", "calendar.availability":
+            return await executeCalendarFreeBusy(call)
+        case "list_calendars", "calendar.list_calendars":
+            return await executeListCalendars()
+        case "contacts.list", "contacts_list", "list_contacts",
+             "contacts.search", "contacts_search", "search_contacts":
+            return await executeListContacts(call)
+        case "contacts.get", "contacts_get", "get_contact":
+            return await executeGetContact(call)
         case "device.status", "device_status", "get_device_status":
             return executeDeviceStatus()
         case "device.info", "device_info", "get_device_info":
@@ -1335,6 +1367,144 @@ final class LocalNativeToolService {
         }
     }
 
+    private func executeUpdateCalendarEvent(_ call: [String: Any]) async -> [String: Any] {
+        guard let id = Self.firstString(in: call, keys: ["id", "event_id"]), !id.isEmpty else {
+            return [
+                "action": "update_calendar_event",
+                "ok": false,
+                "error": "Missing required field: id"
+            ]
+        }
+        let title = Self.firstString(in: call, keys: ["title"])
+        if title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            return [
+                "action": "update_calendar_event",
+                "ok": false,
+                "id": id,
+                "error": "Title cannot be empty when provided"
+            ]
+        }
+
+        do {
+            let updated = try await LocalCalendarService.shared.updateEvent(
+                id: id,
+                request: CalendarEventUpdateRequest(
+                    calendarId: Self.firstString(in: call, keys: ["calendar_id"]),
+                    title: title?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    description: Self.firstString(in: call, keys: ["description", "notes"]),
+                    startAt: parseDate(call["start"]),
+                    endAt: parseDate(call["end"]),
+                    allDay: Self.boolValue(call["all_day"]),
+                    location: Self.firstString(in: call, keys: ["location"]),
+                    alertMinutes: Self.integerValue(call["alert_minutes"]),
+                    clearAlerts: Self.boolValue(call["clear_alerts"]) ?? false
+                )
+            )
+            return [
+                "action": "update_calendar_event",
+                "ok": true,
+                "event": calendarEventPayload(updated)
+            ]
+        } catch {
+            return [
+                "action": "update_calendar_event",
+                "ok": false,
+                "id": id,
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
+    private func executeCalendarFreeBusy(_ call: [String: Any]) async -> [String: Any] {
+        guard let start = parseDate(call["start"]), let end = parseDate(call["end"]), end > start else {
+            return [
+                "action": "calendar.free_busy",
+                "ok": false,
+                "error": "Provide start and end ISO 8601 dates, with end after start"
+            ]
+        }
+        do {
+            let events = try await LocalCalendarService.shared.loadEvents(start: start, end: end)
+            return [
+                "action": "calendar.free_busy",
+                "ok": true,
+                "start": isoString(start),
+                "end": isoString(end),
+                "is_free": events.isEmpty,
+                "busy_events": events.map(calendarEventPayload)
+            ]
+        } catch {
+            return [
+                "action": "calendar.free_busy",
+                "ok": false,
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
+    private func executeListCalendars() async -> [String: Any] {
+        do {
+            let calendars = try await LocalCalendarService.shared.loadCalendars()
+            return [
+                "action": "list_calendars",
+                "ok": true,
+                "calendars": calendars.map {
+                    [
+                        "id": $0.id,
+                        "name": $0.name,
+                        "color": $0.color,
+                        "is_default": $0.isDefault,
+                        "is_system": $0.isSystem
+                    ] as [String: Any]
+                }
+            ]
+        } catch {
+            return [
+                "action": "list_calendars",
+                "ok": false,
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
+    private func executeListContacts(_ call: [String: Any]) async -> [String: Any] {
+        let action = ((call["action"] as? String) ?? "contacts.list").lowercased()
+        let query = Self.firstString(in: call, keys: ["query", "search", "name"])
+        let limit = Self.integerValue(call["limit"]) ?? 50
+        do {
+            let contacts = try await LocalContactsService.shared.listContacts(query: query, limit: limit)
+            return [
+                "action": action.contains("search") ? "contacts.search" : "contacts.list",
+                "ok": true,
+                "query": query ?? "",
+                "count": contacts.count,
+                "contacts": contacts.map(contactPayload)
+            ]
+        } catch {
+            return [
+                "action": action.contains("search") ? "contacts.search" : "contacts.list",
+                "ok": false,
+                "error": error.localizedDescription
+            ]
+        }
+    }
+
+    private func executeGetContact(_ call: [String: Any]) async -> [String: Any] {
+        guard let id = Self.firstString(in: call, keys: ["id", "contact_id"]), !id.isEmpty else {
+            return [
+                "action": "contacts.get",
+                "ok": false,
+                "error": "Missing required field: id"
+            ]
+        }
+        do {
+            let contact = try await LocalContactsService.shared.contact(id: id)
+            return ["action": "contacts.get", "ok": true, "contact": contactPayload(contact)]
+        } catch {
+            return ["action": "contacts.get", "ok": false, "id": id, "error": error.localizedDescription]
+        }
+    }
+
     static func parsedToolCalls(in content: String) -> [[String: Any]] {
         let pattern = #"```iexa_native\s*([\s\S]*?)```"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
@@ -1814,6 +1984,18 @@ final class LocalNativeToolService {
             return "browser.observe"
         case "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result":
             return "browser.wait_for_image"
+        case "update_calendar_event", "calendar.update_event":
+            return "calendar.update_event"
+        case "calendar.free_busy", "calendar.freebusy", "calendar.availability":
+            return "calendar.free_busy"
+        case "list_calendars", "calendar.list_calendars":
+            return "calendar.list_calendars"
+        case "contacts.list", "contacts_list", "list_contacts":
+            return "contacts.list"
+        case "contacts.search", "contacts_search", "search_contacts":
+            return "contacts.search"
+        case "contacts.get", "contacts_get", "get_contact":
+            return "contacts.get"
         case "shortcuts.run", "shortcut.run", "shortcuts_run", "run_shortcut":
             return "shortcuts.run"
         case "shortcuts.open", "shortcut.open", "shortcuts_open", "open_shortcut":
@@ -1849,6 +2031,12 @@ final class LocalNativeToolService {
              "list_calendar_events", "calendar.list_events",
              "create_calendar_event", "calendar.create_event",
              "delete_calendar_event", "calendar.delete_event",
+             "update_calendar_event", "calendar.update_event",
+             "calendar.free_busy", "calendar.freebusy", "calendar.availability",
+             "list_calendars", "calendar.list_calendars",
+             "contacts.list", "contacts_list", "list_contacts",
+             "contacts.search", "contacts_search", "search_contacts",
+             "contacts.get", "contacts_get", "get_contact",
              "device.status", "device_status", "get_device_status",
              "device.info", "device_info", "get_device_info",
              "clipboard.read", "clipboard_read", "read_clipboard",
@@ -1973,6 +2161,21 @@ final class LocalNativeToolService {
         return payload
     }
 
+    private func contactPayload(_ contact: LocalContact) -> [String: Any] {
+        var payload: [String: Any] = [
+            "id": contact.id,
+            "display_name": contact.displayName,
+            "given_name": contact.givenName,
+            "family_name": contact.familyName,
+            "phone_numbers": contact.phoneNumbers.map { ["label": $0.label, "value": $0.value] },
+            "email_addresses": contact.emailAddresses.map { ["label": $0.label, "value": $0.value] }
+        ]
+        if let organizationName = contact.organizationName {
+            payload["organization"] = organizationName
+        }
+        return payload
+    }
+
     private func parseDate(_ value: Any?) -> Date? {
         if let date = value as? Date {
             return date
@@ -2002,6 +2205,36 @@ final class LocalNativeToolService {
             return Calendar.current.startOfDay(for: date)
         }
         return nil
+    }
+
+    private static func integerValue(_ value: Any?) -> Int? {
+        switch value {
+        case let value as Int:
+            return value
+        case let value as NSNumber:
+            return value.intValue
+        case let value as String:
+            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        default:
+            return nil
+        }
+    }
+
+    private static func boolValue(_ value: Any?) -> Bool? {
+        switch value {
+        case let value as Bool:
+            return value
+        case let value as NSNumber:
+            return value.boolValue
+        case let value as String:
+            switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "1", "yes": return true
+            case "false", "0", "no": return false
+            default: return nil
+            }
+        default:
+            return nil
+        }
     }
 
     private func isoString(_ date: Date) -> String {

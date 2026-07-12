@@ -42,6 +42,8 @@
 	<string>Iexa needs full calendar access to show, create, and delete local calendar events on this device.</string>
 	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
 	<string>Iexa needs calendar write access to create local calendar events on this device.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Iexa uses your contacts only when you ask it to find or read a contact on this device.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Iexa saves generated images to your photo library when you tap Save.</string>
 	<key>NSSupportsLiveActivities</key>

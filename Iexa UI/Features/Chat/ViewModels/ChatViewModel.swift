@@ -1813,7 +1813,23 @@ final class ChatViewModel {
     }
 
     private static func isImageFile(_ file: ChatMessageFile) -> Bool {
-        file.type == "image" || (file.contentType ?? "").lowercased().hasPrefix("image/")
+        if file.type == "image" || (file.contentType ?? "").lowercased().hasPrefix("image/") {
+            return true
+        }
+        let candidates = [file.name, file.url, file.displayURL]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        if candidates.contains(where: {
+            $0.hasPrefix("data:image/")
+                || $0.hasPrefix("image:data/")
+                || $0.hasPrefix("local-inline-image:")
+                || $0.hasPrefix("file://")
+        }) {
+            return true
+        }
+        return candidates.contains { value in
+            let ext = (value as NSString).pathExtension.lowercased()
+            return ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "avif"].contains(ext)
+        }
     }
 
     private static func isVideoFile(_ file: ChatMessageFile) -> Bool {
@@ -2636,11 +2652,20 @@ final class ChatViewModel {
         Local Alpine rules:
         - Prefer `file_read`, `file_write`, `file_edit`, `list_dir`, `glob`, `grep`, `verify`, and `browser_use` over raw shell for common work.
         - Raw shell must be POSIX sh/BusyBox ash. Use `/mnt/iexa/shared` as the default project workspace; `/mnt/iexa` is only the namespace root for shared, skills, memory, and mounts.
+        - When you generate, download, convert, or save an image under `/mnt/iexa/shared`, `/mnt/iexa/mounts`, or `/mnt/iexa/attachments`, prefer a simple filename without spaces and include its actual saved path in the final answer as a Markdown image, for example `![图片](/mnt/iexa/shared/result.png)`. Iexa renders PNG/JPG/JPEG/WebP/GIF/BMP/AVIF paths inline in the chat body. Do not only say "preview above" or describe the file; include the path.
+        \(localAlpineDNSLookupRules)
         - Install OS packages with Alpine `apk` only: check `command -v <tool>` or `apk info -e <pkg>`, then `apk add --no-cache <pkg>`.
         - RootFS Management mirror settings are already applied inside the live Alpine rootfs. APK uses `/etc/apk/repositories`; Python uses `/etc/pip.conf` and `/root/.config/pip/pip.conf`; npm uses `/etc/npmrc` and `/root/.npmrc`. Use `apk add --no-cache`, `python3 -m pip install ...`, and `npm install` normally; inspect those config files only when package installs are slow or failing.
         - Do not use apt/brew/sudo/systemctl/macOS/Windows commands or bash/GNU-only syntax such as `find -printf`, `grep -P`, `[[ ... ]]`, `source`, process substitution, or `sed -i ''`.
         - Use the tool `delay` field for waits; avoid shell `sleep` and Python `time.sleep()` in generated tests.
         - Large command/tool outputs are offloaded under `/mnt/iexa/.iexa-output-offload`; use `file_read` on an `output_reference` if full content is needed. Do not rerun the same command only to see omitted output tail; rerun only when the command failed, the reference is missing/unreadable, inputs changed, or the user explicitly asks for a fresh run.
+        """
+
+    private static let localAlpineDNSLookupRules = """
+        - DNS/domain lookup compatibility: Local Alpine already includes `nslookup`; do not install `bind-tools`, `dig`, or `drill` just to inspect DNS. For user requests such as "查 DNS", "查询域名 DNS 记录", "DNS 复查", or "lookup DNS", extract the hostname from any URL first, then run bounded `nslookup` loops. Use record types `A AAAA CNAME MX NS TXT SOA`. Prefer the runtime's default resolver first; for explicit public verification prefer `223.5.5.5` and `119.29.29.29` before `8.8.8.8`/`1.1.1.1`, because the embedded iSH network path can hang on some public DNS servers. Always wrap explicit DNS-server probes with `timeout 5` or `busybox timeout 5` so one blocked server does not stall the whole loop. Example:
+          `domain='example.com'; for t in A AAAA CNAME MX NS TXT SOA; do echo "[$t]"; nslookup -type=$t "$domain" 2>&1 | sed 's/[[:space:]]*$//'; done`
+          Public check:
+          `domain='example.com'; for s in 223.5.5.5 119.29.29.29 8.8.8.8 1.1.1.1; do echo "SERVER $s"; for t in A AAAA MX NS TXT SOA; do echo "[$t]"; timeout 5 nslookup -type=$t "$domain" "$s" 2>&1 | sed 's/[[:space:]]*$//'; done; done`
         """
 
     private static func localAlpineNativeToolSchemas(includeMemoryTools: Bool) -> [[String: Any]] {
@@ -2649,7 +2674,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "shell_execute",
-                    "description": "Run one bounded POSIX sh/BusyBox ash command in Local Alpine. Use `/mnt/iexa/shared` for project work and `apk add --no-cache` for missing OS packages.",
+                    "description": "Run one bounded POSIX sh/BusyBox ash command in Local Alpine. Use `/mnt/iexa/shared` for project work. For DNS lookups use built-in `nslookup`; do not install bind-tools/dig/drill for DNS.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2899,6 +2924,8 @@ final class ChatViewModel {
         Rules:
         - Current device time: \(nowText), timezone: \(timezoneName). For web/search/browser tasks involving current, latest, today, now, prices, releases, schedules, news, weather, or other time-sensitive data, build queries from this device time. Never use model training-cutoff dates as search dates.
         - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` (model read/write for local `SKILL.md` skills), `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
+        - Inline saved images: after generating, downloading, converting, or saving an image file, prefer a simple filename without spaces and put the real saved file path in the final answer using Markdown image syntax, e.g. `![图片](/mnt/iexa/shared/result.png)`. Iexa renders PNG/JPG/JPEG/WebP/GIF/BMP/AVIF paths from `/mnt/iexa/shared`, `/mnt/iexa/mounts`, and `/mnt/iexa/attachments` directly in the chat body. If `browser_use.fetch`, `wait_for_image`, or shell saves an image, include that saved path; do not only say it was saved.
+        \(localAlpineDNSLookupRules)
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
         - RootFS Management in Iexa has already written the selected mirrors into the active Alpine rootfs: `/etc/apk/repositories`, `/etc/pip.conf`, `/root/.config/pip/pip.conf`, `/etc/npmrc`, and `/root/.npmrc`. Trust those settings and install packages normally with `apk add --no-cache <pkg>`, `python3 -m pip install ...`, and `npm install ...`; if a package install is slow or fails, inspect those config files or suggest changing mirrors/resetting RootFS Management instead of guessing a different OS.
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
@@ -3264,6 +3291,8 @@ final class ChatViewModel {
           {"tool_title":"列出目录","command":"pwd && ls -la","cwd":"/mnt/iexa/shared"}
           ```
         - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` (model read/write for local `SKILL.md` skills), `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Execution is embedded Local Alpine/iSH, not Open Terminal, iOS/macOS/Windows, Debian, or Ubuntu.
+        - To show a downloaded/generated local image in the chat body, prefer a simple filename without spaces and include the saved path in the final answer as Markdown, for example `![图片](/mnt/iexa/shared/result.png)`. Iexa renders PNG/JPG/JPEG/WebP/GIF/BMP/AVIF paths from `/mnt/iexa/shared`, `/mnt/iexa/mounts`, and `/mnt/iexa/attachments` inline.
+        \(localAlpineDNSLookupRules)
         - Shell is Alpine BusyBox/ash. Use `apk add --no-cache` for missing OS packages after `command -v` or `apk info -e`; never use apt/brew/sudo/systemctl or bash/GNU-only syntax.
         - Tools: \(toolNames). Compatibility aliases are accepted: `file_read`, `file_write`, `file_edit`, `shell_execute`, `browser_use`, `web_fetch`, `read_image`.
         - Every step needs a short user-language `tool_title`/`step_title`/`label`.
@@ -6750,17 +6779,44 @@ final class ChatViewModel {
                     "error": "",
                     "content_type": contentType
                 ])
-                if isImage,
-                   let dataURL = attachment.displayDataURL
-                    ?? attachment.data.map({ inlineImageDataURL(data: $0, fileName: attachment.name) }) {
-                    let displayURL = attachment.displayImageReference ?? inlineImageDisplayReference(dataURL: dataURL)
-                    inlineImageFiles.append(ChatMessageFile(
-                        type: "image",
-                        url: fileId,
-                        name: attachment.name,
-                        contentType: contentType,
-                        displayURL: displayURL
-                    ))
+                if isImage {
+                    let localDataURL = attachment.displayDataURL
+                        ?? attachment.data.map({ inlineImageDataURL(data: $0, fileName: attachment.name) })
+                    let recoveredDataURL: String?
+                    if let localDataURL {
+                        recoveredDataURL = localDataURL
+                    } else if let (rawData, rawContentType) = try? await manager.apiClient.getFileContent(id: fileId) {
+                        let recoveredName = attachment.name.isEmpty
+                            ? "image.\(Self.fileExtension(forImageContentType: rawContentType))"
+                            : attachment.name
+                        let prepared = FileAttachmentService.prepareImageForUpload(
+                            data: rawData,
+                            originalName: recoveredName
+                        )
+                        recoveredDataURL = inlineImageDataURL(data: prepared.data, fileName: prepared.fileName)
+                    } else {
+                        recoveredDataURL = nil
+                    }
+
+                    if let dataURL = recoveredDataURL {
+                        inlineImageDataURLsForUserMessage.append(dataURL)
+                        let displayURL = attachment.displayImageReference ?? inlineImageDisplayReference(dataURL: dataURL)
+                        inlineImageFiles.append(ChatMessageFile(
+                            type: "image",
+                            url: fileId,
+                            name: attachment.name,
+                            contentType: Self.imageContentType(for: dataURL),
+                            displayURL: displayURL
+                        ))
+                    } else {
+                        inlineImageFiles.append(ChatMessageFile(
+                            type: "image",
+                            url: fileId,
+                            name: attachment.name,
+                            contentType: contentType,
+                            displayURL: attachment.displayImageReference
+                        ))
+                    }
                 }
             } else if let data = attachment.data, attachment.type == .image {
                 let dataURL = inlineImageDataURL(data: data, fileName: attachment.name)
@@ -6834,6 +6890,7 @@ final class ChatViewModel {
                     if isImage {
                         let dataURL = inlineImageDataURL(data: data, fileName: attachment.name)
                         let displayURL = attachment.displayImageReference ?? inlineImageDisplayReference(dataURL: dataURL)
+                        inlineImageDataURLsForUserMessage.append(dataURL)
                         inlineImageFiles.append(ChatMessageFile(
                             type: "image",
                             url: fileId,
@@ -7096,6 +7153,7 @@ final class ChatViewModel {
                 modelId: modelId,
                 modelPromptText: modelPromptText,
                 messageText: messageText,
+                imageSourceMessageId: userMessageId,
                 currentAttachments: currentAttachments,
                 manager: manager
             )
@@ -7208,7 +7266,15 @@ final class ChatViewModel {
                                 for: requestedCanvasSize,
                                 modelId: modelId
                             )
-                            let editImages = self.editableImages(from: currentAttachments)
+                            let editImages = self.editableImagesForCurrentTurn(
+                                attachments: currentAttachments,
+                                messageId: userMessageId,
+                                source: "openai-compatible-direct"
+                            )
+                            let requiresEditImages = self.currentTurnContainsImageInput(
+                                attachments: currentAttachments,
+                                messageId: userMessageId
+                            )
                             let imagePromptForAPI = Self.promptWithImageSizeInstruction(
                                 imagePrompt.isEmpty
                                     ? (editImages.count > 1 ? "Use all attached images as references and combine or edit them according to the user's request." : "Edit this image.")
@@ -7238,7 +7304,8 @@ final class ChatViewModel {
                                 requestedCanvasSize: requestedCanvasSize,
                                 editImages: editImages,
                                 manager: manager,
-                                originalPromptWasEmpty: imagePrompt.isEmpty
+                                originalPromptWasEmpty: imagePrompt.isEmpty,
+                                requiresEditImages: requiresEditImages
                             )
                             if generatedImageSlots.isEmpty {
                                 throw APIError.unknown(
@@ -9009,7 +9076,7 @@ final class ChatViewModel {
         let command = firstCommand.trimmingCharacters(in: CharacterSet(charactersIn: "(){}"))
         let inspectionCommands: Set<String> = [
             "cat", "date", "df", "du", "env", "find", "free", "grep", "head",
-            "id", "ls", "pwd", "rg", "sed", "tail", "uname", "wc", "whoami"
+            "id", "ls", "nslookup", "pwd", "rg", "sed", "tail", "uname", "wc", "whoami"
         ]
         return inspectionCommands.contains(command)
     }
@@ -9019,7 +9086,7 @@ final class ChatViewModel {
             "apk", "ash", "sh", "bash", "cat", "cd", "chmod", "chown", "command", "cp", "date",
             "curl", "df", "du", "echo", "env", "find", "free", "gcc", "g++", "git", "grep", "head",
             "id", "java", "javac", "go", "cargo", "rustc", "ls", "lua", "make", "cmake", "mkdir",
-            "mv", "node", "npm", "npx", "perl", "php", "pip", "pip3", "printf", "pwd",
+            "mv", "node", "npm", "npx", "nslookup", "perl", "php", "pip", "pip3", "printf", "pwd",
             "python", "python3", "rm", "rmdir", "ruby", "sed", "sleep", "tail", "tar", "test",
             "top", "touch", "type", "uname", "unset", "vi", "vim", "wget", "which", "whoami"
         ]
@@ -9758,6 +9825,7 @@ final class ChatViewModel {
         modelId: String,
         modelPromptText: String,
         messageText: String,
+        imageSourceMessageId: String?,
         currentAttachments: [ChatAttachment],
         manager: ConversationManager
     ) {
@@ -9860,7 +9928,15 @@ final class ChatViewModel {
                     modelId: modelId,
                     preferServerDefaultModel: preferServerDefaultImageModel
                 )
-                let editImages = self.editableImages(from: currentAttachments)
+                let editImages = self.editableImagesForCurrentTurn(
+                    attachments: currentAttachments,
+                    messageId: imageSourceMessageId,
+                    source: "independent-direct"
+                )
+                let requiresEditImages = self.currentTurnContainsImageInput(
+                    attachments: currentAttachments,
+                    messageId: imageSourceMessageId
+                )
                 let imagePromptForAPI = Self.promptWithImageSizeInstruction(
                     imagePrompt.isEmpty
                         ? (editImages.count > 1 ? "Use all attached images as references and combine or edit them according to the user's request." : "Edit this image.")
@@ -9891,6 +9967,7 @@ final class ChatViewModel {
                     editImages: editImages,
                     manager: manager,
                     originalPromptWasEmpty: imagePrompt.isEmpty,
+                    requiresEditImages: requiresEditImages,
                     preferServerDefaultModel: preferServerDefaultImageModel
                 )
                 try Task.checkCancellation()
@@ -12922,6 +12999,7 @@ final class ChatViewModel {
             endpointSize: requestedImageSize
         )
         let editImages = editableImagesFromLatestUserMessage()
+        let requiresEditImages = latestUserMessageContainsImageInput()
         let prompts = Self.imageVariantPrompts(
             basePrompt: promptForAPI,
             requestedCount: requestedCount
@@ -12959,6 +13037,7 @@ final class ChatViewModel {
                 editImages: editImages,
                 manager: manager,
                 originalPromptWasEmpty: false,
+                requiresEditImages: requiresEditImages,
                 preferServerDefaultModel: true
             )
             guard !slots.isEmpty else {
@@ -17354,7 +17433,7 @@ final class ChatViewModel {
 
     private func editableImages(from attachments: [ChatAttachment], limit: Int = 16) -> [ImageEditSource] {
         var images: [ImageEditSource] = []
-        for attachment in attachments where attachment.type == .image {
+        for attachment in attachments where isImageAttachment(attachment) {
             if let data = attachment.data {
                 let prepared = FileAttachmentService.prepareImageForUpload(data: data, originalName: attachment.name)
                 images.append(ImageEditSource(data: prepared.data, fileName: prepared.fileName))
@@ -17370,12 +17449,94 @@ final class ChatViewModel {
         return images
     }
 
+    private func currentTurnContainsImageInput(
+        attachments: [ChatAttachment],
+        messageId: String?
+    ) -> Bool {
+        if attachments.contains(where: isImageAttachment) {
+            return true
+        }
+        if let messageId,
+           inlineImageDataURLsByMessageId[messageId]?.isEmpty == false {
+            return true
+        }
+        if let messageId,
+           conversation?.messages.first(where: { $0.id == messageId })?.files.contains(where: Self.isImageFile) == true {
+            return true
+        }
+        return false
+    }
+
+    private func isImageAttachment(_ attachment: ChatAttachment) -> Bool {
+        attachment.type == .image || mimeType(for: attachment.name).hasPrefix("image/")
+    }
+
+    private func editableImagesForCurrentTurn(
+        attachments: [ChatAttachment],
+        messageId: String?,
+        limit: Int = 16,
+        source: String
+    ) -> [ImageEditSource] {
+        let attachmentImages = editableImages(from: attachments, limit: limit)
+        if !attachmentImages.isEmpty {
+            DiagnosticLogManager.shared.info(
+                "Image edit source=\(source) editImages=\(attachmentImages.count) via=attachments attachments=\(Self.imageAttachmentDebugSummary(attachments))",
+                category: "Chat"
+            )
+            return attachmentImages
+        }
+
+        let messageImages = messageId.map { editableImagesFromMessage(id: $0, limit: limit) } ?? []
+        DiagnosticLogManager.shared.info(
+            "Image edit source=\(source) editImages=\(messageImages.count) via=\(messageImages.isEmpty ? "none" : "message-inline") messageId=\(messageId ?? "nil") attachments=\(Self.imageAttachmentDebugSummary(attachments))",
+            category: "Chat"
+        )
+        return messageImages
+    }
+
     private func editableImagesFromLatestUserMessage(limit: Int = 16) -> [ImageEditSource] {
         guard let message = conversation?.messages.last(where: { $0.role == .user }) else {
             return []
         }
+        return editableImagesFromMessage(id: message.id, limit: limit)
+    }
 
+    private func latestUserMessageContainsImageInput() -> Bool {
+        guard let message = conversation?.messages.last(where: { $0.role == .user }) else {
+            return false
+        }
+        if inlineImageDataURLsByMessageId[message.id]?.isEmpty == false {
+            return true
+        }
+        return message.files.contains(where: Self.isImageFile)
+    }
+
+    private func editableImagesFromMessage(id messageId: String, limit: Int = 16) -> [ImageEditSource] {
+        let message = conversation?.messages.first(where: { $0.id == messageId })
         var images: [ImageEditSource] = []
+        for (index, dataURL) in (inlineImageDataURLsByMessageId[messageId] ?? []).enumerated() {
+            guard let data = Self.imageData(fromImageReference: dataURL) else { continue }
+            let imageFiles = message?.files.filter(Self.isImageFile) ?? []
+            let fallbackName = (imageFiles.indices.contains(index)
+                ? imageFiles[index].name
+                : nil)
+                ?? "image-\(index + 1).png"
+            let prepared = FileAttachmentService.prepareImageForUpload(
+                data: data,
+                originalName: fallbackName
+            )
+            images.append(ImageEditSource(data: prepared.data, fileName: prepared.fileName))
+            if images.count >= limit {
+                return images
+            }
+        }
+        if !images.isEmpty {
+            return images
+        }
+
+        guard let message else {
+            return []
+        }
         for file in message.files where Self.isImageFile(file) {
             let candidates = [file.displayURL, file.url]
                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -17393,6 +17554,16 @@ final class ChatViewModel {
             }
         }
         return images
+    }
+
+    private static func imageAttachmentDebugSummary(_ attachments: [ChatAttachment]) -> String {
+        attachments.enumerated().map { index, attachment in
+            let dataCount = attachment.data?.count ?? 0
+            let displayData = attachment.displayDataURL?.isEmpty == false
+            let displayRef = attachment.displayImageReference?.isEmpty == false
+            let fileId = attachment.uploadedFileId?.isEmpty == false
+            return "#\(index):type=\(attachment.type) name=\(attachment.name) data=\(dataCount) displayData=\(displayData) displayRef=\(displayRef) uploaded=\(fileId) status=\(attachment.uploadStatus)"
+        }.joined(separator: " | ")
     }
 
     private static func imageData(fromImageReference reference: String?) -> Data? {
@@ -17873,9 +18044,19 @@ final class ChatViewModel {
         editImages: [ImageEditSource],
         manager: ConversationManager,
         originalPromptWasEmpty: Bool,
+        requiresEditImages: Bool = false,
         preferServerDefaultModel: Bool = false
     ) async throws -> [GeneratedImageSlot] {
         guard !prompts.isEmpty else { return [] }
+        if requiresEditImages && editImages.isEmpty {
+            throw APIError.unknown(
+                underlying: NSError(
+                    domain: "ChatViewModel",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "这次请求包含图片，但没有读取到可用于改图的图片数据，已停止改走文生图接口。"]
+                )
+            )
+        }
         if editImages.isEmpty && originalPromptWasEmpty {
             throw APIError.unknown(
                 underlying: NSError(
@@ -19052,7 +19233,7 @@ final class ChatViewModel {
         For memory actions, when real function tools are present, call `memory_write` to save a concise durable memory or `memory_get` to search stored memories. Use `memory_write` only for stable user preferences, recurring project context, reusable facts, or durable conventions. Use `memory_get` when the user asks what you remember or asks to recall prior context. Do not save secrets, passwords, tokens, or transient chat noise.
         """ : ""
         let deviceActionExamples = includeDeviceTools
-            ? "- device/status: `device.status`, `device.info`; clipboard: `clipboard.read`, `clipboard.write`; notification: `system.notify`; location/weather/calendar: `get_location`, `get_weather`, `list_calendar_events`, `create_calendar_event`, `delete_calendar_event`.\n"
+            ? "- device/status: `device.status`, `device.info`; clipboard: `clipboard.read`, `clipboard.write`; notification: `system.notify`; location/weather/calendar: `get_location`, `get_weather`, `list_calendars`, `list_calendar_events`, `create_calendar_event`, `update_calendar_event`, `delete_calendar_event`, `calendar.free_busy`; contacts (read-only): `contacts.list`, `contacts.search`, `contacts.get`.\n"
             : ""
         let shortcutsActionExamples = includeShortcutsTools
             ? "- Shortcuts: `shortcuts.run` with `name` and optional `input`; `shortcuts.open` with `name`; `shortcuts.create` only opens the system creation screen.\n"
@@ -19118,6 +19299,7 @@ final class ChatViewModel {
         Environment:
         - Default workspace: `/mnt/iexa/shared`. Relative paths resolve there.
         - Namespace root: `/mnt/iexa`. Reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` containing read/write local `SKILL.md` skill files, `/mnt/iexa/memory` containing user-maintained `GLOBAL.md` plus daily memory files, and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Memory is model-read-only for structured write/edit/delete/move/copy/mkdir tools; use the `memory_write` tool for daily memory entries. Mounted folder structured write permission follows the user's file-browser setting for each mount.
+        \(localAlpineDNSLookupRules)
         - Shell: Alpine Linux BusyBox/ash. Prefer portable POSIX `sh` syntax; avoid Bash-only arrays, process substitution, and Debian/macOS assumptions unless the needed tool is first proven installed.
         - Package manager: `apk`. Check first with `apk info -e <pkg>` or `command -v <tool>`; install only packages proven missing with `apk add --no-cache <pkg>`. When a task needs a missing OS tool/library, install it through Local Alpine `apk` and continue; do not tell the user to install it on iOS/macOS/Ubuntu and do not use `apt`/`brew`/`sudo`.
         - RootFS Management mirror choices are already materialized in the running rootfs before commands run. APK reads `/etc/apk/repositories`; pip reads `/etc/pip.conf` and `/root/.config/pip/pip.conf`; npm reads `/etc/npmrc` and `/root/.npmrc`. Use `apk add --no-cache <pkg>`, `python3 -m pip install ...`, and `npm install ...` directly. If package installation is slow or fails, inspect those files or tell the user to change/reset RootFS Management mirrors; do not assume Ubuntu/Debian package sources.
@@ -21684,6 +21866,10 @@ final class ChatViewModel {
         let officeKind = LocalNativeToolService.officeActionKind(in: executableContent)
         let browserAction = LocalNativeToolService.browserActionName(in: executableContent)
         let shortcutsAction = LocalNativeToolService.shortcutsActionName(in: executableContent)
+        let nativeAction = (LocalNativeToolService.parsedToolCalls(in: executableContent).first?["action"] as? String)
+            ?? directCalls.first?.name
+            ?? "local_native"
+        let usesGenericNativeStep = officeKind == nil && browserAction == nil
         if browserAction != nil, !isLocalBrowserNativeToolsEnabled {
             return
         }
@@ -21697,6 +21883,8 @@ final class ChatViewModel {
             markLocalOfficeGenerationStarted(messageId: messageId, kind: officeKind)
         } else if let browserAction {
             markLocalBrowserToolStarted(messageId: messageId, actionName: browserAction)
+        } else if usesGenericNativeStep {
+            markLocalNativeToolStarted(messageId: messageId, action: nativeAction)
         }
         var result = await LocalNativeToolService.shared.executeBlocks(
             in: executableContent,
@@ -21769,6 +21957,12 @@ final class ChatViewModel {
                         requiresUserVerification: false
                     )
                 )
+            } else if usesGenericNativeStep {
+                finishLocalNativeToolStep(
+                    messageId: messageId,
+                    action: nativeAction,
+                    succeeded: false
+                )
             }
             if shortcutsAction != nil {
                 return
@@ -21801,6 +21995,13 @@ final class ChatViewModel {
                 files: []
             )
             return
+        }
+        if usesGenericNativeStep {
+            finishLocalNativeToolStep(
+                messageId: messageId,
+                action: nativeAction,
+                succeeded: !Self.localNativeToolSummaryContainsFailure(result.summary)
+            )
         }
         var inheritedStatusHistory: [ChatStatusUpdate] = []
         if let browserDocument = result.browserDocument {
@@ -22128,6 +22329,92 @@ final class ChatViewModel {
         conversation?.history.updateNode(id: messageId) { node in
             node.metadata = metadata
         }
+    }
+
+    private func markLocalNativeToolStarted(messageId: String, action: String) {
+        updateLocalNativeToolStepMessage(
+            messageId: messageId,
+            action: action,
+            description: Self.localNativeToolStepTitle(for: action, completed: false),
+            done: false
+        )
+    }
+
+    private func finishLocalNativeToolStep(messageId: String, action: String, succeeded: Bool) {
+        updateLocalNativeToolStepMessage(
+            messageId: messageId,
+            action: action,
+            description: Self.localNativeToolStepTitle(for: action, completed: true, succeeded: succeeded),
+            done: true
+        )
+    }
+
+    private func updateLocalNativeToolStepMessage(
+        messageId: String,
+        action: String,
+        description: String,
+        done: Bool
+    ) {
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        let normalizedAction = action.trimmingCharacters(in: .whitespacesAndNewlines)
+        var metadata = conversation?.messages[index].metadata ?? [:]
+        metadata["iexa_local_native_tool_parent"] = "true"
+        let status = ChatStatusUpdate(
+            action: "local_native_tool",
+            status: "local_native.\(normalizedAction.replacingOccurrences(of: " ", with: "_"))",
+            description: description,
+            done: done,
+            occurredAt: .now
+        )
+        let history = Self.appendingToolStatus(
+            status,
+            to: conversation?.messages[index].statusHistory ?? []
+        )
+        conversation?.messages[index].content = description
+        conversation?.messages[index].isStreaming = false
+        conversation?.messages[index].statusHistory = history
+        conversation?.messages[index].metadata = metadata
+        conversation?.history.updateNode(id: messageId) { node in
+            node.content = description
+            node.done = true
+            node.statusHistory = history
+            node.metadata = metadata
+        }
+        if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
+            streamingStore.updateContent(description, displayContent: description)
+            streamingStore.setStatusHistory(history)
+        }
+        conversation?.history.currentId = messageId
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    private static func localNativeToolStepTitle(
+        for action: String,
+        completed: Bool,
+        succeeded: Bool = true
+    ) -> String {
+        let normalized = action.lowercased()
+        let base: String
+        if normalized.contains("contacts.search") { base = "搜索联系人" }
+        else if normalized.contains("contacts.get") { base = "读取联系人" }
+        else if normalized.contains("contacts") { base = "读取通讯录" }
+        else if normalized.contains("calendar.free") { base = "查询日历空闲时间" }
+        else if normalized.contains("calendar.list_calendars") || normalized.contains("list_calendars") { base = "读取日历列表" }
+        else if normalized.contains("calendar.update") || normalized.contains("update_calendar") { base = "更新日历事件" }
+        else if normalized.contains("calendar") { base = "处理日历" }
+        else if normalized.contains("location") { base = "读取当前位置" }
+        else if normalized.contains("weather") { base = "查询天气" }
+        else if normalized.contains("clipboard") { base = "访问剪贴板" }
+        else if normalized.contains("notify") { base = "发送本地通知" }
+        else { base = "运行本地工具" }
+
+        guard completed else { return "正在\(base)..." }
+        return succeeded ? "已完成：\(base)" : "执行失败：\(base)"
+    }
+
+    private static func localNativeToolSummaryContainsFailure(_ summary: String) -> Bool {
+        let compact = summary.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+        return compact.contains("\"ok\":false") || compact.contains("\"ok\":0")
     }
 
     private static func isLocalNativeSearchStatusAction(_ action: String) -> Bool {
@@ -22879,9 +23166,11 @@ final class ChatViewModel {
             "定位", "位置", "我在哪", "附近", "坐标", "经纬度",
             "天气", "气温", "温度", "下雨", "降雨", "风速", "湿度", "冷不冷", "热不热",
             "日历", "日程", "行程", "事件", "提醒", "会议", "预约", "安排",
+            "联系人", "通讯录", "电话簿", "名片", "联系信息",
             "device status", "device info", "battery", "clipboard", "pasteboard",
             "copy to clipboard", "read clipboard", "notification", "notify me",
             "calendar", "event", "schedule", "reminder", "location", "where am i",
+            "contact", "contacts", "address book", "phone book",
             "weather", "temperature", "rain", "wind", "humidity"
         ]
         return markers.contains { lower.contains($0) }
@@ -25401,8 +25690,11 @@ final class ChatViewModel {
     }
 
     private static func safeAssistantDisplayContent(_ text: String) -> String {
-        let withoutNativeToolEcho = LocalNativeToolService.containsNativeToolBlock(text)
-            ? LocalNativeToolService.visibleContent(from: text)
+        let nativeVisibleContent = LocalNativeToolService.visibleContent(from: text)
+        let textHasOnlyNativeToolPayload = nativeVisibleContent.isEmpty
+            && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let withoutNativeToolEcho = (LocalNativeToolService.containsNativeToolBlock(text) || textHasOnlyNativeToolPayload)
+            ? nativeVisibleContent
             : text
         let withoutLocalToolEcho = cleanedLocalAlpineMissingToolEchoes(withoutNativeToolEcho)
         if shouldShowInlineImageReceiveState(for: withoutLocalToolEcho) {
@@ -25639,6 +25931,7 @@ final class ChatViewModel {
         }
         if extractedImages.isEmpty,
            Self.contentLikelyContainsExtractableImageReference(rawContent),
+           Self.shouldAttachImageExtractionFailurePlaceholder(to: conversation!.messages[messageIndex]),
            !merged.contains(where: { Self.isImageFile($0) }) {
             merged.append(ChatMessageFile.generatedImageFailurePlaceholder(index: 1))
             appended = true
@@ -26026,6 +26319,7 @@ final class ChatViewModel {
         if hasContent,
            extractedImages.isEmpty,
            Self.contentLikelyContainsExtractableImageReference(message.content),
+           Self.shouldAttachImageExtractionFailurePlaceholder(to: message),
            !mergedFiles.contains(where: { Self.isImageFile($0) }) {
             mergedFiles.append(ChatMessageFile.generatedImageFailurePlaceholder(index: 1))
             appendedFile = true
@@ -26130,10 +26424,15 @@ final class ChatViewModel {
 
         if content.utf8.count <= 240_000 {
             addMatches(#"!?\[[^\]]*\]\(\s*(https?://[^)\s]+)(?:\s+["'][^)]*["'])?\s*\)"#)
+            addMatches(#"!?\[[^\]]*\]\(\s*<((?:local-alpine:)?/(?:mnt/iexa/)?(?:shared|mounts|attachments)/[^>]+?\.(?:png|jpe?g|webp|gif|bmp|avif))>\s*\)"#)
+            addMatches(#"!?\[[^\]]*\]\(\s*((?:local-alpine:)?/(?:mnt/iexa/)?(?:shared|mounts|attachments)/[^)\s]+?\.(?:png|jpe?g|webp|gif|bmp|avif))(?:\s+["'][^)]*["'])?\s*\)"#)
             addMatches(#"<img[^>]+src=["'](https?://[^"']+)["']"#)
+            addMatches(#"<img[^>]+src=["']((?:local-alpine:)?/(?:mnt/iexa/)?(?:shared|mounts|attachments)/[^"']+?\.(?:png|jpe?g|webp|gif|bmp|avif))["']"#)
             addMatches(#"(?:"b64_json"|"base64"|"image_base64"|"imageBase64")\s*:\s*"([A-Za-z0-9+/=_\-\s]{128,})""#)
             addMatches(#"(?:"url"|"image_url"|"display_url"|"download_url"|"image")\s*:\s*"(https?:\\?/\\?/[^"]+)""#)
+            addMatches(#"(?:"url"|"image_url"|"display_url"|"download_url"|"image"|"path"|"file"|"saved_path")\s*:\s*"((?:local-alpine:)?/(?:mnt/iexa/)?(?:shared|mounts|attachments)/[^"]+?\.(?:png|jpe?g|webp|gif|bmp|avif))""#)
             addMatches(#"(https?://[^\s"'<>`)]+)"#)
+            addMatches(#"((?:local-alpine:)?/(?:mnt/iexa/)?(?:shared|mounts|attachments)/[^\s"'<>`)]+?\.(?:png|jpe?g|webp|gif|bmp|avif))"#)
         }
 
         let normalizedResults = results.compactMap { value -> String? in
@@ -26147,6 +26446,9 @@ final class ChatViewModel {
             if trimmed.hasPrefix("file://") {
                 return trimmed
             }
+            if let localAlpineReference = normalizedLocalAlpineImageReference(trimmed) {
+                return localAlpineReference
+            }
             if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") {
                 return isLikelyImageURL(trimmed) ? trimmed : nil
             }
@@ -26157,6 +26459,12 @@ final class ChatViewModel {
 
         var seen = Set<String>()
         return normalizedResults.filter { seen.insert($0).inserted }
+    }
+
+    private static func normalizedLocalAlpineImageReference(_ value: String) -> String? {
+        let candidate = sanitizedImageReferenceCandidate(value)
+        guard let path = normalizedLocalAlpineImagePathReference(candidate) else { return nil }
+        return "local-alpine:\(path)"
     }
 
     private static func extractInlineDataImageDataURIs(from content: String) -> [String] {
@@ -26330,6 +26638,17 @@ final class ChatViewModel {
             || content.range(of: "image_url", options: .caseInsensitive) != nil
             || content.range(of: "display_url", options: .caseInsensitive) != nil
             || content.range(of: "download_url", options: .caseInsensitive) != nil
+    }
+
+    private static func shouldAttachImageExtractionFailurePlaceholder(to message: ChatMessage) -> Bool {
+        if message.metadata?["iexa_image_generation_placeholder"] == "true" {
+            return true
+        }
+        return message.statusHistory.contains { status in
+            let action = status.action?.lowercased() ?? ""
+            let value = status.status?.lowercased() ?? ""
+            return action == "image_generation" || value.contains("image_generation")
+        }
     }
 
     private static func transformProseOutsideFencedCode(

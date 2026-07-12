@@ -36,6 +36,9 @@ fileprivate struct ToolCallPresentation {
         if normalized.contains("calendar") {
             return ToolCallPresentation(title: "日历", subtitle: displayName, symbol: "calendar", tint: .orange)
         }
+        if normalized.contains("contact") || normalized.contains("address_book") {
+            return ToolCallPresentation(title: "通讯录", subtitle: displayName, symbol: "person.crop.circle", tint: .teal)
+        }
         if normalized.contains("weather") {
             return ToolCallPresentation(title: "天气", subtitle: displayName, symbol: "cloud.sun", tint: .blue)
         }
@@ -2271,6 +2274,19 @@ private struct ToolCallResultBlockView: View {
     @State private var showFull: Bool = false
     @Environment(\.theme) private var theme
 
+    private struct ContactPhoneRow: Identifiable {
+        let id: String
+        let label: String
+        let value: String
+    }
+
+    private struct ContactResultRow: Identifiable {
+        let id: String
+        let displayName: String
+        let organization: String?
+        let phoneNumbers: [ContactPhoneRow]
+    }
+
     /// Lightweight JSON pretty-print — no syntax highlighting, no AttributedString.
     /// Falls back to the raw string if content is not valid JSON.
     private var formattedContent: String {
@@ -2308,29 +2324,39 @@ private struct ToolCallResultBlockView: View {
         return String(formattedContent.prefix(Self.truncationThreshold))
     }
 
+    private var contactRows: [ContactResultRow]? {
+        guard let object = Self.parsedJSONObject(from: content) else { return nil }
+        return Self.extractContactRows(from: object)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ScrollView(.vertical, showsIndicators: true) {
-                // LazyVStack renders one Text per line so SwiftUI only lays out
-                // the lines currently visible — prevents the main-thread stall
-                // that occurs when the entire large string is measured at once.
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    let lines = displayContent.components(separatedBy: "\n")
-                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        Text(line.isEmpty ? " " : line)
-                            .scaledFont(size: 12, design: .monospaced)
-                            .foregroundStyle(theme.textSecondary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
+            if let contactRows, !contactRows.isEmpty {
+                contactResultsView(contactRows)
+                    .padding(10)
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    // LazyVStack renders one Text per line so SwiftUI only lays out
+                    // the lines currently visible — prevents the main-thread stall
+                    // that occurs when the entire large string is measured at once.
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        let lines = displayContent.components(separatedBy: "\n")
+                        ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                            Text(line.isEmpty ? " " : line)
+                                .scaledFont(size: 12, design: .monospaced)
+                                .foregroundStyle(theme.textSecondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
+                    .padding(10)
                 }
-                .padding(10)
+                .frame(maxHeight: 320)
             }
-            .frame(maxHeight: 320)
 
             // Show full / collapse toggle
-            if formattedContent.count > Self.truncationThreshold {
+            if contactRows == nil && formattedContent.count > Self.truncationThreshold {
                 Divider()
                     .overlay(theme.cardBorder.opacity(0.2))
                 Button {
@@ -2358,6 +2384,204 @@ private struct ToolCallResultBlockView: View {
             RoundedRectangle(cornerRadius: CornerRadius.sm, style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(0.35), lineWidth: 0.5)
         )
+    }
+
+    @ViewBuilder
+    private func contactResultsView(_ rows: [ContactResultRow]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(rows) { contact in
+                VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(contact.displayName)
+                            .scaledFont(size: 13, weight: .semibold)
+                            .foregroundStyle(theme.textPrimary)
+                            .textSelection(.enabled)
+                        if let organization = contact.organization, !organization.isEmpty {
+                            Text(organization)
+                                .scaledFont(size: 11)
+                                .foregroundStyle(theme.textTertiary)
+                                .textSelection(.enabled)
+                        }
+                    }
+
+                    ForEach(contact.phoneNumbers) { phone in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                if !phone.label.isEmpty {
+                                    Text(phone.label)
+                                        .scaledFont(size: 10, weight: .medium)
+                                        .foregroundStyle(theme.textTertiary)
+                                }
+                                Text(phone.value)
+                                    .scaledFont(size: 12)
+                                    .foregroundStyle(theme.textSecondary)
+                                    .textSelection(.enabled)
+                            }
+                            Spacer(minLength: 8)
+                            Button {
+                                openDialer(for: phone.value)
+                            } label: {
+                                Label("拨打", systemImage: "phone.fill")
+                                    .labelStyle(.titleAndIcon)
+                                    .scaledFont(size: 11, weight: .semibold)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.green.opacity(theme.isDark ? 0.22 : 0.14))
+                                    .foregroundStyle(Color.green)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(dialURL(for: phone.value) == nil)
+                        }
+                        .padding(8)
+                        .background(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.45 : 0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                }
+                .padding(10)
+                .background(theme.surfaceContainer.opacity(theme.isDark ? 0.45 : 0.35))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(theme.cardBorder.opacity(0.25), lineWidth: 0.5)
+                )
+            }
+        }
+    }
+
+    private static func parsedJSONObject(from rawContent: String) -> Any? {
+        let trimmed = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let data = trimmed.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
+            if let string = object as? String,
+               let nested = parsedJSONObject(from: string) {
+                return nested
+            }
+            return object
+        }
+        return nil
+    }
+
+    private static func extractContactRows(from object: Any, depth: Int = 0) -> [ContactResultRow]? {
+        guard depth < 3 else { return nil }
+        if let array = object as? [Any] {
+            let rows = array.compactMap { item -> ContactResultRow? in
+                guard let dict = item as? [String: Any] else { return nil }
+                return contactRow(from: dict)
+            }
+            return rows.isEmpty ? nil : rows
+        }
+
+        guard let dict = object as? [String: Any] else { return nil }
+        if let contacts = dict["contacts"] as? [Any] {
+            return extractContactRows(from: contacts, depth: depth + 1)
+        }
+        if let contact = dict["contact"] as? [String: Any],
+           let row = contactRow(from: contact) {
+            return [row]
+        }
+        if let row = contactRow(from: dict) {
+            return [row]
+        }
+
+        for key in ["result", "output", "content", "data"] {
+            guard let nested = dict[key] else { continue }
+            if let nestedString = nested as? String,
+               let nestedObject = parsedJSONObject(from: nestedString),
+               let rows = extractContactRows(from: nestedObject, depth: depth + 1) {
+                return rows
+            }
+            if let rows = extractContactRows(from: nested, depth: depth + 1) {
+                return rows
+            }
+        }
+
+        return nil
+    }
+
+    private static func contactRow(from dict: [String: Any]) -> ContactResultRow? {
+        guard let phoneNumbers = contactPhoneRows(from: dict["phone_numbers"] ?? dict["phones"] ?? dict["phoneNumbers"]),
+              !phoneNumbers.isEmpty else {
+            return nil
+        }
+
+        let displayName = stringValue(dict["display_name"] ?? dict["displayName"] ?? dict["name"])
+            ?? [stringValue(dict["given_name"] ?? dict["givenName"]), stringValue(dict["family_name"] ?? dict["familyName"])]
+                .compactMap { $0 }
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedName = displayName.isEmpty ? "未命名联系人" : displayName
+        let id = stringValue(dict["id"] ?? dict["identifier"])
+            ?? "\(resolvedName)-\(phoneNumbers.map(\.value).joined(separator: ","))"
+        return ContactResultRow(
+            id: id,
+            displayName: resolvedName,
+            organization: stringValue(dict["organization_name"] ?? dict["organizationName"] ?? dict["organization"]),
+            phoneNumbers: phoneNumbers
+        )
+    }
+
+    private static func contactPhoneRows(from value: Any?) -> [ContactPhoneRow]? {
+        guard let value else { return nil }
+        if let array = value as? [Any] {
+            let rows = array.enumerated().compactMap { index, item -> ContactPhoneRow? in
+                if let dict = item as? [String: Any] {
+                    guard let phone = stringValue(dict["value"] ?? dict["number"] ?? dict["phone"]),
+                          !phone.isEmpty else {
+                        return nil
+                    }
+                    let label = stringValue(dict["label"] ?? dict["type"]) ?? "电话"
+                    return ContactPhoneRow(id: "\(index)-\(phone)", label: label, value: phone)
+                }
+                guard let phone = stringValue(item), !phone.isEmpty else { return nil }
+                return ContactPhoneRow(id: "\(index)-\(phone)", label: "电话", value: phone)
+            }
+            return rows.isEmpty ? nil : rows
+        }
+        if let phone = stringValue(value), !phone.isEmpty {
+            return [ContactPhoneRow(id: phone, label: "电话", value: phone)]
+        }
+        return nil
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let number = value as? NSNumber {
+            return number.stringValue
+        }
+        return nil
+    }
+
+    private func dialURL(for phoneNumber: String) -> URL? {
+        let trimmed = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        var normalized = ""
+        for character in trimmed {
+            if character.isNumber {
+                normalized.append(character)
+            } else if character == "+", normalized.isEmpty {
+                normalized.append(character)
+            } else if character == "*" || character == "#" || character == "," {
+                normalized.append(character)
+            }
+        }
+        guard normalized.contains(where: { $0.isNumber }) else { return nil }
+
+        let allowed = CharacterSet(charactersIn: "+0123456789*,")
+        guard let encoded = normalized.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
+        return URL(string: "telprompt://\(encoded)") ?? URL(string: "tel://\(encoded)")
+    }
+
+    private func openDialer(for phoneNumber: String) {
+        guard let url = dialURL(for: phoneNumber) else { return }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url)
+        }
     }
 }
 
@@ -2983,7 +3207,7 @@ struct AssistantMessageContent: View {
         }()
 
         let groups: [SegmentGroup] = {
-            let rawBase = Self.groupSegments(ordered.segments)
+            let rawBase = Self.displayGroups(for: ordered.segments)
 
             // Phase 5: When @@@VIZ-START markers are present, suppress the entire
             // `render_visualization` tool call row. The native InlineVisualizerView
@@ -3160,6 +3384,119 @@ struct AssistantMessageContent: View {
                 }
             }
         }
+    }
+
+    /// Builds display groups for assistant content.
+    ///
+    /// Tool-call `<details>` blocks are intentionally lifted out of the prose
+    /// stream instead of being rendered at their exact byte offset. Some models
+    /// emit a tool block in the middle of an inline Markdown span, for example:
+    ///
+    /// `**92号汽油：约 <tool call> 7.20 元/升**`
+    ///
+    /// Rendering that byte-for-byte splits the Markdown into two independent
+    /// text views, so the `**` markers become visible. Lifting the tool calls
+    /// into their own step capsule group keeps the operation visible while
+    /// allowing the prose to render as one complete Markdown document.
+    private static func displayGroups(for segments: [ContentSegment]) -> [SegmentGroup] {
+        let hasToolCalls = segments.contains { segment in
+            if case .toolCall = segment { return true }
+            return false
+        }
+        guard hasToolCalls else {
+            return groupSegments(segments)
+        }
+
+        var reasoningBlocks: [ReasoningData] = []
+        var toolCalls: [ToolCallData] = []
+        var textParts: [String] = []
+
+        for segment in segments {
+            switch segment {
+            case .text(let text):
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    textParts.append(trimmed)
+                }
+            case .toolCall(let toolCall):
+                toolCalls.append(toolCall)
+            case .reasoning(let reasoning):
+                reasoningBlocks.append(reasoning)
+            }
+        }
+
+        var groups: [SegmentGroup] = []
+        if !reasoningBlocks.isEmpty {
+            groups.append(.reasoningBlocks(reasoningBlocks))
+        }
+        if !toolCalls.isEmpty {
+            groups.append(.toolCalls(toolCalls))
+        }
+        let prose = joinedTextPartsPreservingInlineMarkdown(textParts)
+        if !prose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            groups.append(.text(prose))
+        }
+        return groups
+    }
+
+    private static func joinedTextPartsPreservingInlineMarkdown(_ parts: [String]) -> String {
+        var result = ""
+
+        for rawPart in parts {
+            let part = rawPart.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !part.isEmpty else { continue }
+
+            if result.isEmpty {
+                result = part
+                continue
+            }
+
+            if hasOpenInlineMarkdownSpan(result) {
+                result += inlineMarkdownJoinSeparator(previous: result, next: part)
+                result += part
+            } else {
+                result += "\n\n"
+                result += part
+            }
+        }
+
+        return result
+            .replacingOccurrences(of: "\n\n\n+", with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func inlineMarkdownJoinSeparator(previous: String, next: String) -> String {
+        guard let last = previous.last, let first = next.first else { return "" }
+        if last.isWhitespace || first.isWhitespace {
+            return ""
+        }
+        if ",.;:!?，。；：！？、)]}）】》".contains(first) {
+            return ""
+        }
+        return " "
+    }
+
+    private static func hasOpenInlineMarkdownSpan(_ text: String) -> Bool {
+        hasOddUnescapedDelimiter("**", in: text)
+            || hasOddUnescapedDelimiter("__", in: text)
+            || hasOddUnescapedDelimiter("`", in: text)
+    }
+
+    private static func hasOddUnescapedDelimiter(_ delimiter: String, in text: String) -> Bool {
+        guard !delimiter.isEmpty else { return false }
+        var count = 0
+        var searchStart = text.startIndex
+
+        while searchStart < text.endIndex,
+              let range = text.range(of: delimiter, range: searchStart..<text.endIndex) {
+            let backslashCount = text[..<range.lowerBound].reversed().prefix { $0 == Character("\\") }.count
+            if backslashCount.isMultiple(of: 2) {
+                count += 1
+            }
+            searchStart = range.upperBound
+        }
+
+        return !count.isMultiple(of: 2)
     }
 
     /// Groups adjacent segments of the same type for cleaner rendering.

@@ -663,6 +663,10 @@ final class APIClient: @unchecked Sendable {
         model.lowercased().contains("agnes-image")
     }
 
+    private func shouldPreferMultipartImageEdits() -> Bool {
+        providerType == .openAICompatible
+    }
+
     private static func imageGenerationProbeBody() -> [String: Any] {
         [
             "prompt": "",
@@ -2292,11 +2296,12 @@ final class APIClient: @unchecked Sendable {
     ) async throws -> String {
         let editImages = Array(images.prefix(16))
         guard let firstImage = editImages.first else {
-            return try await generateImage(
-                prompt: prompt,
-                model: model,
-                size: size,
-                preferServerDefaultModel: preferServerDefaultModel
+            throw APIError.unknown(
+                underlying: NSError(
+                    domain: "APIClient",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "图片编辑请求没有可用图片，已停止改走文生图接口。"]
+                )
             )
         }
         let configuredModel = preferServerDefaultModel
@@ -2338,66 +2343,72 @@ final class APIClient: @unchecked Sendable {
         }
 
         var lastError: Error? = geminiNativeError
-        for path in imageEditPaths {
-            for requestBody in imageEditJSONBodyVariants(
-                prompt: prompt,
-                model: requestModel,
-                size: size,
-                images: editImages
-            ) {
-                do {
-                    let payload = try await requestAnyJSON(
-                        path: path,
-                        method: .post,
-                        body: requestBody,
-                        timeout: 300
-                    )
-                    if let imageReference = firstImageReference(in: payload) {
-                        return imageReference
+        let prefersMultipartEdits = shouldPreferMultipartImageEdits()
+        let multipartImageArrayFiles = editImages.map {
+            NetworkManager.MultipartUploadFile(
+                fieldName: "image[]",
+                fileData: $0.data,
+                fileName: $0.fileName,
+                mimeType: mimeType(for: $0.fileName)
+            )
+        }
+        let multipartRepeatedImageFiles = editImages.map {
+            NetworkManager.MultipartUploadFile(
+                fieldName: "image",
+                fileData: $0.data,
+                fileName: $0.fileName,
+                mimeType: mimeType(for: $0.fileName)
+            )
+        }
+        let multipartFirstImageFile = [
+            NetworkManager.MultipartUploadFile(
+                fieldName: "image",
+                fileData: firstImage.data,
+                fileName: firstImage.fileName,
+                mimeType: mimeType(for: firstImage.fileName)
+            )
+        ]
+        let multipartVariants: [[NetworkManager.MultipartUploadFile]] = [
+            multipartImageArrayFiles,
+            multipartRepeatedImageFiles,
+            multipartFirstImageFile
+        ]
+
+        if !prefersMultipartEdits {
+            for path in imageEditPaths {
+                for requestBody in imageEditJSONBodyVariants(
+                    prompt: prompt,
+                    model: requestModel,
+                    size: size,
+                    images: editImages
+                ) {
+                    do {
+                        let payload = try await requestAnyJSON(
+                            path: path,
+                            method: .post,
+                            body: requestBody,
+                            timeout: 300
+                        )
+                        if let imageReference = firstImageReference(in: payload) {
+                            return imageReference
+                        }
+                        lastError = APIError.responseDecoding(
+                            underlying: NSError(
+                                domain: "APIClient",
+                                code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "JSON 改图接口没有返回图片地址。"]
+                            ),
+                            data: nil
+                        )
+                    } catch {
+                        guard shouldTryNextImageEndpoint(after: error) else {
+                            throw error
+                        }
+                        lastError = error
                     }
-                    lastError = APIError.responseDecoding(
-                        underlying: NSError(
-                            domain: "APIClient",
-                            code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "JSON 改图接口没有返回图片地址。"]
-                        ),
-                        data: nil
-                    )
-                } catch {
-                    guard shouldTryNextImageEndpoint(after: error) else {
-                        throw error
-                    }
-                    lastError = error
                 }
             }
         }
-
-        let multipartVariants: [[NetworkManager.MultipartUploadFile]] = [
-            editImages.map {
-                NetworkManager.MultipartUploadFile(
-                    fieldName: "image[]",
-                    fileData: $0.data,
-                    fileName: $0.fileName,
-                    mimeType: mimeType(for: $0.fileName)
-                )
-            },
-            editImages.map {
-                NetworkManager.MultipartUploadFile(
-                    fieldName: "image",
-                    fileData: $0.data,
-                    fileName: $0.fileName,
-                    mimeType: mimeType(for: $0.fileName)
-                )
-            },
-            [
-                NetworkManager.MultipartUploadFile(
-                    fieldName: "image",
-                    fileData: firstImage.data,
-                    fileName: firstImage.fileName,
-                    mimeType: mimeType(for: firstImage.fileName)
-                )
-            ]
-        ]
 
         for path in imageEditPaths {
             for files in multipartVariants {
@@ -2425,6 +2436,42 @@ final class APIClient: @unchecked Sendable {
                                 domain: "APIClient",
                                 code: -1,
                                 userInfo: [NSLocalizedDescriptionKey: "改图接口没有返回图片地址。"]
+                            ),
+                            data: nil
+                        )
+                    } catch {
+                        guard shouldTryNextImageEndpoint(after: error) else {
+                            throw error
+                        }
+                        lastError = error
+                    }
+                }
+            }
+        }
+
+        if prefersMultipartEdits {
+            for path in imageEditPaths {
+                for requestBody in imageEditJSONBodyVariants(
+                    prompt: prompt,
+                    model: requestModel,
+                    size: size,
+                    images: editImages
+                ) {
+                    do {
+                        let payload = try await requestAnyJSON(
+                            path: path,
+                            method: .post,
+                            body: requestBody,
+                            timeout: 300
+                        )
+                        if let imageReference = firstImageReference(in: payload) {
+                            return imageReference
+                        }
+                        lastError = APIError.responseDecoding(
+                            underlying: NSError(
+                                domain: "APIClient",
+                                code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "JSON 改图接口没有返回图片地址。"]
                             ),
                             data: nil
                         )

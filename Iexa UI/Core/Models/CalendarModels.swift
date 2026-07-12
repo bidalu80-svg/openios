@@ -209,3 +209,17 @@ struct CalendarEventCreateRequest: Encodable {
     }
 }
 
+/// Fields that a local calendar tool may change on an existing event.
+/// Nil means that the corresponding value should remain unchanged.
+struct CalendarEventUpdateRequest: Sendable {
+    let calendarId: String?
+    let title: String?
+    let description: String?
+    let startAt: Date?
+    let endAt: Date?
+    let allDay: Bool?
+    let location: String?
+    let alertMinutes: Int?
+    let clearAlerts: Bool
+}
+

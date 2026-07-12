@@ -6,6 +6,7 @@ enum LocalCalendarError: LocalizedError {
     case accessDenied
     case noWritableCalendar
     case eventNotFound
+    case invalidDateRange
 
     var errorDescription: String? {
         switch self {
@@ -15,6 +16,8 @@ enum LocalCalendarError: LocalizedError {
             return "没有可写入的本地日历。"
         case .eventNotFound:
             return "找不到这个本地日历事件。"
+        case .invalidDateRange:
+            return "日历事件的结束时间不能早于开始时间。"
         }
     }
 }
@@ -87,6 +90,36 @@ final class LocalCalendarService {
             throw LocalCalendarError.eventNotFound
         }
         try eventStore.remove(event, span: .thisEvent, commit: true)
+    }
+
+    func updateEvent(id: String, request: CalendarEventUpdateRequest) async throws -> CalendarEvent {
+        try await ensureFullAccess()
+        guard let event = eventStore.event(withIdentifier: id) else {
+            throw LocalCalendarError.eventNotFound
+        }
+
+        if let calendarId = request.calendarId {
+            event.calendar = try writableCalendar(id: calendarId)
+        }
+        if let title = request.title { event.title = title }
+        if let description = request.description { event.notes = description }
+        if let startAt = request.startAt { event.startDate = startAt }
+        if let endAt = request.endAt { event.endDate = endAt }
+        if let allDay = request.allDay { event.isAllDay = allDay }
+        if let location = request.location { event.location = location }
+        if let alertMinutes = request.alertMinutes {
+            event.alarms = [EKAlarm(relativeOffset: -Double(max(0, alertMinutes) * 60))]
+        } else if request.clearAlerts {
+            event.alarms = []
+        }
+
+        guard let startDate = event.startDate,
+              let endDate = event.endDate,
+              endDate >= startDate else {
+            throw LocalCalendarError.invalidDateRange
+        }
+        try eventStore.save(event, span: .thisEvent, commit: true)
+        return mapEvent(event)
     }
 
     private func ensureFullAccess() async throws {

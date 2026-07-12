@@ -308,7 +308,7 @@ struct GeneratedImageFailurePlaceholder: View {
                 VStack(spacing: Spacing.xs) {
                     Image(systemName: "exclamationmark.triangle")
                         .scaledFont(size: 24, weight: .semibold)
-                    Text("图片处理失败")
+                    Text("生图失败")
                         .scaledFont(size: 12, weight: .medium)
                 }
                 .foregroundStyle(theme.textTertiary)

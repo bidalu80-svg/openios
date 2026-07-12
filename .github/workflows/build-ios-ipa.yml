@@ -387,11 +387,16 @@ jobs:
             GCC_INLINES_ARE_PRIVATE_EXTERN=YES \
             archive
           APP_BINARY="$RUNNER_TEMP/Iexa.xcarchive/Products/Applications/Iexa.app/Iexa"
-          if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
+          APP_STRINGS="$RUNNER_TEMP/archive-app-strings.txt"
+          strings "$APP_BINARY" > "$APP_STRINGS"
+          if grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1' "$APP_STRINGS"; then
             echo "::error::Local Alpine iSH runtime was not linked into the signed archive"
             exit 1
           fi
-          strings "$APP_BINARY" | grep -q 'mount_root failed'
+          if ! grep -q 'mount_root failed' "$APP_STRINGS"; then
+            echo "::error::Local Alpine iSH runtime mount_root marker is missing from the signed archive"
+            exit 1
+          fi
 
       - name: Export IPA
         id: export_signed
@@ -441,11 +446,16 @@ jobs:
           rm -rf "$APP_PATH/Extensions"
           APP_BINARY="$APP_PATH/Iexa"
           bash scripts/harden-ios-app.sh "$APP_PATH"
-          if strings "$APP_BINARY" | grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1'; then
+          APP_STRINGS="$RUNNER_TEMP/unsigned-app-strings.txt"
+          strings "$APP_BINARY" > "$APP_STRINGS"
+          if grep -q 'Local Alpine native runtime was not compiled with IEXA_LOCAL_ALPINE_ISH=1' "$APP_STRINGS"; then
             echo "::error::Local Alpine iSH runtime was not linked into the unsigned app"
             exit 1
           fi
-          strings "$APP_BINARY" | grep -q 'mount_root failed'
+          if ! grep -q 'mount_root failed' "$APP_STRINGS"; then
+            echo "::error::Local Alpine iSH runtime mount_root marker is missing from the unsigned app"
+            exit 1
+          fi
 
           cp -R "$APP_PATH" "$RUNNER_TEMP/unsigned-ipa/Payload/"
           cd "$RUNNER_TEMP/unsigned-ipa"

@@ -92,6 +92,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
     let command: String?
     let cwd: String?
     let durationText: String?
+    let durationStartedAt: Date?
     let previewThumbnailReference: String?
     let previewOpenURL: String?
     let previewFile: ChatMessageFile?
@@ -158,6 +159,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
             && lhs.command == rhs.command
             && lhs.cwd == rhs.cwd
             && lhs.durationText == rhs.durationText
+            && lhs.durationStartedAt == rhs.durationStartedAt
             && lhs.previewThumbnailReference == rhs.previewThumbnailReference
             && lhs.previewOpenURL == rhs.previewOpenURL
             && lhs.previewFile?.url == rhs.previewFile?.url
@@ -182,6 +184,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
         hasher.combine(command)
         hasher.combine(cwd)
         hasher.combine(durationText)
+        hasher.combine(durationStartedAt)
         hasher.combine(previewThumbnailReference)
         hasher.combine(previewOpenURL)
         hasher.combine(previewFile?.url)
@@ -547,6 +550,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             command: step.command.map { clippedFloatingText($0, limit: floatingCommandLimit) },
             cwd: step.cwd,
             durationText: step.durationText,
+            durationStartedAt: step.durationStartedAt,
             previewThumbnailReference: lightweightThumbnailReference(step.previewThumbnailReference),
             previewOpenURL: step.previewOpenURL,
             previewFile: step.previewFile.map(lightweightPreviewFile)
@@ -635,6 +639,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             command: block.command,
             cwd: block.cwd,
             durationText: block.durationText,
+            durationStartedAt: nil,
             previewThumbnailReference: block.previewThumbnailReference,
             previewOpenURL: block.previewOpenURL,
             previewFile: block.previewFile
@@ -755,7 +760,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 || action.contains("local_office_agent")
         }
 
-        return groups.compactMap { group in
+        return groups.compactMap { group -> AgentToolBlock? in
             guard let status = group.statuses.last else { return nil }
             let action = group.action
             let title = title(for: status, action: action)
@@ -804,7 +809,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 || action == "local_alpine_tool"
         }
 
-        return groups.compactMap { group in
+        return groups.compactMap { group -> AgentToolBlock? in
             guard let status = group.statuses.last else { return nil }
             let action = group.action
             guard isConcreteLocalStatus(status, action: action) else { return nil }
@@ -1056,7 +1061,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 || action.contains("local_office_agent")
         }
 
-        return groups.compactMap { group in
+        return groups.compactMap { group -> AgentActivityStep? in
             guard let status = group.statuses.last else { return nil }
             let action = group.action
             let title = title(for: status, action: action)
@@ -1073,6 +1078,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let previewURL = statusOpenURL(for: group.statuses, action: action)
             let previewFile = action.contains("local_office_agent") ? officeDocumentFiles.first : nil
             let isRunning = status.done != true
+            let startedAt: Date? = isRunning ? group.statuses.compactMap(\.occurredAt).first : nil
             let duration = durationText(for: group.statuses, isRunning: isRunning)
             return AgentActivityStep(
                 id: "status-\(group.startIndex)-\(group.key)",
@@ -1092,6 +1098,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 command: nil,
                 cwd: nil,
                 durationText: duration,
+                durationStartedAt: startedAt,
                 previewThumbnailReference: previewThumbnail,
                 previewOpenURL: previewURL,
                 previewFile: previewFile
@@ -1106,7 +1113,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 || action == "local_alpine_tool"
         }
 
-        return groups.compactMap { group in
+        return groups.compactMap { group -> AgentActivityStep? in
             guard let status = group.statuses.last else { return nil }
             let action = group.action
             guard isConcreteLocalStatus(status, action: action) else { return nil }
@@ -1116,6 +1123,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 ?? status.status?.trimmingCharacters(in: .whitespacesAndNewlines)
                 ?? title
             let isRunning = status.done != true
+            let startedAt: Date? = isRunning ? group.statuses.compactMap(\.occurredAt).first : nil
             let duration = durationText(for: group.statuses, isRunning: isRunning)
             return AgentActivityStep(
                 id: "local-status-\(group.startIndex)-\(group.key)",
@@ -1135,6 +1143,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 command: nil,
                 cwd: nil,
                 durationText: duration,
+                durationStartedAt: startedAt,
                 previewThumbnailReference: nil,
                 previewOpenURL: nil,
                 previewFile: nil
@@ -2116,7 +2125,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
         liveToolCalls: [LocalAlpineToolCall] = [],
         liveStatus: ChatStatusUpdate? = nil
     ) {
-        if message.metadata?["iexa_local_alpine_final_summary"] != nil
+        if message.metadata?["iexa_local_native_continuation"] == "true"
+            || message.metadata?["iexa_local_alpine_final_summary"] != nil
             || message.metadata?["iexa_local_alpine_continuation"] == "true"
             || message.metadata?["iexa_local_alpine_missing_tool_correction"] != nil
             || message.metadata?["iexa_local_alpine_hidden_correction_parent"] == "true" {
@@ -3047,7 +3057,9 @@ struct ChatDetailView: View {
             return ""
         }
         let withoutAlpineProtocol = LocalAlpineAgentService.visibleContent(from: raw)
-        let withoutNativeProtocol = stripNativeToolProtocolBlocks(from: withoutAlpineProtocol)
+        let withoutNativeProtocol = stripNativeToolProtocolBlocks(
+            from: LocalNativeToolService.visibleContent(from: withoutAlpineProtocol)
+        )
         let visible = withoutNativeProtocol.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolved = visible == "正在准备本地执行，结果会自动回来。" ? "" : visible
         assistantVisibleTextCache.store(messageId: message.id, signature: signature, value: resolved)
@@ -6693,6 +6705,13 @@ struct ChatDetailView: View {
         let displayIndex: Int = (allSiblings.firstIndex(where: { $0.id == message.id }) ?? 0) + 1
 
         return HStack(spacing: 6) {
+            // Copy
+            Button { copyMessage(message) } label: {
+                chatGPTPrimaryActionIcon(icon: "square.on.square")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Copy")
+
             // Speak
             Button {
                 toggleSpeech(for: message)
@@ -6705,21 +6724,14 @@ struct ChatDetailView: View {
                         .frame(width: 28, height: 28)
                         .tint(theme.brandPrimary)
                 } else {
-                    compactActionIcon(
-                        icon: speakingMessageId == message.id ? "stop.fill" : "speaker.wave.2",
+                    chatGPTPrimaryActionIcon(
+                        icon: speakingMessageId == message.id ? "stop.fill" : "waveform",
                         isActive: speakingMessageId == message.id
                     )
                 }
             }
             .buttonStyle(.plain)
             .accessibilityLabel(speakingMessageId == message.id ? "Stop speaking" : "Speak")
-
-            // Copy
-            Button { copyMessage(message) } label: {
-                compactActionIcon(icon: "doc.on.doc", isActive: false)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Copy")
 
             let feedbackVote = assistantFeedbackVoteOverrides[message.id]
                 ?? AssistantFeedbackPreferenceStore.vote(for: message.id)
@@ -6868,6 +6880,19 @@ struct ChatDetailView: View {
             .foregroundStyle(isActive ? theme.brandPrimary : theme.textTertiary.opacity(0.7))
             .frame(width: 28, height: 28)
             .contentShape(Circle())
+    }
+
+    /// ChatGPT-style leading action icons for copy and read-aloud.
+    private func chatGPTPrimaryActionIcon(
+        icon: String,
+        isActive: Bool = false,
+        size: CGFloat = 13
+    ) -> some View {
+        Image(systemName: icon)
+            .scaledFont(size: size, weight: .medium)
+            .foregroundStyle(isActive ? theme.brandPrimary : theme.textTertiary.opacity(0.72))
+            .frame(width: 24, height: 28)
+            .contentShape(Rectangle())
     }
 
     // MARK: - User Version Switcher (always-visible when edit history exists)
@@ -7056,9 +7081,9 @@ struct ChatDetailView: View {
                                     .frame(width: thumbnailSize, height: thumbnailSize)
                                     .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
                             } else if let fileId = imageReference(for: file) {
-                                chatImageView(fileId: fileId, allowsEditing: false)
+                                chatImageView(fileId: fileId, allowsEditing: false, contentMode: .fill)
                                     .frame(width: thumbnailSize, height: thumbnailSize)
-                                    .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                             }
                         }
                     }
@@ -7078,13 +7103,13 @@ struct ChatDetailView: View {
 
     @ViewBuilder
     private func userImageThumbnail(file: ChatMessageFile, size: CGSize) -> some View {
-        let cornerRadius: CGFloat = size.width > 100 || size.height > 100 ? 14 : 10
+        let cornerRadius: CGFloat = size.width > 100 || size.height > 100 ? 22 : 14
         if file.isGeneratedImageFailurePlaceholder {
             GeneratedImageFailurePlaceholder()
                 .frame(width: size.width, height: size.height)
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         } else if let fileId = imageReference(for: file) {
-            chatImageView(fileId: fileId, allowsEditing: false)
+            chatImageView(fileId: fileId, allowsEditing: false, contentMode: .fill)
                 .frame(width: size.width, height: size.height)
                 .background(theme.surfaceContainer.opacity(theme.isDark ? 0.35 : 0.18))
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
@@ -7193,7 +7218,13 @@ struct ChatDetailView: View {
     }
 
     @ViewBuilder
-    private func chatImageView(fileId: String, allowsEditing: Bool = true) -> some View {
+    private func chatImageView(
+        fileId: String,
+        allowsEditing: Bool = true,
+        contentMode: ContentMode = .fit,
+        actionLayout: AuthenticatedImageActionLayout = .compactTopTrailing,
+        adaptiveThumbnailWidth: CGFloat? = nil
+    ) -> some View {
         if allowsEditing {
             AuthenticatedImageView(
                 fileId: fileId,
@@ -7203,7 +7234,10 @@ struct ChatDetailView: View {
                 },
                 onPreview: {
                     openImageGallery(startingAt: fileId)
-                }
+                },
+                contentMode: contentMode,
+                actionLayout: actionLayout,
+                adaptiveThumbnailWidth: adaptiveThumbnailWidth
             )
         } else {
             AuthenticatedImageView(
@@ -7211,7 +7245,10 @@ struct ChatDetailView: View {
                 apiClient: dependencies.apiClient,
                 onPreview: {
                     openImageGallery(startingAt: fileId)
-                }
+                },
+                contentMode: contentMode,
+                actionLayout: actionLayout,
+                adaptiveThumbnailWidth: adaptiveThumbnailWidth
             )
         }
     }
@@ -7630,7 +7667,9 @@ struct ChatDetailView: View {
         let officeFiles = files.filter { isOfficeDocumentFile($0) }
         let officePreviewFiles = officeFiles.isEmpty ? [] : files.filter { isOfficePreviewImageFile($0) }
         let imageFiles = Array(files.filter { file in
-            isImageFile(file) && !officePreviewFiles.contains(file)
+            isImageFile(file)
+                && !officePreviewFiles.contains(file)
+                && (file.isGeneratedImageFailurePlaceholder || imageReference(for: file) != nil)
         }.prefix(9))
         let videoFiles = files.filter { isVideoFile($0) }
         let nonImageFiles = files.filter {
@@ -7648,29 +7687,22 @@ struct ChatDetailView: View {
             }
         }
         if !imageFiles.isEmpty {
-            let columnCount = imageFiles.count >= 5 ? 3 : 2
-            let generatedImageTileHeight: CGFloat = imageFiles.count == 1
-                ? 200
-                : (imageFiles.count >= 5 ? 92 : 130)
-            let columns = imageFiles.count == 1
-                ? [GridItem(.flexible())]
-                : Array(
-                    repeating: GridItem(.flexible(), spacing: Spacing.sm),
-                    count: columnCount
-                )
-
-            LazyVGrid(columns: columns, spacing: Spacing.sm) {
-                ForEach(Array(imageFiles.enumerated()), id: \.element) { _, file in
-                    if file.isGeneratedImageFailurePlaceholder {
-                        GeneratedImageFailurePlaceholder()
-                            .frame(maxWidth: .infinity)
-                            .frame(height: generatedImageTileHeight)
-                            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-                    } else if let fileId = imageReference(for: file) {
-                        chatImageView(fileId: fileId)
-                            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
-                    }
+            if imageFiles.count == 1, let file = imageFiles.first {
+                let shape = RoundedRectangle(cornerRadius: 28, style: .continuous)
+                if file.isGeneratedImageFailurePlaceholder {
+                    GeneratedImageFailurePlaceholder()
+                        .frame(width: generatedImageGalleryMaxWidth, height: 220)
+                        .clipShape(shape)
+                        .contentShape(shape)
+                } else if let fileId = imageReference(for: file) {
+                    // A single result should feel like a full image card: retain the
+                    // image's aspect ratio instead of turning a portrait into a crop.
+                    chatImageView(fileId: fileId, actionLayout: .singleBottomOverlay)
+                        .clipShape(shape)
+                        .contentShape(shape)
                 }
+            } else {
+                generatedAdaptiveImageGrid(files: imageFiles)
             }
         }
         if !videoFiles.isEmpty {
@@ -7686,6 +7718,51 @@ struct ChatDetailView: View {
                     fileAttachmentCard(file: file, compact: false)
                 }
             }
+        }
+    }
+
+    /// Mirrors the compact, rounded gallery used by ChatGPT: fewer images get
+    /// generous cells, while 5–9 concurrent results remain scannable at a glance.
+    private var generatedImageGalleryMaxWidth: CGFloat { 340 }
+
+    private func generatedAdaptiveImageGrid(files: [ChatMessageFile]) -> some View {
+        let columnCount = files.count <= 4 ? 2 : 3
+        let spacing: CGFloat = 6
+        let thumbnailWidth = floor((generatedImageGalleryMaxWidth - CGFloat(columnCount - 1) * spacing) / CGFloat(columnCount))
+        let rows = stride(from: 0, to: files.count, by: columnCount).map {
+            Array(files[$0..<min($0 + columnCount, files.count)])
+        }
+
+        return VStack(alignment: .leading, spacing: spacing) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, rowFiles in
+                HStack(alignment: .top, spacing: spacing) {
+                    ForEach(Array(rowFiles.enumerated()), id: \.element) { _, file in
+                        generatedAdaptiveImageTile(file: file, width: thumbnailWidth)
+                    }
+                }
+            }
+        }
+        .frame(width: generatedImageGalleryMaxWidth, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func generatedAdaptiveImageTile(file: ChatMessageFile, width: CGFloat) -> some View {
+        if file.isGeneratedImageFailurePlaceholder {
+            let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+            GeneratedImageFailurePlaceholder()
+                .frame(width: width, height: width)
+                .clipShape(shape)
+                .contentShape(shape)
+        } else if let fileId = imageReference(for: file) {
+            let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+            chatImageView(
+                fileId: fileId,
+                contentMode: .fit,
+                actionLayout: .none,
+                adaptiveThumbnailWidth: width
+            )
+            .clipShape(shape)
+            .contentShape(shape)
         }
     }
 
@@ -10177,6 +10254,7 @@ private struct IsolatedAssistantMessage: View {
         cleaned = removingTaggedReasoningBlocks(from: cleaned, opening: "<thought", closing: "</thought>")
         cleaned = removingTokenReasoningBlocks(from: cleaned, opening: "<|begin_of_thought|>", closing: "<|end_of_thought|>")
         cleaned = removingTokenReasoningBlocks(from: cleaned, opening: "◁think▷", closing: "◁/think▷")
+        cleaned = removingOrphanDetailsClosers(from: cleaned)
         return cleaned
             .replacingOccurrences(of: "<|begin_of_thought|>", with: "")
             .replacingOccurrences(of: "<|end_of_thought|>", with: "")
@@ -10195,6 +10273,9 @@ private struct IsolatedAssistantMessage: View {
         }
         let lower = content.lowercased()
         return lower.contains("<details")
+            || lower.contains("</details")
+            || lower.contains("<summary")
+            || lower.contains("</summary")
             || lower.contains("<think")
             || lower.contains("<reason")
             || lower.contains("<thought")
@@ -10231,6 +10312,45 @@ private struct IsolatedAssistantMessage: View {
         }
         result += text[cursor..<text.endIndex]
         return result
+    }
+
+    private static func removingOrphanDetailsClosers(from text: String) -> String {
+        var result = text
+        var searchStart = result.startIndex
+
+        while searchStart < result.endIndex,
+              let closeRange = result.range(
+                of: "</details>",
+                options: [.caseInsensitive],
+                range: searchStart..<result.endIndex
+              ) {
+            let prefix = result[..<closeRange.lowerBound]
+            let lastOpen = prefix.range(of: "<details", options: [.caseInsensitive, .backwards])
+            let lastClose = prefix.range(of: "</details>", options: [.caseInsensitive, .backwards])
+
+            if let lastOpen {
+                if let lastClose {
+                    if lastOpen.lowerBound > lastClose.lowerBound {
+                        searchStart = closeRange.upperBound
+                        continue
+                    }
+                } else {
+                    searchStart = closeRange.upperBound
+                    continue
+                }
+            }
+
+            let paragraphStart = prefix.range(of: "\n\n", options: .backwards)?.upperBound
+                ?? prefix.range(of: "\n", options: .backwards)?.upperBound
+                ?? result.startIndex
+            result.removeSubrange(paragraphStart..<closeRange.upperBound)
+            searchStart = paragraphStart
+        }
+
+        return result
+            .replacingOccurrences(of: #"</?summary[^>]*>"#, with: "", options: [.regularExpression, .caseInsensitive])
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func removingTaggedReasoningBlocks(
@@ -10740,13 +10860,17 @@ private struct AgentToolStepPill: View {
 
     var body: some View {
         HStack(spacing: 9) {
-            ZStack {
-                Circle()
-                    .fill(tint.opacity(theme.isDark ? 0.20 : 0.13))
-                    .frame(width: 25, height: 25)
-                Image(systemName: iconName)
-                    .scaledFont(size: 13, weight: .semibold)
-                    .foregroundStyle(tint)
+            if call.isRunning && !call.failed {
+                AgentRotatingProgressIcon(size: 25, lineWidth: 3)
+            } else {
+                ZStack {
+                    Circle()
+                        .fill(tint.opacity(theme.isDark ? 0.20 : 0.13))
+                        .frame(width: 25, height: 25)
+                    Image(systemName: iconName)
+                        .scaledFont(size: 13, weight: .semibold)
+                        .foregroundStyle(tint)
+                }
             }
 
             Text(title)
@@ -10773,6 +10897,52 @@ private struct AgentToolStepPill: View {
             Capsule(style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.24 : 0.42), lineWidth: 0.7)
         )
+    }
+}
+
+private struct AgentRotatingProgressIcon: View {
+    let size: CGFloat
+    let lineWidth: CGFloat
+
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: reduceMotion ? 1 : 1.0 / 30.0)) { timeline in
+            let rotation = reduceMotion ? 35 : timeline.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 0.95) / 0.95 * 360
+
+            ZStack {
+                Circle()
+                    .fill(theme.isDark ? Color.white.opacity(0.08) : Color.white.opacity(0.92))
+                    .shadow(color: theme.brandPrimary.opacity(theme.isDark ? 0.22 : 0.16), radius: 3, x: 0, y: 1)
+
+                Circle()
+                    .stroke(
+                        theme.brandPrimary.opacity(theme.isDark ? 0.16 : 0.10),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                    )
+                    .padding(lineWidth / 2)
+
+                Circle()
+                    .trim(from: 0.05, to: 0.72)
+                    .stroke(
+                        AngularGradient(
+                            colors: [
+                                theme.brandPrimary,
+                                Color.purple.opacity(0.95),
+                                theme.brandPrimary.opacity(0.18)
+                            ],
+                            center: .center
+                        ),
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                    )
+                    .padding(lineWidth / 2)
+                    .rotationEffect(.degrees(rotation))
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
     }
 }
 
@@ -10822,6 +10992,7 @@ private struct AgentInlineStepsView: View {
     let onStopRunningStep: (() -> Void)?
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var leadingSteps: [AgentActivityStep] {
         let limit = 24
@@ -10839,14 +11010,17 @@ private struct AgentInlineStepsView: View {
         max(0, item.steps.count - leadingSteps.count - trailingSteps.count)
     }
 
+    private var visibleStepAnimationKey: String {
+        (leadingSteps.map(\.id)
+            + (hiddenMiddleStepCount > 0 ? ["hidden-\(hiddenMiddleStepCount)"] : [])
+            + trailingSteps.map(\.id))
+            .joined(separator: "|")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(leadingSteps, id: \.id) { step in
-                AgentActivityStepPill(
-                    step: step,
-                    onStopRunningStep: item.isActive ? onStopRunningStep : nil
-                )
-                    .equatable()
+                stepPill(step)
             }
 
             if hiddenMiddleStepCount > 0 {
@@ -10858,21 +11032,42 @@ private struct AgentInlineStepsView: View {
                 }
                 .foregroundStyle(theme.textTertiary)
                 .padding(.leading, 12)
+                .transition(stepTransition)
             }
 
             ForEach(trailingSteps, id: \.id) { step in
-                AgentActivityStepPill(
-                    step: step,
-                    onStopRunningStep: item.isActive ? onStopRunningStep : nil
-                )
-                    .equatable()
+                stepPill(step)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.86, blendDuration: 0), value: visibleStepAnimationKey)
         .transaction { transaction in
-            transaction.animation = nil
+            if reduceMotion {
+                transaction.disablesAnimations = true
+                transaction.animation = nil
+            }
         }
         .accessibilityLabel("步骤")
+    }
+
+    @ViewBuilder
+    private func stepPill(_ step: AgentActivityStep) -> some View {
+        AgentActivityStepPill(
+            step: step,
+            onStopRunningStep: item.isActive ? onStopRunningStep : nil
+        )
+        .equatable()
+        .transition(stepTransition)
+    }
+
+    private var stepTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        return .asymmetric(
+            insertion: .move(edge: .top)
+                .combined(with: .opacity)
+                .combined(with: .scale(scale: 0.98, anchor: .topLeading)),
+            removal: .opacity
+        )
     }
 }
 
@@ -10918,8 +11113,15 @@ private struct AgentStepFloatingBarHost: View {
     let liveBrowserThumbnailReference: String?
     let onPreviewTap: (AgentActivityItem, Int) -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private var displayItem: AgentActivityItem? {
         fallbackItem?.hasConcreteSteps == true ? fallbackItem : nil
+    }
+
+    private var displayAnimationKey: String {
+        guard let displayItem else { return "none" }
+        return "\(displayItem.id)|\(displayItem.currentStep?.id ?? "")|\(displayItem.totalStepCount)|\(displayItem.hasFailure)"
     }
 
     var body: some View {
@@ -10933,8 +11135,26 @@ private struct AgentStepFloatingBarHost: View {
                 )
                 .padding(.horizontal, 18)
                 .padding(.bottom, 4)
+                .transition(floatingBarTransition)
             }
         }
+        .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.86, blendDuration: 0), value: displayAnimationKey)
+        .transaction { transaction in
+            if reduceMotion {
+                transaction.disablesAnimations = true
+                transaction.animation = nil
+            }
+        }
+    }
+
+    private var floatingBarTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        return .asymmetric(
+            insertion: .move(edge: .bottom)
+                .combined(with: .opacity)
+                .combined(with: .scale(scale: 0.985, anchor: .bottom)),
+            removal: .opacity
+        )
     }
 }
 
@@ -11072,17 +11292,21 @@ private struct AgentStepFloatingBar: View {
     private var statusDot: AnyView {
         let isRunning = selectedStep?.isRunning == true
         let dotTint: Color = tint
-        let dotIcon = isRunning ? "progress.indicator" : icon
-        return AnyView(ZStack {
-            Circle()
-                .fill(dotTint.opacity(theme.isDark ? 0.16 : 0.12))
-                .frame(width: 17, height: 17)
-            Image(systemName: dotIcon)
-                .scaledFont(size: 9.5, weight: .bold)
-                .foregroundStyle(dotTint)
-                .frame(width: 13, height: 13)
+        if isRunning {
+            return AnyView(AgentRotatingProgressIcon(size: 17, lineWidth: 2.2))
         }
-        .accessibilityHidden(true))
+        return AnyView(
+            ZStack {
+                Circle()
+                    .fill(dotTint.opacity(theme.isDark ? 0.16 : 0.12))
+                    .frame(width: 17, height: 17)
+                Image(systemName: icon)
+                    .scaledFont(size: 9.5, weight: .bold)
+                    .foregroundStyle(dotTint)
+                    .frame(width: 13, height: 13)
+            }
+            .accessibilityHidden(true)
+        )
     }
 
     private var pageControls: AnyView {
@@ -11571,6 +11795,7 @@ private struct AgentActivityStepPill: View, Equatable {
             && lhs.step.isRunning == rhs.step.isRunning
             && lhs.step.failed == rhs.step.failed
             && lhs.step.durationText == rhs.step.durationText
+            && lhs.step.durationStartedAt == rhs.step.durationStartedAt
             && (lhs.onStopRunningStep != nil) == (rhs.onStopRunningStep != nil)
     }
 
@@ -11610,16 +11835,47 @@ private struct AgentActivityStepPill: View, Equatable {
         }
     }
 
+    private func displayDurationText(asOf date: Date) -> String {
+        if step.isRunning, let startedAt = step.durationStartedAt {
+            return Self.formattedDuration(seconds: date.timeIntervalSince(startedAt))
+        }
+        return step.durationText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private static func formattedDuration(seconds: TimeInterval) -> String {
+        guard seconds >= 0.05 else { return "" }
+        if seconds < 10 {
+            return String(format: "%.1fs", seconds)
+        }
+        if seconds < 60 {
+            return "\(Int(seconds.rounded()))s"
+        }
+        let minutes = Int(seconds / 60)
+        let remaining = Int(seconds) % 60
+        return "\(minutes)m \(remaining)s"
+    }
+
+    private func durationLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(theme.textTertiary)
+            .monospacedDigit()
+            .lineLimit(1)
+    }
+
     var body: some View {
         let fill = theme.surfaceContainerHighest.opacity(theme.isDark ? 0.22 : 0.58)
-        let duration = step.durationText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let canStop = step.isRunning && onStopRunningStep != nil
 
         HStack(spacing: 8) {
-            Image(systemName: iconName)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(tint)
-                .frame(width: 17, height: 17)
+            if step.isRunning && !step.failed {
+                AgentRotatingProgressIcon(size: 17, lineWidth: 2.2)
+            } else {
+                Image(systemName: iconName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 17, height: 17)
+            }
 
             Text(step.title)
                 .font(.system(size: 13, weight: .semibold))
@@ -11628,12 +11884,18 @@ private struct AgentActivityStepPill: View, Equatable {
                 .truncationMode(.tail)
                 .layoutPriority(1)
 
-            if !duration.isEmpty {
-                Text(duration)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(theme.textTertiary)
-                    .monospacedDigit()
-                    .lineLimit(1)
+            if step.isRunning, step.durationStartedAt != nil {
+                TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
+                    let duration = displayDurationText(asOf: timeline.date)
+                    if !duration.isEmpty {
+                        durationLabel(duration)
+                    }
+                }
+            } else {
+                let duration = displayDurationText(asOf: .now)
+                if !duration.isEmpty {
+                    durationLabel(duration)
+                }
             }
 
             if canStop {
