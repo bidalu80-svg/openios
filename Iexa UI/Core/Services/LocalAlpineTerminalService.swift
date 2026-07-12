@@ -2902,7 +2902,7 @@ actor LocalAlpineTerminalService {
 
     private func rootFSListCommand(path: String, includeHidden: Bool) -> String {
         let hiddenGuard = includeHidden ? "" : """
-          case "$name" in .*) continue ;; esac
+          case "$name" in .*) return ;; esac
         """
         return """
         requested_target=\(shellSingleQuoted(path))
@@ -2926,15 +2926,11 @@ actor LocalAlpineTerminalService {
           fi
         fi
         printf 'IEXA_ROOTFS_LIST_BEGIN\\n'
-        if [ "$target" = "/" ]; then
-          glob_prefix=
-        else
-          glob_prefix="$target"
-        fi
-        for entry in "$glob_prefix"/* "$glob_prefix"/.[!.]* "$glob_prefix"/..?*; do
-          [ -e "$entry" ] || [ -L "$entry" ] || continue
+        emit_rootfs_entry() {
+          entry=$1
+          [ -e "$entry" ] || [ -L "$entry" ] || return
           name=${entry##*/}
-          case "$name" in .|..) continue ;; esac
+          case "$name" in .|..) return ;; esac
         \(hiddenGuard)
           kind=o
           if [ -d "$entry" ]; then
@@ -2951,7 +2947,16 @@ actor LocalAlpineTerminalService {
           mtime=$(stat -c '%Y' "$entry" 2>/dev/null || true)
           perms=$(stat -c '%A' "$entry" 2>/dev/null || true)
           printf 'IEXA_ROOTFS_ENTRY\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$kind" "$size" "$mtime" "$perms" "$name"
-        done
+        }
+        if [ "$target" = "/" ]; then
+          for entry in /* /.[!.]* /..?*; do
+            emit_rootfs_entry "$entry"
+          done
+        else
+          for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
+            emit_rootfs_entry "$entry"
+          done
+        fi
         printf 'IEXA_ROOTFS_LIST_END\\n'
         """
     }
