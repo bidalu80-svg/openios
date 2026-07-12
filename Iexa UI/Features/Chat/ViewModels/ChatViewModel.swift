@@ -2662,10 +2662,10 @@ final class ChatViewModel {
         """
 
     private static let localAlpineDNSLookupRules = """
-        - DNS/domain lookup compatibility: Local Alpine already includes `nslookup`; do not install `bind-tools`, `dig`, or `drill` just to inspect DNS. For user requests such as "查 DNS", "查询域名 DNS 记录", "DNS 复查", or "lookup DNS", extract the hostname from any URL first, then run bounded `nslookup` loops. Use record types `A AAAA CNAME MX NS TXT SOA`. Prefer the runtime's default resolver first; for explicit public verification prefer `223.5.5.5` and `119.29.29.29` before `8.8.8.8`/`1.1.1.1`, because the embedded iSH network path can hang on some public DNS servers. Always wrap explicit DNS-server probes with `timeout 5` or `busybox timeout 5` so one blocked server does not stall the whole loop. Example:
+        - DNS/domain lookup compatibility: Local Alpine already includes `nslookup`; do not install `bind-tools`, `dig`, or `drill` just to inspect DNS. For user requests such as "查 DNS", "查询域名 DNS 记录", "DNS 复查", or "lookup DNS", extract the hostname from any URL first, then run bounded `nslookup` loops. Use record types `A AAAA CNAME MX NS TXT SOA`; for public verification also query `1.1.1.1` and `8.8.8.8`. Example:
           `domain='example.com'; for t in A AAAA CNAME MX NS TXT SOA; do echo "[$t]"; nslookup -type=$t "$domain" 2>&1 | sed 's/[[:space:]]*$//'; done`
           Public check:
-          `domain='example.com'; for s in 223.5.5.5 119.29.29.29 8.8.8.8 1.1.1.1; do echo "SERVER $s"; for t in A AAAA MX NS TXT SOA; do echo "[$t]"; timeout 5 nslookup -type=$t "$domain" "$s" 2>&1 | sed 's/[[:space:]]*$//'; done; done`
+          `domain='example.com'; for s in 1.1.1.1 8.8.8.8; do echo "SERVER $s"; for t in A AAAA MX NS TXT SOA; do echo "[$t]"; nslookup -type=$t "$domain" "$s" 2>&1 | sed 's/[[:space:]]*$//'; done; done`
         """
 
     private static func localAlpineNativeToolSchemas(includeMemoryTools: Bool) -> [[String: Any]] {

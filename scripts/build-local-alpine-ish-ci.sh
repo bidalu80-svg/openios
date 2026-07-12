@@ -27,9 +27,11 @@ socket_patch_file="$PWD/scripts/ish-socket-recvfrom-result-length.patch"
 if [ -f "$socket_patch_file" ]; then
   if git -C "$ish_dir" apply --check "$socket_patch_file"; then
     git -C "$ish_dir" apply "$socket_patch_file"
-    echo "Applied iSH recvfrom result-length copy fix"
-  elif grep -Fq "user_write(buffer_addr, buffer, res)" "$ish_dir/fs/sock.c"; then
-    echo "iSH recvfrom result-length copy fix already present"
+    echo "Applied iSH socket nonblock/recv length fixes"
+  elif grep -Fq "user_write(buffer_addr, buffer, res)" "$ish_dir/fs/sock.c" &&
+       grep -Fq "int guest_flags = fd_getflags(sock)" "$ish_dir/fs/sock.c" &&
+       grep -Fq "int guest_flags_rm = fd_getflags(sock)" "$ish_dir/fs/sock.c"; then
+    echo "iSH socket nonblock/recv length fixes already present"
   elif grep -Fq "user_write(buffer_addr, buffer, len)" "$ish_dir/fs/sock.c"; then
     python3 - "$ish_dir/fs/sock.c" <<'PY'
 from pathlib import Path
@@ -37,15 +39,34 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
-old = "user_write(buffer_addr, buffer, len)"
-new = "user_write(buffer_addr, buffer, res)"
-if old not in text:
-    raise SystemExit(f"{old} not found in {path}")
-path.write_text(text.replace(old, new, 1))
+replacements = [
+    ("bool guest_nonblock = (sock->flags & O_NONBLOCK_) != 0;",
+     "int guest_flags = fd_getflags(sock);\n    bool guest_nonblock = (guest_flags >= 0) && (guest_flags & O_NONBLOCK_) != 0;"),
+    ('printk("NETDIAG recvfrom-block(pid=%d comm=%s fd=%d real=%d len=%u gflags=%#x hflags=%#x sflags=%#x)\\n",',
+     'printk("NETDIAG recvfrom-block(pid=%d comm=%s fd=%d real=%d len=%u gflags=%#x hflags=%#x fdflags=%#x)\\n",'),
+    ("host_flags, sock->flags);",
+     "host_flags, guest_flags);"),
+    ("user_write(buffer_addr, buffer, len)",
+     "user_write(buffer_addr, buffer, res)"),
+    ("bool guest_nonblock_rm = (sock->flags & O_NONBLOCK_) != 0;",
+     "int guest_flags_rm = fd_getflags(sock);\n    bool guest_nonblock_rm = (guest_flags_rm >= 0) && (guest_flags_rm & O_NONBLOCK_) != 0;"),
+    ('printk("NETDIAG recvmsg-block(pid=%d comm=%s fd=%d real=%d gflags=%#x hflags=%#x sflags=%#x)\\n",',
+     'printk("NETDIAG recvmsg-block(pid=%d comm=%s fd=%d real=%d gflags=%#x hflags=%#x fdflags=%#x)\\n",'),
+    ("(unsigned)flags, host_flags_rm, sock->flags);",
+     "(unsigned)flags, host_flags_rm, guest_flags_rm);"),
+]
+changed = False
+for old, new in replacements:
+    if old in text:
+        text = text.replace(old, new, 1)
+        changed = True
+if not changed:
+    raise SystemExit(f"no known iSH socket fix patterns found in {path}")
+path.write_text(text)
 PY
-    echo "Applied iSH recvfrom result-length copy fix by source rewrite"
+    echo "Applied iSH socket nonblock/recv length fixes by source rewrite"
   else
-    echo "Could not apply iSH recvfrom result-length copy fix" >&2
+    echo "Could not apply iSH socket nonblock/recv length fixes" >&2
     git -C "$ish_dir" apply --check "$socket_patch_file" || true
     exit 1
   fi

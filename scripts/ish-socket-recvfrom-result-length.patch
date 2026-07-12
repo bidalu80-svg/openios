@@ -1,13 +1,55 @@
 diff --git a/fs/sock.c b/fs/sock.c
 --- a/fs/sock.c
 +++ b/fs/sock.c
-@@ -620,7 +620,7 @@ int_t sys_recvfrom(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags,
-         free(buffer);
-         return errno_map();
+@@ -753,7 +753,8 @@ int_t sys_recvfrom(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags,
+     // fd's real flags, in case they diverge (e.g. set via fcntl only).
+     int host_flags = fcntl(sock->real_fd, F_GETFL, 0);
+     bool host_nonblock = (host_flags >= 0) && (host_flags & O_NONBLOCK);
+-    bool guest_nonblock = (sock->flags & O_NONBLOCK_) != 0;
++    int guest_flags = fd_getflags(sock);
++    bool guest_nonblock = (guest_flags >= 0) && (guest_flags & O_NONBLOCK_) != 0;
+     bool should_wait = !(real_flags & MSG_DONTWAIT) && !guest_nonblock && !host_nonblock;
+ 
+     // Try a nonblock recvfrom first (fast path — no host syscall overhead
+@@ -766,10 +767,10 @@ int_t sys_recvfrom(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags,
+         // Diagnostic: a blocking recv is exceptional for most network
+         // programs (Node, Go, Python asyncio all use nonblock). Log it so
+         // we can see the guest/host fd state in user-shared logs.
+-        printk("NETDIAG recvfrom-block(pid=%d comm=%s fd=%d real=%d len=%u gflags=%#x hflags=%#x sflags=%#x)\n",
++        printk("NETDIAG recvfrom-block(pid=%d comm=%s fd=%d real=%d len=%u gflags=%#x hflags=%#x fdflags=%#x)\n",
+                current->pid, current->comm, sock_fd, sock->real_fd,
+                (unsigned)len, (unsigned)flags,
+-               host_flags, sock->flags);
++               host_flags, guest_flags);
+         for (;;) {
+             res = recvfrom(sock->real_fd, buffer, len, real_flags | MSG_DONTWAIT,
+                     sockaddr_addr != 0 ? (void *) sockaddr : NULL,
+@@ -800,7 +801,7 @@ int_t sys_recvfrom(fd_t sock_fd, addr_t buffer_addr, dword_t len, dword_t flags,
+         }
      }
-
+ 
 -    if (user_write(buffer_addr, buffer, len)) {
 +    if (user_write(buffer_addr, buffer, res)) {
          free(buffer);
          return _EFAULT;
      }
+@@ -1265,7 +1266,8 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
+     // sys_recvfrom before 76907b86.
+     int host_flags_rm = fcntl(sock->real_fd, F_GETFL, 0);
+     bool host_nonblock_rm = (host_flags_rm >= 0) && (host_flags_rm & O_NONBLOCK);
+-    bool guest_nonblock_rm = (sock->flags & O_NONBLOCK_) != 0;
++    int guest_flags_rm = fd_getflags(sock);
++    bool guest_nonblock_rm = (guest_flags_rm >= 0) && (guest_flags_rm & O_NONBLOCK_) != 0;
+     bool should_wait_rm = !(real_flags & MSG_DONTWAIT) && !guest_nonblock_rm && !host_nonblock_rm;
+ 
+     ssize_t res = -1;
+@@ -1274,6 +1276,6 @@ int_t sys_recvmsg(fd_t sock_fd, addr_t msghdr_addr, int_t flags) {
+     if (should_wait_rm) {
+-        printk("NETDIAG recvmsg-block(pid=%d comm=%s fd=%d real=%d gflags=%#x hflags=%#x sflags=%#x)\n",
++        printk("NETDIAG recvmsg-block(pid=%d comm=%s fd=%d real=%d gflags=%#x hflags=%#x fdflags=%#x)\n",
+                current->pid, current->comm, sock_fd, sock->real_fd,
+-               (unsigned)flags, host_flags_rm, sock->flags);
++               (unsigned)flags, host_flags_rm, guest_flags_rm);
+         for (;;) {
+             res = recvmsg(sock->real_fd, &msg, real_flags | MSG_DONTWAIT);
+             if (res >= 0)
