@@ -13981,6 +13981,8 @@ final class ChatViewModel {
             #"(?i)^(?:去)\s*"#
         ]
         let trailingPatterns = [
+            #"(?i)[，,。；;].*$"#,
+            #"(?i)(?:再给|给我|然后|之后|以后|再把|并把|并|接着).*$"#,
             #"(?i)\s*(?:看看|看一下|查看|进去|页面|链接|条目|结果|item|result|page|link)$"#
         ]
         for pattern in leadingPatterns {
@@ -14000,6 +14002,15 @@ final class ChatViewModel {
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’`，,。.!！?？:：;；()（）[]【】"))
+        let continuationPatterns = [
+            #"(?i)[，,。；;].*$"#,
+            #"(?i)(?:搜完|搜索完|查完|查询完|检索完|出结果后|出结果|结果出来|然后|之后|以后|再给|再把|再点|再点击|并点击|接着|点击|点一下|点进去|点进|进入|打开结果|查看|看一下|看看).*$"#
+        ]
+        for pattern in continuationPatterns {
+            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’`，,。.!！?？:：;；()（）[]【】"))
+        }
         let trailingPatterns = [
             #"(?i)\s*(?:进行)?(?:搜索|查询|检索)$"#,
             #"(?i)\s*(?:search|query|look\s+up|find)$"#
