@@ -2907,11 +2907,16 @@ actor LocalAlpineTerminalService {
         return """
         requested_target=\(shellSingleQuoted(path))
         target="$requested_target"
+        if [ "$target" = "/" ]; then
+          target=/
+        elif [ "$target" = "" ]; then
+          target=/
+        fi
         if [ ! -e "$target" ] && [ ! -L "$target" ]; then
           printf 'IEXA_ROOTFS_ERROR\\tPath does not exist: %s\\n' "$requested_target" >&2
           exit 20
         fi
-        if [ ! -d "$target" ]; then
+        if [ "$target" != "/" ] && [ ! -d "$target" ]; then
           resolved_target=$(readlink -f "$target" 2>/dev/null || true)
           if [ -n "$resolved_target" ] && [ -d "$resolved_target" ]; then
             target="$resolved_target"
@@ -2921,7 +2926,12 @@ actor LocalAlpineTerminalService {
           fi
         fi
         printf 'IEXA_ROOTFS_LIST_BEGIN\\n'
-        for entry in "$target"/* "$target"/.[!.]* "$target"/..?*; do
+        if [ "$target" = "/" ]; then
+          glob_prefix=
+        else
+          glob_prefix="$target"
+        fi
+        for entry in "$glob_prefix"/* "$glob_prefix"/.[!.]* "$glob_prefix"/..?*; do
           [ -e "$entry" ] || [ -L "$entry" ] || continue
           name=${entry##*/}
           case "$name" in .|..) continue ;; esac
