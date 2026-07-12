@@ -8560,40 +8560,35 @@ final class BrowserWebSearchService: NSObject {
             )
         }
         if #available(iOS 14.0, *) {
-            return await withCheckedContinuation { continuation in
-                webView.callAsyncJavaScript(
+            do {
+                let value = try await webView.callAsyncJavaScript(
                     script,
                     arguments: [:],
                     in: nil,
                     contentWorld: .page
-                ) { result in
-                    switch result {
-                    case .success(let value):
-                        if let string = value as? String {
-                            continuation.resume(returning: JavaScriptEvaluation(
-                                string: string,
-                                error: nil,
-                                resultType: "string",
-                                resultPreview: nil
-                            ))
-                        } else {
-                            continuation.resume(returning: JavaScriptEvaluation(
-                                string: nil,
-                                error: nil,
-                                resultType: String(describing: type(of: value)),
-                                resultPreview: String(String(describing: value).prefix(500))
-                            ))
-                        }
-                    case .failure(let error):
-                        self.logger.debug("Browser async JS failed: \(error.localizedDescription, privacy: .public)")
-                        continuation.resume(returning: JavaScriptEvaluation(
-                            string: nil,
-                            error: error.localizedDescription,
-                            resultType: nil,
-                            resultPreview: nil
-                        ))
-                    }
+                )
+                if let string = value as? String {
+                    return JavaScriptEvaluation(
+                        string: string,
+                        error: nil,
+                        resultType: "string",
+                        resultPreview: nil
+                    )
                 }
+                return JavaScriptEvaluation(
+                    string: nil,
+                    error: nil,
+                    resultType: String(describing: type(of: value)),
+                    resultPreview: String(String(describing: value).prefix(500))
+                )
+            } catch {
+                self.logger.debug("Browser async JS failed: \(error.localizedDescription, privacy: .public)")
+                return JavaScriptEvaluation(
+                    string: nil,
+                    error: error.localizedDescription,
+                    resultType: nil,
+                    resultPreview: nil
+                )
             }
         }
         return await evaluateJavaScriptString(fallbackScript)
