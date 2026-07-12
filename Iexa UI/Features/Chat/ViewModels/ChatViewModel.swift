@@ -14169,6 +14169,9 @@ final class ChatViewModel {
         if needsUserVerification && !userVerificationCompleted {
             return true
         }
+        if anyJSONBoolValue(in: result.summary, key: "next_action_required", equals: true) {
+            return false
+        }
         let action = localAlpineBrowserActionName(from: call, result: result)
         let terminalActions: Set<String> = [
             "browser.fetch", "browser.wait_for_image"
@@ -14589,6 +14592,9 @@ final class ChatViewModel {
         call: LocalAlpineNativeToolCall,
         toolContent: String
     ) -> Bool {
+        if anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
+            return false
+        }
         if toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
             return true
         }
@@ -14619,6 +14625,9 @@ final class ChatViewModel {
         if browserToolResultLooksComplete(call: call, toolContent: toolContent) {
             return false
         }
+        if anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
+            return true
+        }
 
         let action = browserResultActionName(from: call, toolContent: toolContent)
         let lowerContent = toolContent.lowercased()
@@ -14637,6 +14646,10 @@ final class ChatViewModel {
         ]
 
         if ["browser.click", "browser.type", "browser.execute_js"].contains(action),
+           anyJSONBoolValue(in: toolContent, key: "ok", equals: true) {
+            return true
+        }
+        if ["browser.open", "browser.screenshot", "browser.observe", "browser.inspect", "browser.scroll", "browser.find_elements"].contains(action),
            anyJSONBoolValue(in: toolContent, key: "ok", equals: true) {
             return true
         }
@@ -26055,7 +26068,12 @@ final class ChatViewModel {
         )
         localAlpinePendingToolStatusByMessageId[messageId] = status
 
-        flushLocalAlpineToolEventIfNeeded(messageId: messageId, immediate: uiCall.phase == .start || uiCall.phase == .result)
+        let isLiveProgressUpdate = uiCall.phase == .start
+            && uiCall.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        flushLocalAlpineToolEventIfNeeded(
+            messageId: messageId,
+            immediate: uiCall.phase == .result || (uiCall.phase == .start && !isLiveProgressUpdate)
+        )
 
         Task {
             await RunLiveActivityService.shared.update(

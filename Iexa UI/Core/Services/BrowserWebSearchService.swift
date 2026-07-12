@@ -409,6 +409,11 @@ final class BrowserWebSearchService: NSObject {
             "max_scrolls": maxScrolls,
             "human_verification": verification,
             "requires_user_verification": verificationRequiresUser,
+            "next_action_required": !readable && !verificationRequiresUser,
+            "suggested_next_browser_action": !readable && !verificationRequiresUser ? "browser.find_elements" : "",
+            "next_action_reason": !readable && !verificationRequiresUser
+                ? "browser.open only navigated to the page. Continue with find_elements/screenshot/click/type/scroll until the user's page task is complete."
+                : "",
             "reused_existing_page": reusedExistingPage,
             "summary": verificationRequiresUser
                 ? "网页需要先完成人机验证；请在弹出的共享浏览器中完成后继续。"

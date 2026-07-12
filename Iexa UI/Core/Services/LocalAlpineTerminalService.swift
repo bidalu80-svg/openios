@@ -927,6 +927,34 @@ actor LocalAlpineTerminalService {
 
     func listRootFSFiles(path: String, includeHidden: Bool = true) async throws -> [TerminalFileItem] {
         let rootPath = try normalizedRootFSPath(path)
+        if let dataRoot = try? runtimeRootFSDataDirectory() {
+            let directory = try hostRootFSURL(for: rootPath, dataRoot: dataRoot, allowRoot: true)
+            let values = try directory.resourceValues(forKeys: [.isDirectoryKey])
+            guard values.isDirectory == true else {
+                throw LocalAlpineError.commandFailed("Not a directory: \(rootPath)")
+            }
+            let options: FileManager.DirectoryEnumerationOptions = includeHidden ? [] : [.skipsHiddenFiles]
+            let urls = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey],
+                options: options
+            )
+            return try urls.map { url in
+                let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey])
+                let name = url.lastPathComponent
+                let itemPath = rootPath == "/" ? "/\(name)" : "\(rootPath)/\(name)"
+                let isDirectory = values.isDirectory == true && values.isSymbolicLink != true
+                return TerminalFileItem(
+                    name: name,
+                    path: itemPath,
+                    isDirectory: isDirectory,
+                    size: isDirectory ? nil : values.fileSize.map { Int64($0) },
+                    modified: values.contentModificationDate,
+                    permissions: nil
+                )
+            }
+        }
+
         let result = await execute(
             command: rootFSListCommand(path: rootPath, includeHidden: includeHidden),
             cwd: "/mnt/iexa"
@@ -988,6 +1016,14 @@ actor LocalAlpineTerminalService {
         guard rootPath != "/" else {
             throw LocalAlpineError.invalidPath(path)
         }
+        if let dataRoot = try? runtimeRootFSDataDirectory() {
+            let url = try hostRootFSURL(for: rootPath, dataRoot: dataRoot, allowRoot: false)
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey])
+            guard values.isDirectory != true else {
+                throw LocalAlpineError.commandFailed("Not a regular file: \(rootPath)")
+            }
+            return try Data(contentsOf: url)
+        }
 
         let result = await execute(
             command: rootFSReadCommand(path: rootPath),
@@ -1016,6 +1052,20 @@ actor LocalAlpineTerminalService {
         let rootPath = try normalizedRootFSPath(path)
         guard rootPath != "/" else {
             throw LocalAlpineError.invalidPath(path)
+        }
+        if let dataRoot = try? runtimeRootFSDataDirectory() {
+            let url = try hostRootFSURL(for: rootPath, dataRoot: dataRoot, allowRoot: false)
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey])
+            guard values.isDirectory != true else {
+                throw LocalAlpineError.commandFailed("Not a regular file: \(rootPath)")
+            }
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: max(1, maxBytes)) ?? Data()
+            return LocalAlpineFileSample(
+                data: data,
+                fullSize: values.fileSize.map(Int64.init)
+            )
         }
 
         let result = await execute(
@@ -1188,6 +1238,12 @@ actor LocalAlpineTerminalService {
         guard isDeletableRootFSPath(rootPath) else {
             throw LocalAlpineError.protectedPath(rootPath)
         }
+        if let dataRoot = try? runtimeRootFSDataDirectory() {
+            let url = try hostRootFSURL(for: rootPath, dataRoot: dataRoot, allowRoot: false)
+            guard fileManager.fileExists(atPath: url.path) else { return }
+            try fileManager.removeItem(at: url)
+            return
+        }
 
         let result = await execute(
             command: rootFSDeleteCommand(path: rootPath),
@@ -1222,7 +1278,8 @@ actor LocalAlpineTerminalService {
         cwd: String,
         stdinInput: String? = nil,
         cwdIsRuntimePath: Bool = false,
-        executionMode: LocalAlpineCommandExecutionMode = .oneShot
+        executionMode: LocalAlpineCommandExecutionMode = .oneShot,
+        onOutput: (@MainActor @Sendable (String) -> Void)? = nil
     ) async -> LocalAlpineCommandResult {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -1252,7 +1309,8 @@ actor LocalAlpineTerminalService {
                 stdinInput: stdinInput,
                 cwdIsRuntimePath: cwdIsRuntimePath,
                 sessionKey: sessionKey,
-                timeoutSeconds: timeoutSeconds
+                timeoutSeconds: timeoutSeconds,
+                onOutput: onOutput
             )
         }
 
@@ -1370,11 +1428,12 @@ actor LocalAlpineTerminalService {
         stdinInput: String?,
         cwdIsRuntimePath: Bool,
         sessionKey: String,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        onOutput: (@MainActor @Sendable (String) -> Void)? = nil
     ) async -> LocalAlpineCommandResult {
         let normalizedSessionKey = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedSessionKey.isEmpty else {
-            return await execute(command: command, cwd: cwd, stdinInput: stdinInput, cwdIsRuntimePath: cwdIsRuntimePath)
+            return await execute(command: command, cwd: cwd, stdinInput: stdinInput, cwdIsRuntimePath: cwdIsRuntimePath, onOutput: onOutput)
         }
 
         guard await waitForPersistentAgentSlot(normalizedSessionKey) else {
@@ -1403,7 +1462,8 @@ actor LocalAlpineTerminalService {
             materializedCommand: materialized.command,
             runtimeCWD: runtimeCWD,
             sessionKey: normalizedSessionKey,
-            timeoutSeconds: effectivePersistentAgentTimeout(for: command, defaultTimeout: timeoutSeconds)
+            timeoutSeconds: effectivePersistentAgentTimeout(for: command, defaultTimeout: timeoutSeconds),
+            onOutput: onOutput
         )
         if let cleanupPath = materialized.cleanupPath {
             try? await deleteItem(path: cleanupPath)
@@ -1470,7 +1530,8 @@ actor LocalAlpineTerminalService {
         materializedCommand: String,
         runtimeCWD: String,
         sessionKey: String,
-        timeoutSeconds: TimeInterval
+        timeoutSeconds: TimeInterval,
+        onOutput: (@MainActor @Sendable (String) -> Void)? = nil
     ) async -> LocalAlpineCommandResult {
         let session = await persistentAgentSessionID(sessionKey: sessionKey, runtimeCWD: runtimeCWD)
         guard let sessionID = session.sessionID else {
@@ -1501,6 +1562,7 @@ actor LocalAlpineTerminalService {
         }
 
         var rawOutput = ""
+        var lastVisibleOutput = ""
         var openTargets = Set<String>()
         var openRequests: [LocalAlpineOpenRequest] = []
         let deadline = Date().addingTimeInterval(max(1, timeoutSeconds))
@@ -1532,6 +1594,15 @@ actor LocalAlpineTerminalService {
             if !chunk.isEmpty {
                 rawOutput += chunk
                 let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
+                let visibleOutput = trimTrailingNewlines(
+                    LocalAlpineOpenMarkerParser.extract(from: parsed.visibleOutput)
+                        .cleaned
+                        .replacingOccurrences(of: "\u{0007}", with: "")
+                )
+                if visibleOutput != lastVisibleOutput {
+                    lastVisibleOutput = visibleOutput
+                    await onOutput?(visibleOutput)
+                }
                 if parsed.finished {
                     if var stored = persistentAgentSessions[sessionKey] {
                         stored.lastUsedAt = Date()
@@ -2898,6 +2969,51 @@ actor LocalAlpineTerminalService {
             throw LocalAlpineError.invalidPath(rawPath)
         }
         return normalized
+    }
+
+    private func runtimeRootFSDataDirectory() throws -> URL {
+        let workspaceURL = try ensureWorkspaceDirectory()
+        if let rootArchiveURL = bundledRootFSURL() {
+            let runtimeRootFSURL = try ensureRuntimeRootFSURL(from: rootArchiveURL, workspaceURL: workspaceURL)
+            guard runtimeRootFSURL.pathExtension == "fakefs" else {
+                throw LocalAlpineError.commandFailed("Local Alpine rootfs is not a writable fakefs directory.")
+            }
+            let dataURL = runtimeRootFSURL.appendingPathComponent("data", isDirectory: true)
+            guard fileManager.fileExists(atPath: dataURL.path) else {
+                throw LocalAlpineError.commandFailed("Local Alpine rootfs data directory is missing.")
+            }
+            return dataURL.standardizedFileURL
+        }
+
+        let dataURL = workspaceURL
+            .appendingPathComponent("rootfs.fakefs", isDirectory: true)
+            .appendingPathComponent("data", isDirectory: true)
+        guard fileManager.fileExists(atPath: dataURL.path) else {
+            throw LocalAlpineError.commandFailed("Local Alpine rootfs data directory is missing.")
+        }
+        return dataURL.standardizedFileURL
+    }
+
+    private func hostRootFSURL(
+        for rootPath: String,
+        dataRoot: URL,
+        allowRoot: Bool
+    ) throws -> URL {
+        let normalized = try normalizedRootFSPath(rootPath)
+        guard allowRoot || normalized != "/" else {
+            throw LocalAlpineError.invalidPath(rootPath)
+        }
+        let relativePath = normalized == "/" ? "" : String(normalized.dropFirst())
+        let url = relativePath.isEmpty
+            ? dataRoot
+            : dataRoot.appendingPathComponent(relativePath, isDirectory: false)
+        let standardizedRoot = dataRoot.standardizedFileURL.path
+        let standardizedPath = url.standardizedFileURL.path
+        guard standardizedPath == standardizedRoot
+            || standardizedPath.hasPrefix(standardizedRoot + "/") else {
+            throw LocalAlpineError.invalidPath(rootPath)
+        }
+        return url
     }
 
     private func rootFSListCommand(path: String, includeHidden: Bool) -> String {

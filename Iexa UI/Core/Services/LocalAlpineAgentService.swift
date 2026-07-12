@@ -1281,7 +1281,19 @@ actor LocalAlpineAgentService {
                 var result = await LocalAlpineTerminalService.shared.execute(
                     command: commandToExecute,
                     cwd: effectiveCWD,
-                    executionMode: shellExecutionMode
+                    executionMode: shellExecutionMode,
+                    onOutput: { output in
+                        guard let eventHandler else { return }
+                        let preview = Self.liveShellOutputPreview(output)
+                        guard !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                        let event = LocalAlpineToolEvent(
+                            runId: toolRunId,
+                            call: Self.toolCallProgress(context, outputPreview: preview)
+                        )
+                        Task { @MainActor in
+                            await eventHandler(event)
+                        }
+                    }
                 )
                 openRequests.append(contentsOf: result.openRequests)
                 while let request = result.interactiveRequest {
@@ -1291,7 +1303,19 @@ actor LocalAlpineAgentService {
                             command: request.command,
                             cwd: request.cwd,
                             stdinInput: stdinInput,
-                            executionMode: shellExecutionMode
+                            executionMode: shellExecutionMode,
+                            onOutput: { output in
+                                guard let eventHandler else { return }
+                                let preview = Self.liveShellOutputPreview(output)
+                                guard !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                                let event = LocalAlpineToolEvent(
+                                    runId: toolRunId,
+                                    call: Self.toolCallProgress(context, outputPreview: preview)
+                                )
+                                Task { @MainActor in
+                                    await eventHandler(event)
+                                }
+                            }
                         )
                         openRequests.append(contentsOf: result.openRequests)
                     } else {
@@ -1657,6 +1681,55 @@ actor LocalAlpineAgentService {
             imageFilePath: imageFilePath,
             failed: false
         )
+    }
+
+    private nonisolated static func toolCallProgress(
+        _ context: LocalAlpineToolCallContext,
+        outputPreview: String
+    ) -> LocalAlpineToolCall {
+        let compact = LocalAlpineOutputOffloadStore.compactText(
+            outputPreview,
+            label: "\(context.name)-live-output",
+            previewLimit: LocalAlpineToolCall.outputPreviewLimit(for: context.name)
+        )
+        let browserURL = inferredBrowserURL(for: context)
+        let imageFilePath = inferredImageFilePath(for: context)
+        return LocalAlpineToolCall(
+            id: context.id,
+            runId: context.runId,
+            name: context.name,
+            phase: .start,
+            title: context.title,
+            detail: context.detail,
+            cwd: context.cwd,
+            command: context.command,
+            exitCode: nil,
+            outputPreview: compact.preview,
+            outputReference: compact.reference,
+            outputByteCount: compact.byteCount,
+            outputLineCount: compact.lineCount,
+            filePaths: context.filePaths,
+            lineDelta: nil,
+            startedAtMs: context.startedAtMs,
+            completedAtMs: nil,
+            browserURL: browserURL,
+            imageFilePath: imageFilePath,
+            failed: false
+        )
+    }
+
+    private nonisolated static func liveShellOutputPreview(_ output: String) -> String {
+        let cleaned = output
+            .replacingOccurrences(of: "\u{0007}", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return "" }
+
+        let lines = cleaned.split(whereSeparator: \.isNewline).map(String.init)
+        let lineLimited = lines.count > 18 ? lines.suffix(18).joined(separator: "\n") : cleaned
+        if lineLimited.count <= 2_000 {
+            return lineLimited
+        }
+        return String(lineLimited.suffix(2_000))
     }
 
     private nonisolated static func toolCallResult(
