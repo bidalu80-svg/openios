@@ -13195,7 +13195,7 @@ final class ChatViewModel {
             return await executeLocalAlpineMemoryWriteToolCall(call, assistantMessageId: assistantMessageId)
         case "memory_get":
             return await executeLocalAlpineMemoryGetToolCall(call, assistantMessageId: assistantMessageId)
-        case "web_search", "browser_use":
+        case "web_search", "browser_use", "browser_readable":
             return await executeLocalAlpineWebSearchToolCall(call, assistantMessageId: assistantMessageId)
         case "iexa_open":
             return await executeLocalAlpineOpenToolCall(call, assistantMessageId: assistantMessageId)
@@ -13790,7 +13790,15 @@ final class ChatViewModel {
         redirected["force_reload"] = false
         redirected["reload"] = false
 
-        redirected["action"] = "get_readable"
+        if let automation = browserAutomationUpgradeArguments(
+            from: redirected,
+            latestUserPrompt: latestUserPrompt,
+            openLikeAction: true
+        ) {
+            redirected = automation
+        } else {
+            redirected["action"] = "get_readable"
+        }
 
         let data = (try? JSONSerialization.data(withJSONObject: redirected, options: [.sortedKeys])) ?? Data()
         return LocalAlpineNativeToolCall(
@@ -13808,7 +13816,147 @@ final class ChatViewModel {
         if toolName == "web_search" {
             return redirectURLSearchToBrowserUseIfNeeded(call, latestUserPrompt: latestUserPrompt)
         }
+        if toolName == "browser_use" || toolName == "browser_readable" {
+            let arguments = localAlpineNativeToolArguments(for: call)
+            let action = firstNonEmptyString(
+                in: arguments,
+                keys: ["action", "browser_action", "browser_use_action", "operation", "op", "type"]
+            )?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            let openLikeAction = toolName == "browser_readable"
+                || action.isEmpty
+                || ["open", "navigate", "browser.open", "browser.navigate", "readable", "get_readable", "browser.readable"].contains(action)
+            if let upgraded = browserAutomationUpgradeArguments(
+                from: arguments,
+                latestUserPrompt: latestUserPrompt,
+                openLikeAction: openLikeAction
+            ) {
+                let data = (try? JSONSerialization.data(withJSONObject: upgraded, options: [.sortedKeys])) ?? Data()
+                return LocalAlpineNativeToolCall(
+                    id: call.id,
+                    name: "browser_use",
+                    arguments: String(data: data, encoding: .utf8) ?? call.arguments
+                )
+            }
+        }
         return call
+    }
+
+    private static func browserAutomationUpgradeArguments(
+        from arguments: [String: Any],
+        latestUserPrompt: String?,
+        openLikeAction: Bool
+    ) -> [String: Any]? {
+        guard openLikeAction,
+              let prompt = latestUserPrompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !prompt.isEmpty,
+              browserPromptLooksLikeOpenThenOperate(prompt) else {
+            return nil
+        }
+
+        var upgraded = arguments
+        for key in ["action", "browser_action", "browser_use_action", "operation", "op", "type"] {
+            upgraded.removeValue(forKey: key)
+        }
+        upgraded["action"] = "auto"
+        upgraded["force_reload"] = false
+        upgraded["forceReload"] = false
+        upgraded["reload"] = false
+
+        let existingText = firstNonEmptyString(
+            in: upgraded,
+            keys: ["text", "value", "input", "content", "message", "prompt", "query", "q", "keyword", "keywords"]
+        )
+        if existingText == nil,
+           let extractedText = browserAutomationInputText(from: prompt) {
+            upgraded["text"] = extractedText
+        }
+
+        if firstNonEmptyString(in: upgraded, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"]) == nil,
+           let clickTarget = browserAutomationClickTarget(from: prompt) {
+            upgraded["button_text"] = clickTarget
+        }
+
+        upgraded["user_prompt"] = prompt
+        return upgraded
+    }
+
+    private static func browserPromptLooksLikeOpenThenOperate(_ prompt: String) -> Bool {
+        let normalized = prompt
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+        let hasOpenIntent = [
+            "打开", "访问", "进入", "进到", "前往", "去", "用",
+            "open", "visit", "go to", "navigate"
+        ].contains { normalized.contains($0) }
+        let hasOperateIntent = [
+            "搜索", "搜一下", "搜", "查询", "查一下", "查", "检索",
+            "输入", "填入", "填写", "点击", "点一下", "点",
+            "search", "query", "look up", "find", "type", "input", "click"
+        ].contains { normalized.contains($0) }
+        return hasOpenIntent && hasOperateIntent
+    }
+
+    private static func browserAutomationInputText(from prompt: String) -> String? {
+        let patterns = [
+            #"(?i)(?:搜索|搜一下|搜|查询|查一下|查|检索|输入|填入|填写|search\s+for|search|query|look\s+up|find|type|input)\s*[“"']?(.+?)[”"']?(?:\s*(?:进行)?(?:搜索|查询|检索)|\s*$)"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let nsRange = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
+            guard let match = regex.firstMatch(in: prompt, options: [], range: nsRange),
+                  match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: prompt) else {
+                continue
+            }
+            let candidate = cleanupBrowserAutomationOperand(String(prompt[range]))
+            if let candidate, !browserAutomationOperandLooksLikeSiteOnly(candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private static func browserAutomationClickTarget(from prompt: String) -> String? {
+        let pattern = #"(?i)(?:点击|点一下|点|click)\s*[“"']?(.+?)[”"']?(?:\s*$)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+        let nsRange = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
+        guard let match = regex.firstMatch(in: prompt, options: [], range: nsRange),
+              match.numberOfRanges > 1,
+              let range = Range(match.range(at: 1), in: prompt) else {
+            return nil
+        }
+        return cleanupBrowserAutomationOperand(String(prompt[range]))
+    }
+
+    private static func cleanupBrowserAutomationOperand(_ raw: String) -> String? {
+        var text = raw
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’`，,。.!！?？:：;；()（）[]【】"))
+        let trailingPatterns = [
+            #"(?i)\s*(?:进行)?(?:搜索|查询|检索)$"#,
+            #"(?i)\s*(?:search|query|look\s+up|find)$"#
+        ]
+        for pattern in trailingPatterns {
+            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’`，,。.!！?？:：;；()（）[]【】"))
+        }
+        return text.isEmpty ? nil : String(text.prefix(200))
+    }
+
+    private static func browserAutomationOperandLooksLikeSiteOnly(_ text: String) -> Bool {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return true }
+        if normalizedBrowserAutomationURLString(normalized) != nil {
+            return true
+        }
+        return [
+            "百度", "百度首页", "baidu", "baidu.com",
+            "必应", "bing", "google", "谷歌", "搜狗", "sogou"
+        ].contains(normalized)
     }
 
     private static func normalizedBrowserAutomationURLString(_ raw: String?) -> String? {
