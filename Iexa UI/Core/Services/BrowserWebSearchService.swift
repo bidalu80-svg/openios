@@ -1897,6 +1897,9 @@ final class BrowserWebSearchService: NSObject {
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
         let isImageWorkflow = Self.browserAutoWorkflowLooksLikeImageGeneration(call: call, text: text)
         let isSearchWorkflow = Self.browserAutoWorkflowLooksLikeSearch(call: call, text: text)
+        let requestedClickLabel = Self.firstString(in: call, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"])
+        let hasExplicitPostSearchClickTarget = isSearchWorkflow
+            && requestedClickLabel.map { !Self.browserAutoClickLabelLooksLikeSearchSubmit($0) } == true
         let shouldWaitForImage = Self.boolValue(call["wait_for_image"] ?? call["waitForImage"] ?? call["image_result"] ?? call["imageResult"]) ?? isImageWorkflow
         let explicitResultPolling = Self.boolValue(
             call["poll_result"]
@@ -2288,10 +2291,11 @@ final class BrowserWebSearchService: NSObject {
             }
         }
 
-        var buttonLabel = isSearchWorkflow && searchResultDetectedAfterTyping
-            ? nil
-            : Self.firstString(in: call, keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel"])
-        if buttonLabel == nil && !(isSearchWorkflow && searchResultDetectedAfterTyping) {
+        let shouldSkipClickAfterSearchResult = isSearchWorkflow
+            && searchResultDetectedAfterTyping
+            && !hasExplicitPostSearchClickTarget
+        var buttonLabel = shouldSkipClickAfterSearchResult ? nil : requestedClickLabel
+        if buttonLabel == nil && !shouldSkipClickAfterSearchResult {
             if text == nil {
                 buttonLabel = Self.firstString(in: call, keys: ["target", "label"])
             } else if isImageWorkflow {
@@ -2595,6 +2599,27 @@ final class BrowserWebSearchService: NSObject {
             return true
         }
         return Self.firstString(in: call, keys: ["query", "q", "keyword", "keywords"]) != nil
+    }
+
+    private static func browserAutoClickLabelLooksLikeSearchSubmit(_ label: String) -> Bool {
+        let normalized = label
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return true }
+        let submitWords = [
+            "搜索", "搜一下", "百度一下", "查询", "检索",
+            "search", "submit", "go", "query", "确定"
+        ]
+        let tokens = normalized
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+            .filter { !$0.isEmpty }
+        if tokens.isEmpty {
+            return submitWords.contains(normalized)
+        }
+        return tokens.allSatisfy { token in
+            submitWords.contains { word in token == word || word == token }
+        }
     }
 
     private func browserCurrentPageLooksLikeSearchResult(text: String?) async -> Bool {

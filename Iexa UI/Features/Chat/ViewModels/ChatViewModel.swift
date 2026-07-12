@@ -13298,16 +13298,33 @@ final class ChatViewModel {
             return nil
         }
         let latestPrompt = latestUserBrowserAutomationPrompt() ?? ""
-        let arguments: [String: Any] = [
-            "tool_title": "观察当前网页",
-            "action": "find_elements",
+        let shouldOperate = Self.browserPromptLooksLikeCurrentPageContinuation(latestPrompt)
+        var arguments: [String: Any] = [
+            "tool_title": shouldOperate ? "继续操作当前网页" : "观察当前网页",
+            "action": shouldOperate ? "auto" : "find_elements",
             "scan_page": true,
             "screenshot": true,
             "capture_visuals": true,
             "attach_preview": false,
+            "force_reload": false,
+            "forceReload": false,
+            "reload": false,
             "max_scrolls": 10,
+            "max_loops": 8,
             "user_prompt": latestPrompt
         ]
+        if shouldOperate,
+           arguments["text"] == nil,
+           let inputText = Self.browserAutomationInputText(from: latestPrompt),
+           !Self.browserAutomationOperandLooksLikeSiteOnly(inputText) {
+            arguments["text"] = inputText
+        }
+        if shouldOperate,
+           arguments["button_text"] == nil,
+           let clickTarget = Self.browserAutomationClickTarget(from: latestPrompt) {
+            arguments["button_text"] = clickTarget
+            arguments["target"] = clickTarget
+        }
         guard JSONSerialization.isValidJSONObject(arguments),
               let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
               let argumentString = String(data: data, encoding: .utf8) else {
@@ -13893,9 +13910,23 @@ final class ChatViewModel {
         let hasOperateIntent = [
             "搜索", "搜一下", "搜", "查询", "查一下", "查", "检索",
             "输入", "填入", "填写", "点击", "点一下", "点",
-            "search", "query", "look up", "find", "type", "input", "click"
+            "点进去", "进去", "进入结果", "打开结果", "查看", "看一下", "看看",
+            "search", "query", "look up", "find", "type", "input", "click", "open result", "view result"
         ].contains { normalized.contains($0) }
         return hasOpenIntent && hasOperateIntent
+    }
+
+    private static func browserPromptLooksLikeCurrentPageContinuation(_ prompt: String) -> Bool {
+        let normalized = prompt
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+        return [
+            "继续", "下一步", "接着", "往下", "点", "点击", "点进去", "进去",
+            "进入", "打开结果", "查看", "看一下", "看看", "为什么不点", "怎么不点",
+            "continue", "next", "click", "open result", "view result", "go on"
+        ].contains { normalized.contains($0) }
     }
 
     private static func browserAutomationInputText(from prompt: String) -> String? {
@@ -13919,15 +13950,49 @@ final class ChatViewModel {
     }
 
     private static func browserAutomationClickTarget(from prompt: String) -> String? {
-        let pattern = #"(?i)(?:点击|点一下|点|click)\s*[“"']?(.+?)[”"']?(?:\s*$)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
-        let nsRange = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
-        guard let match = regex.firstMatch(in: prompt, options: [], range: nsRange),
-              match.numberOfRanges > 1,
-              let range = Range(match.range(at: 1), in: prompt) else {
-            return nil
+        let patterns = [
+            #"(?i)(?:点击|点一下|点|click)\s*[“"']?(.+?)[”"']?(?:\s*$)"#,
+            #"(?i)(?:点进去|点进|进入|进到|查看|看一下|看看|open|view)\s*[“"']?(.+?)(?:结果|页面|链接|条目|item|result)?[”"']?(?:\s*$)"#,
+            #"(?i)(?:打开|open)\s*[“"']?(.+?)(?:结果|页面|链接|条目|item|result)[”"']?(?:\s*$)"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let nsRange = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
+            guard let match = regex.firstMatch(in: prompt, options: [], range: nsRange),
+                  match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: prompt) else {
+                continue
+            }
+            if let target = cleanupBrowserAutomationClickTarget(String(prompt[range])) {
+                return target
+            }
         }
-        return cleanupBrowserAutomationOperand(String(prompt[range]))
+        return nil
+    }
+
+    private static func cleanupBrowserAutomationClickTarget(_ raw: String) -> String? {
+        var text = raw
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’`，,。.!！?？:：;；()（）[]【】"))
+        let leadingPatterns = [
+            #"(?i)^(?:那个|这个|该|the)\s*"#,
+            #"(?i)^(?:第一个|第一条|首个|top|first)\s*"#,
+            #"(?i)^(?:去)\s*"#
+        ]
+        let trailingPatterns = [
+            #"(?i)\s*(?:看看|看一下|查看|进去|页面|链接|条目|结果|item|result|page|link)$"#
+        ]
+        for pattern in leadingPatterns {
+            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        for pattern in trailingPatterns {
+            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’`，,。.!！?？:：;；()（）[]【】"))
+        }
+        return text.isEmpty ? nil : String(text.prefix(120))
     }
 
     private static func cleanupBrowserAutomationOperand(_ raw: String) -> String? {
