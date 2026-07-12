@@ -4471,6 +4471,13 @@ final class BrowserWebSearchService: NSObject {
           const elementLimit = \(max(elementLimit, 0));
           const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
           const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+          const scrollY = Math.round(window.scrollY || (document.documentElement && document.documentElement.scrollTop) || 0);
+          const scrollHeight = Math.max(
+            document.documentElement && document.documentElement.scrollHeight || 0,
+            document.body && document.body.scrollHeight || 0,
+            viewportHeight
+          );
+          const maxScrollY = Math.max(0, Math.round(scrollHeight - viewportHeight));
           function clean(value) {
             return String(value || '').replace(/\\s+/g, ' ').trim();
           }
@@ -4540,7 +4547,12 @@ final class BrowserWebSearchService: NSObject {
             ok: true,
             title: document.title || '',
             url: location.href,
-            scroll_y: Math.round(window.scrollY || 0),
+            scroll_y: scrollY,
+            scroll_height: Math.round(scrollHeight),
+            max_scroll_y: maxScrollY,
+            can_scroll_up: scrollY > 2,
+            can_scroll_down: scrollY < maxScrollY - 2,
+            scroll_progress: maxScrollY > 0 ? Math.max(0, Math.min(1, scrollY / maxScrollY)) : 1,
             viewport_width: Math.round(viewportWidth),
             viewport_height: Math.round(viewportHeight),
             visible_text: visibleText,

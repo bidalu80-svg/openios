@@ -12139,7 +12139,7 @@ final class ChatViewModel {
             var calls = toolAccumulator.completedCalls()
             if !executedAnyTool,
                let userBrowserCall = forcedLatestUserBrowserCall,
-               !calls.contains(where: Self.isLocalAlpineBrowserNativeToolCall) {
+               !calls.contains(where: Self.isLocalAlpineBrowserUseToolCall) {
                 forcedLatestUserBrowserCall = nil
                 if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     acc.replace("")
@@ -12412,7 +12412,7 @@ final class ChatViewModel {
                 .filter(Self.isLocalNativeFunctionToolCall)
             if !executedAnyTool,
                let userBrowserCall = forcedLatestUserBrowserCall,
-               !calls.contains(where: { Self.localNativeBrowserToolKind($0) != nil }) {
+               !calls.contains(where: Self.isLocalAlpineBrowserUseToolCall) {
                 forcedLatestUserBrowserCall = nil
                 if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     acc.replace("")
@@ -12808,10 +12808,16 @@ final class ChatViewModel {
             )
         }
 
-        let toolContent = Self.localNativeFunctionToolResultContent(
-            result.summary,
-            browserVerificationCompleted: browserVerificationCompleted
-        )
+        let toolContent = browserAction != nil
+            ? Self.localNativeBrowserToolResultContent(
+                result.summary,
+                call: effectiveCall,
+                browserVerificationCompleted: browserVerificationCompleted
+            )
+            : Self.localNativeFunctionToolResultContent(
+                result.summary,
+                browserVerificationCompleted: browserVerificationCompleted
+            )
         let modelVisualContextMessage = browserAction != nil && selectedModel?.supportsImageInput == true
             ? Self.localNativeBrowserVisualContextMessage(from: result.summary)
             : nil
@@ -13281,11 +13287,12 @@ final class ChatViewModel {
     private func shouldForceBrowserToolRetryForLatestUser() -> Bool {
         guard isLocalBrowserNativeToolsEnabled,
               let latestPrompt = latestUserBrowserAutomationPrompt(),
-              !latestPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              hasLocalBrowserContinuationState() else {
+              !latestPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
         }
-        return true
+        return hasLocalBrowserContinuationState()
+            || (Self.browserPromptLooksLikeOpenThenOperate(latestPrompt)
+                && Self.browserAutomationOpenURL(from: latestPrompt) != nil)
     }
 
     private func hasLocalBrowserContinuationState() -> Bool {
@@ -13299,12 +13306,15 @@ final class ChatViewModel {
         }
         let latestPrompt = latestUserBrowserAutomationPrompt() ?? ""
         let shouldOperate = Self.browserPromptLooksLikeCurrentPageContinuation(latestPrompt)
+            || Self.browserPromptLooksLikeOpenThenOperate(latestPrompt)
+        let initialURL = Self.browserAutomationOpenURL(from: latestPrompt)
         let inputText = Self.browserAutomationInputText(from: latestPrompt)
             .flatMap { Self.browserAutomationOperandLooksLikeSiteOnly($0) ? nil : $0 }
         let clickTarget = Self.browserAutomationClickTarget(from: latestPrompt)
+        let initialStage = initialURL == nil ? "find_input" : "automation_start"
         var arguments: [String: Any] = [
             "tool_title": shouldOperate ? "继续操作当前网页" : "观察当前网页",
-            "action": "find_elements",
+            "action": initialURL == nil ? "find_elements" : "navigate",
             "scan_page": true,
             "screenshot": true,
             "capture_visuals": true,
@@ -13316,18 +13326,21 @@ final class ChatViewModel {
             "max_loops": 8,
             "user_prompt": latestPrompt
         ]
+        if let initialURL {
+            arguments["url"] = initialURL
+        }
         if shouldOperate,
            let inputText {
             arguments["text"] = inputText
             arguments["press_enter"] = true
-            arguments["continuation_stage"] = "find_input"
+            arguments["continuation_stage"] = initialStage
         }
         if shouldOperate,
            let clickTarget {
             arguments["button_text"] = clickTarget
             arguments["target"] = clickTarget
             if inputText == nil {
-                arguments["continuation_stage"] = "find_click_target"
+                arguments["continuation_stage"] = initialURL == nil ? "find_click_target" : "automation_start"
             }
         }
         guard JSONSerialization.isValidJSONObject(arguments),
@@ -13497,8 +13510,9 @@ final class ChatViewModel {
             isStreaming: result.requiresBrowserUserVerification,
             status: finalStatus
         )
-        let output = Self.localNativeFunctionToolResultContent(
+        let output = Self.localNativeBrowserToolResultContent(
             result.summary,
+            call: effectiveCall,
             browserVerificationCompleted: browserVerificationCompleted
         )
         return executeLocalAlpineSyntheticToolCall(
@@ -13979,6 +13993,62 @@ final class ChatViewModel {
         return nil
     }
 
+    private static func browserAutomationOpenURL(from prompt: String) -> String? {
+        if let explicitURL = normalizedBrowserAutomationURLString(prompt) {
+            return explicitURL
+        }
+        let patterns = [
+            #"(?i)(?:打开|访问|进入|进到|前往|去|用|open|visit|go\s+to|navigate\s+to)\s*[“"']?(.+?)[”"']?(?=\s*(?:搜索|搜一下|搜|查询|查一下|查|检索|输入|填入|填写|点击|点一下|点|查看|看一下|看看|search|query|look\s+up|find|type|input|click|view|open\s+result)|[，,。；;]|$)"#
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let nsRange = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
+            guard let match = regex.firstMatch(in: prompt, options: [], range: nsRange),
+                  match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: prompt) else {
+                continue
+            }
+            let target = String(prompt[range])
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'“”‘’`，,。.!！?？:：;；()（）[]【】"))
+            if let url = normalizedBrowserAutomationURLString(target) {
+                return url
+            }
+            if let url = browserAutomationKnownSiteURL(for: target) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    private static func browserAutomationKnownSiteURL(for raw: String) -> String? {
+        let normalized = raw
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return nil }
+        let aliases: [String: String] = [
+            "百度": "https://www.baidu.com/",
+            "百度首页": "https://www.baidu.com/",
+            "baidu": "https://www.baidu.com/",
+            "baidu.com": "https://www.baidu.com/",
+            "必应": "https://www.bing.com/",
+            "bing": "https://www.bing.com/",
+            "bing.com": "https://www.bing.com/",
+            "google": "https://www.google.com/",
+            "谷歌": "https://www.google.com/",
+            "搜狗": "https://www.sogou.com/",
+            "sogou": "https://www.sogou.com/",
+            "sogou.com": "https://www.sogou.com/",
+            "360搜索": "https://www.so.com/",
+            "好搜": "https://www.so.com/",
+            "so": "https://www.so.com/",
+            "so.com": "https://www.so.com/"
+        ]
+        return aliases[normalized]
+    }
+
     private static func cleanupBrowserAutomationClickTarget(_ raw: String) -> String? {
         var text = raw
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -14375,6 +14445,10 @@ final class ChatViewModel {
         }
     }
 
+    private static func isLocalAlpineBrowserUseToolCall(_ call: LocalAlpineNativeToolCall) -> Bool {
+        call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "browser_use"
+    }
+
     private static func localAlpineNativeToolShouldStopAfterResult(
         _ call: LocalAlpineNativeToolCall,
         result: LocalAlpineAgentResult,
@@ -14404,6 +14478,9 @@ final class ChatViewModel {
         }
         if anyJSONBoolValue(in: result.summary, key: "next_action_required", equals: true) {
             return false
+        }
+        if browserToolResultLooksComplete(call: call, toolContent: result.summary) {
+            return true
         }
         let action = localAlpineBrowserActionName(from: call, result: result)
         let terminalActions: Set<String> = [
@@ -14842,7 +14919,19 @@ final class ChatViewModel {
         }
 
         let ok = anyJSONBoolValue(in: toolContent, key: "ok", equals: true)
+        let arguments = localAlpineNativeToolArguments(for: call)
+        let continuationStage = firstNonEmptyString(
+            in: arguments,
+            keys: ["continuation_stage", "continuationStage"]
+        )?.lowercased() ?? ""
+        let hasPendingClickTarget = firstNonEmptyString(
+            in: arguments,
+            keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel", "target", "label"]
+        ) != nil
         if ok && ["browser.readable", "browser.text"].contains(action) {
+            if hasPendingClickTarget && continuationStage != "final_read" {
+                return false
+            }
             return true
         }
         return false
@@ -14986,6 +15075,7 @@ final class ChatViewModel {
             in: arguments,
             keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel", "target", "label"]
         )
+        let focusedNodeID = browserFocusedNodeID(in: toolContent)
         for key in ["url", "link", "href", "page_url", "source", "input_url"] {
             arguments.removeValue(forKey: key)
         }
@@ -15003,10 +15093,25 @@ final class ChatViewModel {
             arguments["editable"] = true
             arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 10, 10)
             arguments["continuation_stage"] = "find_input"
+        } else if continuationStage == "automation_start",
+                  let requestedClickTarget,
+                  !requestedClickTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            arguments["action"] = "find_elements"
+            arguments["scan_page"] = true
+            arguments["screenshot"] = true
+            arguments["capture_visuals"] = true
+            arguments["target"] = requestedClickTarget
+            arguments["button_text"] = requestedClickTarget
+            arguments["clickable"] = true
+            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 12, 12)
+            arguments["continuation_stage"] = "find_click_target"
         } else if continuationStage == "find_input",
                   let requestedText {
             arguments["action"] = "type"
             arguments["text"] = requestedText
+            if let focusedNodeID, !focusedNodeID.isEmpty {
+                arguments["node_id"] = focusedNodeID
+            }
             arguments["target"] = "search input textarea textbox query keyword 搜索 输入"
             arguments["press_enter"] = true
             arguments["clear"] = true
@@ -15037,6 +15142,9 @@ final class ChatViewModel {
                   let requestedClickTarget,
                   !requestedClickTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             arguments["action"] = "click"
+            if let focusedNodeID, !focusedNodeID.isEmpty {
+                arguments["node_id"] = focusedNodeID
+            }
             arguments["label"] = requestedClickTarget
             arguments["button_text"] = requestedClickTarget
             arguments["target"] = requestedClickTarget
@@ -15103,6 +15211,30 @@ final class ChatViewModel {
             return "联网搜索失败：\(error)"
         }
         return "联网搜索已经返回结果，但模型没有生成总结。请重试或换一个更具体的搜索词。"
+    }
+
+    private static func browserFocusedNodeID(in toolContent: String) -> String? {
+        guard let data = toolContent.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            return nil
+        }
+        guard let result = localNativeBrowserPrimaryResult(from: object) else {
+            return firstJSONStringValue(in: object, key: "node_id")
+                ?? firstJSONStringValue(in: object, key: "nodeId")
+        }
+        if let focused = result["focused_element"] as? [String: Any],
+           let nodeID = firstNonEmptyString(in: focused, keys: ["node_id", "nodeId"]) {
+            return nodeID
+        }
+        if let items = result["items"] as? [[String: Any]] {
+            for item in items {
+                if let nodeID = firstNonEmptyString(in: item, keys: ["node_id", "nodeId"]) {
+                    return nodeID
+                }
+            }
+        }
+        return firstJSONStringValue(in: result, key: "node_id")
+            ?? firstJSONStringValue(in: result, key: "nodeId")
     }
 
     private static func localNativeImageToolFallbackMessage(from toolContent: String) -> String {
@@ -15501,6 +15633,303 @@ final class ChatViewModel {
         default:
             return name
         }
+    }
+
+    private static func localNativeBrowserToolResultContent(
+        _ summary: String,
+        call: LocalAlpineNativeToolCall,
+        browserVerificationCompleted: Bool = false
+    ) -> String {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let result = localNativeBrowserPrimaryResult(from: object) else {
+            return localNativeFunctionToolResultContent(
+                summary,
+                browserVerificationCompleted: browserVerificationCompleted
+            )
+        }
+
+        let rawAction = firstNonEmptyString(
+            in: result,
+            keys: ["browser_action", "browser_use_action", "operation", "op", "action"]
+        ) ?? localAlpineBrowserActionName(from: call)
+        let browserAction = normalizedBrowserResultActionName(rawAction)
+        let ok = nativeToolBoolValue(result["ok"]) ?? false
+        let requiresUserVerification = nativeToolBoolValue(result["requires_user_verification"]) ?? false
+        let resultToolContent = localNativeBrowserPrettyJSONString(result) ?? trimmed
+        let nextActionRequired = !requiresUserVerification
+            && !browserToolResultLooksComplete(call: call, toolContent: resultToolContent)
+
+        var payloadData: [String: Any] = [
+            "success": ok,
+            "text": localNativeBrowserObservationText(from: result),
+            "summary": firstNonEmptyString(in: result, keys: ["summary", "description"]) ?? "",
+            "next_action_required": nextActionRequired,
+            "page_state": localNativeBrowserPageState(from: result, browserAction: browserAction),
+            "available_primitive_actions": [
+                "navigate", "screenshot", "find_elements", "click", "type", "scroll",
+                "get_text", "get_readable", "get_backbone", "scroll_and_collect",
+                "wait_for_dom_stable", "fetch", "execute_js"
+            ]
+        ]
+        if nextActionRequired {
+            payloadData["model_instruction"] = "Intermediate browser observation. Decide the next browser_use primitive from the page_state, focused_element, items, viewport_contexts, and screenshots. Do not ask the user to send a continuation unless credentials, payment, destructive action, or explicit human verification is required."
+        }
+        if let title = firstNonEmptyString(in: result, keys: ["title", "name"]) {
+            payloadData["title"] = title
+        }
+        if let pageURL = firstNonEmptyString(in: result, keys: ["page_url", "url", "link", "href"]) {
+            payloadData["page_url"] = pageURL
+        }
+        if let error = firstNonEmptyString(in: result, keys: ["error", "message"]) {
+            payloadData["error"] = error
+        }
+        if requiresUserVerification {
+            payloadData["requires_user_verification"] = true
+        }
+        if let items = result["items"] as? [[String: Any]], !items.isEmpty {
+            payloadData["items"] = items.prefix(24).map { localNativeBrowserCompactElement($0) }
+        }
+        if let focused = result["focused_element"] as? [String: Any] {
+            payloadData["focused_element"] = localNativeBrowserCompactElement(focused)
+        }
+        if let contexts = result["viewport_contexts"] as? [[String: Any]], !contexts.isEmpty {
+            payloadData["viewport_contexts"] = contexts.prefix(8).map { localNativeBrowserCompactViewportContext($0) }
+        }
+        if let interactive = result["interactive_elements"] as? [[String: Any]], !interactive.isEmpty {
+            payloadData["interactive_elements"] = interactive.prefix(24).map { localNativeBrowserCompactElement($0) }
+        }
+        if let visual = result["visual_observation"] as? [String: Any] {
+            payloadData["visual_observation"] = localNativeBrowserCompactVisualReference(visual)
+        }
+        if let visualViewports = result["visual_viewports"] as? [[String: Any]], !visualViewports.isEmpty {
+            payloadData["visual_viewports"] = visualViewports.prefix(4).map { localNativeBrowserCompactVisualReference($0) }
+        }
+        if let fileURL = firstNonEmptyString(in: result, keys: ["file_url", "display_url"]) {
+            payloadData["file_url"] = fileURL
+        }
+        if let imagePath = firstNonEmptyString(in: result, keys: ["image_path", "file_path"]) {
+            payloadData["image_path"] = imagePath
+        }
+
+        let envelope: [String: Any] = [
+            "ok": ok,
+            "tool": "browser_use",
+            "action": "browser_use",
+            "browser_action": browserAction,
+            "data": payloadData,
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ]
+        let body = localNativeBrowserPrettyJSONString(envelope) ?? trimmed
+        if browserVerificationCompleted {
+            return localNativeFunctionToolResultContent(
+                body,
+                browserVerificationCompleted: true
+            )
+        }
+        return String(body.prefix(16_000))
+    }
+
+    private static func localNativeBrowserPrimaryResult(from value: Any) -> [String: Any]? {
+        if let dictionary = value as? [String: Any] {
+            if let data = dictionary["data"] as? [String: Any],
+               let tool = dictionary["tool"] as? String,
+               tool.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "browser_use" {
+                var merged = data
+                for key in ["ok", "action", "browser_action", "timestamp"] {
+                    if merged[key] == nil, let value = dictionary[key] {
+                        merged[key] = value
+                    }
+                }
+                if merged["ok"] == nil, let success = data["success"] {
+                    merged["ok"] = success
+                }
+                return merged
+            }
+            if let results = dictionary["results"] as? [[String: Any]] {
+                return results.reversed().first { result in
+                    let action = firstNonEmptyString(
+                        in: result,
+                        keys: ["browser_action", "browser_use_action", "operation", "op", "action"]
+                    )?.lowercased() ?? ""
+                    return action.contains("browser")
+                        || action == "browser_use"
+                        || action == "navigate"
+                        || action == "get_readable"
+                        || action == "get_text"
+                        || action == "find_elements"
+                        || action == "click"
+                        || action == "type"
+                        || action == "scroll"
+                        || action == "screenshot"
+                        || action == "wait_for_dom_stable"
+                        || action == "fetch"
+                } ?? results.last
+            }
+            return dictionary
+        }
+        return nil
+    }
+
+    private static func localNativeBrowserObservationText(from result: [String: Any]) -> String {
+        var chunks: [String] = []
+        if let title = firstNonEmptyString(in: result, keys: ["title", "name"]) {
+            chunks.append("title: \(title)")
+        }
+        if let pageURL = firstNonEmptyString(in: result, keys: ["page_url", "url", "link", "href"]) {
+            chunks.append("url: \(pageURL)")
+        }
+        for key in ["summary", "text", "content", "readable_text", "markdown", "error"] {
+            if let text = firstNonEmptyString(in: result, keys: [key]) {
+                chunks.append(text)
+            }
+        }
+        if let focused = result["focused_element"] as? [String: Any] {
+            let compact = localNativeBrowserCompactElement(focused)
+            if let json = localNativeBrowserPrettyJSONString(compact) {
+                chunks.append("focused_element:\n\(json)")
+            }
+        }
+        if let contexts = result["viewport_contexts"] as? [[String: Any]] {
+            for context in contexts.prefix(8) {
+                if let visibleText = firstNonEmptyString(in: context, keys: ["visible_text"]) {
+                    let index = nativeToolIntValue(context["viewport_index"]).map { "viewport \($0)" } ?? "viewport"
+                    chunks.append("\(index): \(visibleText)")
+                }
+            }
+        }
+        if let items = result["items"] as? [[String: Any]], !items.isEmpty {
+            let itemLines = items.prefix(16).enumerated().compactMap { index, item -> String? in
+                let label = firstNonEmptyString(
+                    in: item,
+                    keys: ["text", "title", "aria_label", "name", "placeholder", "label", "href", "url", "link"]
+                )
+                guard let label, !label.isEmpty else { return nil }
+                let nodeID = firstNonEmptyString(in: item, keys: ["node_id", "nodeId"])
+                return nodeID == nil ? "\(index + 1). \(label)" : "\(index + 1). \(label) [node_id: \(nodeID!)]"
+            }
+            if !itemLines.isEmpty {
+                chunks.append("elements:\n\(itemLines.joined(separator: "\n"))")
+            }
+        }
+        let joined = chunks
+            .joined(separator: "\n\n")
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String((joined.isEmpty ? "Browser action completed." : joined).prefix(12_000))
+    }
+
+    private static func localNativeBrowserPageState(
+        from result: [String: Any],
+        browserAction: String
+    ) -> [String: Any] {
+        var state: [String: Any] = [
+            "browser_action": browserAction
+        ]
+        for key in [
+            "title", "url", "page_url", "query", "count", "total_count",
+            "scroll_y", "scroll_height", "viewport_height", "focused_scroll_y", "current_scroll_y"
+        ] {
+            if let value = result[key] {
+                state[key] = value
+            }
+        }
+        if let contexts = result["viewport_contexts"] as? [[String: Any]],
+           let last = contexts.last {
+            for key in ["can_scroll_up", "can_scroll_down", "scroll_progress", "max_scroll_y"] {
+                if let value = last[key] {
+                    state[key] = value
+                }
+            }
+        }
+        if let requiresVerification = nativeToolBoolValue(result["requires_user_verification"]) {
+            state["requires_user_verification"] = requiresVerification
+        }
+        if let ok = nativeToolBoolValue(result["ok"]) {
+            state["ok"] = ok
+        }
+        return state
+    }
+
+    private static func localNativeBrowserCompactElement(_ raw: [String: Any]) -> [String: Any] {
+        var compact: [String: Any] = [:]
+        for key in [
+            "index", "node_id", "nodeId", "tag", "role", "type", "text", "title", "aria_label",
+            "placeholder", "name", "value", "href", "url", "link", "selector", "score",
+            "scroll_y", "page_x", "page_y", "page_center_x", "page_center_y"
+        ] {
+            guard let value = raw[key] else { continue }
+            if let text = value as? String {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    compact[key] = String(trimmed.prefix(500))
+                }
+            } else if value is NSNumber || value is Bool {
+                compact[key] = value
+            }
+        }
+        if let rect = raw["rect"] as? [String: Any] {
+            var compactRect: [String: Any] = [:]
+            for key in ["x", "y", "width", "height", "page_x", "page_y", "page_center_x", "page_center_y"] {
+                if let value = rect[key], value is NSNumber || value is Bool {
+                    compactRect[key] = value
+                }
+            }
+            if !compactRect.isEmpty {
+                compact["rect"] = compactRect
+            }
+        }
+        return compact
+    }
+
+    private static func localNativeBrowserCompactViewportContext(_ raw: [String: Any]) -> [String: Any] {
+        var compact: [String: Any] = [:]
+        for key in [
+            "viewport_index", "scroll_y", "scroll_height", "max_scroll_y",
+            "can_scroll_up", "can_scroll_down", "scroll_progress",
+            "viewport_width", "viewport_height", "title", "url"
+        ] {
+            if let value = raw[key] {
+                if let text = value as? String {
+                    compact[key] = String(text.prefix(500))
+                } else {
+                    compact[key] = value
+                }
+            }
+        }
+        if let visibleText = firstNonEmptyString(in: raw, keys: ["visible_text"]) {
+            compact["visible_text"] = String(visibleText.prefix(1_200))
+        }
+        if let elements = raw["interactive_elements"] as? [[String: Any]], !elements.isEmpty {
+            compact["interactive_elements"] = elements.prefix(8).map { localNativeBrowserCompactElement($0) }
+        }
+        return compact
+    }
+
+    private static func localNativeBrowserCompactVisualReference(_ raw: [String: Any]) -> [String: Any] {
+        var compact: [String: Any] = [:]
+        for key in ["viewport_index", "scroll_y", "screenshot_url", "file_url", "file_path", "image_path", "note", "tool_only"] {
+            guard let value = raw[key] else { continue }
+            if let text = value as? String {
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    compact[key] = String(trimmed.prefix(700))
+                }
+            } else if value is NSNumber || value is Bool {
+                compact[key] = value
+            }
+        }
+        return compact
+    }
+
+    private static func localNativeBrowserPrettyJSONString(_ object: Any) -> String? {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return json
     }
 
     private static func localNativeFunctionToolResultContent(
