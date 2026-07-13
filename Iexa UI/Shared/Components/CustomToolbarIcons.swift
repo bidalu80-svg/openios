@@ -111,9 +111,9 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                 .background {
                     IexaNativeGlassFill(
                         shape: shape,
-                        lightTintOpacity: 0.88,
+                        lightTintOpacity: 0.72,
                         darkTintOpacity: 0.11,
-                        highlightOpacity: 0.18
+                        highlightOpacity: 0.34
                     )
                 }
                 .clipShape(shape)
@@ -124,9 +124,9 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                 .background {
                     IexaNativeGlassFill(
                         shape: shape,
-                        lightTintOpacity: 0.88,
+                        lightTintOpacity: 0.72,
                         darkTintOpacity: 0.11,
-                        highlightOpacity: 0.18
+                        highlightOpacity: 0.34
                     )
                 }
                 .clipShape(shape)
