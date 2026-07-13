@@ -191,68 +191,70 @@ final class BrowserWebSearchService: NSObject {
                 scheduleLiveBrowserPreview(reason: "after_\(action)", minimumInterval: 0.9)
             }
         }
+        let payload: [String: Any]
         switch action {
         case "web.search", "web_search", "search_web", "browser.search", "browser_search":
-            return await executeNativeSearch(call)
+            payload = await executeNativeSearch(call)
         case "browser.use", "browser_use":
-            return await executeNativeBrowserUse(call)
+            payload = await executeNativeBrowserUse(call)
         case "browser.auto", "browser_auto", "auto", "complete_task", "browser.complete_task":
-            return await executeNativeAutoWorkflow(call)
+            payload = await executeNativeAutoWorkflow(call)
         case "browser.open", "browser.navigate", "browser_open", "browser.navigate_url", "navigate":
-            return await executeNativeOpen(call, readable: false)
+            payload = await executeNativeOpen(call, readable: false)
         case "browser.readable", "browser.get_readable", "browser_readable", "get_readable", "read_webpage":
-            return await executeNativeOpen(call, readable: true)
+            payload = await executeNativeOpen(call, readable: true)
         case "browser.text", "browser.get_text", "browser_text", "get_text":
-            return await executeNativeText(call)
+            payload = await executeNativeText(call)
         case "browser.info", "browser.get_page_info", "browser_info", "get_page_info":
-            return await executeNativePageInfo(call)
+            payload = await executeNativePageInfo(call)
         case "browser.inspect", "browser_inspect", "inspect", "page_inspect", "inspect_page", "browser.page_state", "browser_page_state":
-            return await executeNativeInspect(call)
+            payload = await executeNativeInspect(call)
         case "browser.observe", "browser_observe", "observe", "browser.get_state", "browser_get_state", "get_state":
-            return await executeNativeObserve(call)
+            payload = await executeNativeObserve(call)
         case "browser.screenshot", "browser_screenshot", "screenshot":
-            return await executeNativeScreenshot(call)
+            payload = await executeNativeScreenshot(call)
         case "browser.fetch", "browser_fetch", "fetch":
-            return await executeNativeFetch(call)
+            payload = await executeNativeFetch(call)
         case "browser.click", "browser_click", "click":
-            return await executeNativeClick(call)
+            payload = await executeNativeClick(call)
         case "browser.type", "browser_type", "type":
-            return await executeNativeType(call)
+            payload = await executeNativeType(call)
         case "browser.hover", "browser_hover", "hover":
-            return await executeNativeHover(call)
+            payload = await executeNativeHover(call)
         case "browser.scroll", "browser_scroll", "scroll":
-            return await executeNativeScroll(call)
+            payload = await executeNativeScroll(call)
         case "browser.scroll_and_collect", "browser_scroll_and_collect", "scroll_and_collect":
-            return await executeNativeScrollAndCollect(call)
+            payload = await executeNativeScrollAndCollect(call)
         case "browser.find_elements", "browser_find_elements", "find_elements":
-            return await executeNativeFindElements(call)
+            payload = await executeNativeFindElements(call)
         case "browser.get_backbone", "browser_get_backbone", "get_backbone":
-            return await executeNativeBackbone(call)
+            payload = await executeNativeBackbone(call)
         case "browser.execute_js", "browser_execute_js", "execute_js", "eval_js":
-            return await executeNativeExecuteJavaScript(call)
+            payload = await executeNativeExecuteJavaScript(call)
         case "browser.set_viewport", "browser_set_viewport", "set_viewport":
-            return await executeNativeSetViewport(call)
+            payload = await executeNativeSetViewport(call)
         case "browser.set_user_agent", "browser_set_user_agent", "set_user_agent":
-            return executeNativeSetUserAgent(call)
+            payload = executeNativeSetUserAgent(call)
         case "browser.get_cookies", "browser_get_cookies", "get_cookies":
-            return await executeNativeCookies(call)
+            payload = await executeNativeCookies(call)
         case "browser.wait_for_dom_stable", "browser_wait_for_dom_stable", "wait_for_dom_stable":
-            return await executeNativeWaitForDOMStable(call)
+            payload = await executeNativeWaitForDOMStable(call)
         case "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result":
-            return await executeNativeWaitForImage(call)
+            payload = await executeNativeWaitForImage(call)
         case "browser.new_tab", "browser_new_tab", "new_tab":
-            return await executeNativeNewTab(call)
+            payload = await executeNativeNewTab(call)
         case "browser.close_tab", "browser_close_tab", "close_tab":
-            return await executeNativeCloseTab(call)
+            payload = await executeNativeCloseTab(call)
         case "browser.list_tabs", "browser_list_tabs", "list_tabs":
-            return await executeNativeListTabs(call)
+            payload = await executeNativeListTabs(call)
         default:
-            return [
+            payload = [
                 "action": rawAction,
                 "ok": false,
                 "error": "Unsupported browser action"
             ]
         }
+        return await enrichNativeBrowserToolPayload(payload, requestedAction: action, call: call)
     }
 
     private static func browserActionPublishesLivePreview(_ action: String) -> Bool {
@@ -267,6 +269,144 @@ final class BrowserWebSearchService: NSObject {
             "wait_for_dom_stable", "wait_for_image", "screenshot",
             "new_tab", "close_tab", "list_tabs", "set_viewport"
         ].contains(action)
+    }
+
+    private func enrichNativeBrowserToolPayload(
+        _ payload: [String: Any],
+        requestedAction: String,
+        call: [String: Any]
+    ) async -> [String: Any] {
+        if payload["post_action_observation"] != nil {
+            return payload
+        }
+        guard shouldAttachBrowserAutomationObservation(
+            requestedAction: requestedAction,
+            payload: payload
+        ) else {
+            return payload
+        }
+
+        var enriched = payload
+        if shouldAutoWaitAfterBrowserAction(requestedAction),
+           Self.boolValue(call["auto_wait"] ?? call["autoWait"]) != false {
+            let wait = await waitForBrowserAutomationSettle(
+                timeout: TimeInterval(Self.intValue(call["auto_wait_timeout"] ?? call["autoWaitTimeout"]) ?? 5)
+            )
+            enriched["auto_wait"] = wait
+        }
+
+        if let state = await evaluateJSONObject(Self.browserAutomationStateScript(
+            elementLimit: min(max(Self.intValue(call["observation_limit"] ?? call["observationLimit"] ?? call["element_limit"] ?? call["limit"]) ?? 36, 8), 80),
+            textLimit: min(max(Self.intValue(call["observation_text_limit"] ?? call["observationTextLimit"]) ?? 1800, 400), 5000)
+        )) {
+            enriched["post_action_observation"] = state
+            enriched["next_action_candidates"] = state["action_candidates"] as? [[String: Any]] ?? []
+            enriched["next_action_candidate_count"] = Self.intValue(state["action_candidate_count"]) ?? 0
+            enriched["browser_state_label"] = state["state_label"] as? String ?? ""
+            enriched["browser_ready_state"] = state["ready_state"] as? String ?? ""
+            enriched["browser_scroll"] = state["scroll"] as? [String: Any] ?? [:]
+            enriched["active_tab_id"] = activeBrowserTabID
+            enriched["tabs"] = browserTabSnapshots().map { snapshot in
+                [
+                    "id": snapshot.id,
+                    "title": snapshot.title,
+                    "url": snapshot.url,
+                    "is_active": snapshot.isActive
+                ] as [String: Any]
+            }
+            if let candidates = state["action_candidates"] as? [[String: Any]], !candidates.isEmpty {
+                enriched["next_action_required"] = Self.boolValue(enriched["next_action_required"]) ?? true
+                if enriched["suggested_next_browser_action"] == nil {
+                    enriched["suggested_next_browser_action"] = candidates.first?["action"] as? String ?? "browser.observe"
+                }
+            }
+        }
+        return enriched
+    }
+
+    private func shouldAttachBrowserAutomationObservation(
+        requestedAction: String,
+        payload: [String: Any]
+    ) -> Bool {
+        guard hasActiveBrowserPageForContinuation else { return false }
+        guard Self.boolValue(payload["ok"]) != false else {
+            return ["browser.observe", "browser.find_elements", "browser.inspect"].contains(requestedAction)
+        }
+        let skipped: Set<String> = [
+            "web.search", "web_search", "search_web", "browser.search", "browser_search",
+            "browser.fetch", "browser_fetch", "fetch",
+            "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result",
+            "browser.get_cookies", "browser_get_cookies", "get_cookies",
+            "browser.list_tabs", "browser_list_tabs", "list_tabs",
+            "browser.close_tab", "browser_close_tab", "close_tab",
+            "browser.auto", "browser_auto", "auto", "complete_task", "browser.complete_task"
+        ]
+        return !skipped.contains(requestedAction)
+    }
+
+    private func shouldAutoWaitAfterBrowserAction(_ action: String) -> Bool {
+        [
+            "browser.open", "browser.navigate", "browser_open", "browser.navigate_url", "navigate",
+            "browser.click", "browser_click", "click",
+            "browser.type", "browser_type", "type",
+            "browser.scroll", "browser_scroll", "scroll",
+            "browser.execute_js", "browser_execute_js", "execute_js", "eval_js",
+            "browser.new_tab", "browser_new_tab", "new_tab",
+            "browser.set_viewport", "browser_set_viewport", "set_viewport",
+            "browser.set_user_agent", "browser_set_user_agent", "set_user_agent"
+        ].contains(action)
+    }
+
+    private func waitForBrowserAutomationSettle(timeout: TimeInterval) async -> [String: Any] {
+        let deadline = Date().addingTimeInterval(min(max(timeout, 1), 12))
+        var previousFingerprint = ""
+        var stableSamples = 0
+        var samples: [[String: Any]] = []
+
+        while Date() < deadline {
+            let script = """
+            (() => JSON.stringify({
+              ready_state: document.readyState || '',
+              url: location.href,
+              title: document.title || '',
+              text_length: (document.body && (document.body.innerText || document.body.textContent) || '').length,
+              child_count: document.body ? document.body.getElementsByTagName('*').length : 0,
+              scroll_height: Math.max(document.documentElement.scrollHeight || 0, document.body ? document.body.scrollHeight || 0 : 0),
+              resource_count: performance.getEntriesByType ? performance.getEntriesByType('resource').length : 0
+            }))();
+            """
+            guard let object = await evaluateJSONObject(script) else { break }
+            samples.append(object)
+            let fingerprint = [
+                object["ready_state"] as? String ?? "",
+                object["url"] as? String ?? "",
+                String(describing: object["text_length"] ?? 0),
+                String(describing: object["child_count"] ?? 0),
+                String(describing: object["scroll_height"] ?? 0),
+                String(describing: object["resource_count"] ?? 0)
+            ].joined(separator: "|")
+            if fingerprint == previousFingerprint {
+                stableSamples += 1
+            } else {
+                stableSamples = 0
+                previousFingerprint = fingerprint
+            }
+            if (object["ready_state"] as? String) == "complete", stableSamples >= 2 {
+                return [
+                    "ok": true,
+                    "stable": true,
+                    "samples": Array(samples.suffix(5)),
+                    "summary": "页面已在动作后稳定。"
+                ]
+            }
+            try? await Task.sleep(nanoseconds: 350_000_000)
+        }
+        return [
+            "ok": true,
+            "stable": false,
+            "samples": Array(samples.suffix(5)),
+            "summary": "动作后已等待页面变化，但未完全稳定；仍返回当前可操作状态。"
+        ]
     }
 
     private func executeNativeBrowserUse(_ call: [String: Any]) async -> [String: Any] {
@@ -1299,7 +1439,11 @@ final class BrowserWebSearchService: NSObject {
               return null;
             }
             const candidate = item.node;
-            if (candidate && document.documentElement && document.documentElement.contains(candidate)) return candidate;
+            if (candidate) {
+              const ownerRoot = candidate.ownerDocument && candidate.ownerDocument.documentElement;
+              if ((document.documentElement && document.documentElement.contains(candidate)) ||
+                  (ownerRoot && ownerRoot.contains(candidate))) return candidate;
+            }
             try { delete window.__iexaNodeStore[nodeId]; } catch (_) {}
             return null;
           })();
@@ -1530,7 +1674,11 @@ final class BrowserWebSearchService: NSObject {
               return null;
             }
             const node = item.node;
-            if (node && document.documentElement && document.documentElement.contains(node)) return node;
+            if (node) {
+              const ownerRoot = node.ownerDocument && node.ownerDocument.documentElement;
+              if ((document.documentElement && document.documentElement.contains(node)) ||
+                  (ownerRoot && ownerRoot.contains(node))) return node;
+            }
             try { delete window.__iexaNodeStore[raw]; } catch (_) {}
             return null;
           }
@@ -4646,6 +4794,362 @@ final class BrowserWebSearchService: NSObject {
         """
     }
 
+    private static func browserAutomationStateScript(elementLimit: Int, textLimit: Int) -> String {
+        """
+        (() => {
+          const elementLimit = \(max(elementLimit, 0));
+          const textLimit = \(max(textLimit, 0));
+          const now = Date.now();
+          const expiresAt = now + 10 * 60 * 1000;
+          window.__iexaNodeStore = window.__iexaNodeStore || {};
+          window.__iexaNodeSeq = Number(window.__iexaNodeSeq || 0);
+
+          const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+          const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+          const doc = document.scrollingElement || document.documentElement || document.body;
+          const scrollY = Math.round(window.scrollY || (doc && doc.scrollTop) || 0);
+          const scrollX = Math.round(window.scrollX || (doc && doc.scrollLeft) || 0);
+          const scrollHeight = Math.max(
+            document.documentElement && document.documentElement.scrollHeight || 0,
+            document.body && document.body.scrollHeight || 0,
+            viewportHeight
+          );
+          const maxScrollY = Math.max(0, Math.round(scrollHeight - viewportHeight));
+          const interactiveSelector = [
+            'a[href]', 'button', 'input:not([type="hidden"])', 'textarea', 'select', 'summary', 'label', 'iframe',
+            '[role="button"]', '[role="link"]', '[role="menuitem"]', '[role="tab"]', '[role="option"]',
+            '[role="checkbox"]', '[role="radio"]', '[role="switch"]', '[role="textbox"]', '[role="searchbox"]',
+            '[onclick]', '[tabindex]:not([tabindex="-1"])', '[contenteditable]',
+            '[aria-label]', '[aria-labelledby]', '[aria-describedby]', '[title]', '[alt]',
+            '[data-testid]', '[data-test]', '[data-cy]', '[jsaction]'
+          ].join(',');
+
+          function clean(value) {
+            return String(value || '').replace(/\\s+/g, ' ').trim();
+          }
+          function attr(node, name) {
+            return node && node.getAttribute ? clean(node.getAttribute(name)) : '';
+          }
+          function text(node) {
+            return clean(node && (node.innerText || node.textContent) || '');
+          }
+          function allRoots() {
+            const roots = [document];
+            for (let i = 0; i < roots.length; i += 1) {
+              const root = roots[i];
+              let nodes = [];
+              try { nodes = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : []; } catch (_) { nodes = []; }
+              for (const node of nodes) {
+                if (node.shadowRoot) roots.push(node.shadowRoot);
+                const tag = (node.tagName || '').toLowerCase();
+                if (tag === 'iframe') {
+                  try {
+                    if (node.contentDocument) roots.push(node.contentDocument);
+                  } catch (_) {}
+                }
+              }
+            }
+            return roots;
+          }
+          function rectFor(node) {
+            if (!node || !node.getBoundingClientRect) return null;
+            const r = node.getBoundingClientRect();
+            return {
+              x: Math.round(r.left),
+              y: Math.round(r.top),
+              width: Math.round(r.width),
+              height: Math.round(r.height),
+              center_x: Math.round(r.left + r.width / 2),
+              center_y: Math.round(r.top + r.height / 2),
+              page_x: Math.round(r.left + scrollX),
+              page_y: Math.round(r.top + scrollY),
+              page_center_x: Math.round(r.left + scrollX + r.width / 2),
+              page_center_y: Math.round(r.top + scrollY + r.height / 2)
+            };
+          }
+          function visible(node) {
+            if (!node || !node.getBoundingClientRect) return false;
+            if (node.hidden || (node.closest && node.closest('[hidden],[aria-hidden="true"]'))) return false;
+            const style = getComputedStyle(node);
+            if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) <= 0.01) return false;
+            const r = node.getBoundingClientRect();
+            const width = Math.max(0, Math.min(r.right, viewportWidth) - Math.max(r.left, 0));
+            const height = Math.max(0, Math.min(r.bottom, viewportHeight) - Math.max(r.top, 0));
+            return width > 2 && height > 2;
+          }
+          function disabled(node) {
+            return Boolean(
+              node &&
+              (node.disabled ||
+                attr(node, 'aria-disabled') === 'true' ||
+                (node.closest && node.closest('[disabled],[aria-disabled="true"]')))
+            );
+          }
+          function accessibleText(node) {
+            if (!node) return '';
+            const ownerDoc = node.ownerDocument || document;
+            let labels = '';
+            const id = attr(node, 'id');
+            if (id && window.CSS && CSS.escape) {
+              try {
+                labels = Array.from(ownerDoc.querySelectorAll('label[for="' + CSS.escape(id) + '"]')).map(text).join(' ');
+              } catch (_) {}
+            }
+            const labelledBy = attr(node, 'aria-labelledby')
+              .split(/\\s+/)
+              .filter(Boolean)
+              .map(idValue => ownerDoc.getElementById(idValue))
+              .map(text)
+              .join(' ');
+            const describedBy = attr(node, 'aria-describedby')
+              .split(/\\s+/)
+              .filter(Boolean)
+              .map(idValue => ownerDoc.getElementById(idValue))
+              .map(text)
+              .join(' ');
+            return clean([
+              text(node),
+              labels,
+              labelledBy,
+              describedBy,
+              attr(node, 'aria-label'),
+              attr(node, 'aria-description'),
+              attr(node, 'placeholder'),
+              attr(node, 'title'),
+              attr(node, 'alt'),
+              attr(node, 'name'),
+              attr(node, 'value'),
+              attr(node, 'data-testid'),
+              attr(node, 'data-test'),
+              attr(node, 'data-cy'),
+              node.value || ''
+            ].filter(Boolean).join(' '));
+          }
+          function cssPath(node) {
+            if (!node || !node.nodeType || node.nodeType !== 1) return '';
+            if (node.id && window.CSS && CSS.escape) return '#' + CSS.escape(node.id);
+            const ownerRoot = node.ownerDocument && node.ownerDocument.documentElement;
+            const parts = [];
+            let current = node;
+            while (current && current.nodeType === 1 && current !== ownerRoot && current !== document.documentElement && parts.length < 5) {
+              let name = (current.tagName || '').toLowerCase();
+              if (!name) break;
+              const cls = String(current.className || '').split(/\\s+/).filter(Boolean).slice(0, 2);
+              if (window.CSS && CSS.escape) {
+                for (const c of cls) name += '.' + CSS.escape(c);
+              }
+              const parent = current.parentElement;
+              if (parent) {
+                const siblings = Array.from(parent.children).filter(child => child.tagName === current.tagName);
+                if (siblings.length > 1) name += ':nth-of-type(' + (siblings.indexOf(current) + 1) + ')';
+              }
+              parts.unshift(name);
+              current = parent;
+            }
+            return parts.join(' > ');
+          }
+          function isEditable(node) {
+            if (!node) return false;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const type = attr(node, 'type').toLowerCase();
+            if (tag === 'textarea' || tag === 'select') return true;
+            if (tag === 'input') return !['button', 'submit', 'reset', 'checkbox', 'radio', 'hidden', 'file', 'image'].includes(type);
+            return Boolean(node.isContentEditable || attr(node, 'role') === 'textbox' || attr(node, 'role') === 'searchbox');
+          }
+          function isClickable(node) {
+            if (!node) return false;
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const role = attr(node, 'role').toLowerCase();
+            const type = attr(node, 'type').toLowerCase();
+            if (tag === 'a' && attr(node, 'href')) return true;
+            if (tag === 'button' || tag === 'summary' || tag === 'label' || tag === 'iframe') return true;
+            if (tag === 'input' && ['button', 'submit', 'reset', 'image'].includes(type)) return true;
+            if (['button', 'link', 'menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch'].includes(role)) return true;
+            return Boolean(attr(node, 'onclick') || attr(node, 'jsaction') || attr(node, 'tabindex'));
+          }
+          function nodeKind(node) {
+            if (isEditable(node)) return 'input';
+            if ((node.tagName || '').toLowerCase() === 'iframe') return 'iframe';
+            if (isClickable(node)) return 'clickable';
+            return 'element';
+          }
+          function scoreNode(node) {
+            const label = accessibleText(node).toLowerCase();
+            const tag = (node.tagName || node.nodeName || '').toLowerCase();
+            const role = attr(node, 'role').toLowerCase();
+            let score = 0;
+            if (isEditable(node)) score += 500;
+            if (isClickable(node)) score += 360;
+            if (tag === 'iframe') score += 180;
+            if (tag === 'button' || role === 'button') score += 140;
+            if (/搜索|搜一下|百度一下|查找|输入|请输入|search|query|keyword|prompt|message/.test(label)) score += 220;
+            if (/生成|提交|发送|继续|下一步|确认|登录|下载|打开|generate|submit|send|continue|next|confirm|login|download|open/.test(label)) score += 180;
+            const r = rectFor(node);
+            if (r) {
+              if (r.width >= 32 && r.height >= 20) score += 20;
+              score -= Math.max(0, Math.round(Math.abs(r.center_y - viewportHeight / 2) / 80));
+            }
+            if (disabled(node)) score -= 1000;
+            return score;
+          }
+          function storeNode(node) {
+            const id = 'dom-' + (++window.__iexaNodeSeq);
+            window.__iexaNodeStore[id] = { node, expiresAt };
+            return id;
+          }
+          function humanVerificationState() {
+            const turnstile = document.querySelector('[name="cf-turnstile-response"], input[id^="cf-chl-widget"], .cf-turnstile, [data-sitekey]');
+            const recaptcha = document.querySelector('[name="g-recaptcha-response"], .g-recaptcha, iframe[src*="recaptcha"]');
+            const frames = Array.from(document.querySelectorAll('iframe')).map(frame => frame.src || frame.title || attr(frame, 'aria-label')).join(' ');
+            const bodyText = clean(document.body && document.body.innerText || '').toLowerCase();
+            const textDetected = /prove you are human|verify you are human|checking if the site connection is secure|captcha|turnstile|recaptcha|验证你是真人|人机验证/.test(bodyText);
+            const frameDetected = /turnstile|captcha|recaptcha|challenge/.test(frames.toLowerCase());
+            const tokenNode = turnstile || recaptcha;
+            const tokenLength = tokenNode && 'value' in tokenNode ? String(tokenNode.value || '').length : 0;
+            const completed = Boolean(tokenLength > 0 || (!turnstile && !recaptcha && !textDetected && !frameDetected));
+            const detected = !completed && (Boolean(turnstile || recaptcha) || textDetected || frameDetected);
+            return {
+              detected,
+              completed,
+              provider: turnstile ? 'cloudflare_turnstile' : (recaptcha ? 'recaptcha' : (detected ? 'human_verification' : '')),
+              token_length: tokenLength
+            };
+          }
+
+          const seen = new Set();
+          const elements = [];
+          for (const root of allRoots()) {
+            let nodes = [];
+            try { nodes = Array.from(root.querySelectorAll(interactiveSelector)); } catch (_) { nodes = []; }
+            for (const node of nodes) {
+              if (!visible(node)) continue;
+              const key = [
+                (node.tagName || '').toLowerCase(),
+                attr(node, 'id'),
+                attr(node, 'href'),
+                attr(node, 'name'),
+                attr(node, 'aria-label'),
+                attr(node, 'placeholder'),
+                accessibleText(node).slice(0, 80),
+                JSON.stringify(rectFor(node) || {})
+              ].join('|').toLowerCase();
+              if (seen.has(key)) continue;
+              seen.add(key);
+              const nodeId = storeNode(node);
+              const kind = nodeKind(node);
+              const item = {
+                node_id: nodeId,
+                nodeId: nodeId,
+                kind,
+                tag: (node.tagName || node.nodeName || '').toLowerCase(),
+                role: attr(node, 'role'),
+                type: attr(node, 'type'),
+                text: text(node).slice(0, 180),
+                label: accessibleText(node).slice(0, 240),
+                aria_label: attr(node, 'aria-label').slice(0, 180),
+                placeholder: attr(node, 'placeholder').slice(0, 180),
+                title: attr(node, 'title').slice(0, 180),
+                href: attr(node, 'href').slice(0, 500),
+                src: attr(node, 'src').slice(0, 500),
+                id: attr(node, 'id'),
+                name: attr(node, 'name'),
+                selector: cssPath(node),
+                rect: rectFor(node) || {},
+                clickable: isClickable(node),
+                editable: isEditable(node),
+                disabled: disabled(node),
+                score: scoreNode(node)
+              };
+              elements.push(item);
+            }
+          }
+          elements.sort((a, b) => (b.score - a.score) || ((a.rect.page_y || 0) - (b.rect.page_y || 0)));
+          const visibleElements = elements.slice(0, elementLimit).map((item, index) => Object.assign({ index }, item));
+          const candidates = [];
+          for (const item of visibleElements) {
+            if (item.disabled) continue;
+            if (item.editable) {
+              candidates.push({
+                action: 'browser.type',
+                node_id: item.node_id,
+                selector: item.selector,
+                label: item.label || item.placeholder || item.name || item.id,
+                reason: 'visible editable field',
+                confidence: Math.min(0.98, Math.max(0.55, item.score / 900))
+              });
+            } else if (item.clickable) {
+              candidates.push({
+                action: 'browser.click',
+                node_id: item.node_id,
+                selector: item.selector,
+                label: item.label || item.text || item.title || item.id,
+                reason: 'visible clickable element',
+                confidence: Math.min(0.98, Math.max(0.50, item.score / 850))
+              });
+            }
+          }
+          if (scrollY > 2) {
+            candidates.push({ action: 'browser.scroll', direction: 'up', amount: 500, reason: 'page can scroll up', confidence: 0.55 });
+          }
+          if (scrollY < maxScrollY - 2) {
+            candidates.push({ action: 'browser.scroll', direction: 'down', amount: 650, reason: 'page can scroll down', confidence: 0.72 });
+          }
+
+          const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+              const value = clean(node.nodeValue);
+              if (!value) return NodeFilter.FILTER_REJECT;
+              const parent = node.parentElement;
+              if (!parent || !visible(parent)) return NodeFilter.FILTER_REJECT;
+              return NodeFilter.FILTER_ACCEPT;
+            }
+          });
+          const chunks = [];
+          let total = 0;
+          while (walker.nextNode() && total < textLimit) {
+            const value = clean(walker.currentNode.nodeValue);
+            if (!value) continue;
+            chunks.push(value);
+            total += value.length + 1;
+          }
+          const verification = humanVerificationState();
+          const readyState = document.readyState || '';
+          let stateLabel = 'ready';
+          if (verification.detected && !verification.completed) stateLabel = 'needs_user_verification';
+          else if (readyState !== 'complete') stateLabel = 'loading';
+          else if (visibleElements.some(item => item.editable)) stateLabel = 'form_available';
+          else if (scrollY < maxScrollY - 2) stateLabel = 'can_scroll';
+
+          return JSON.stringify({
+            ok: true,
+            title: document.title || '',
+            url: location.href,
+            ready_state: readyState,
+            state_label: stateLabel,
+            scroll: {
+              x: scrollX,
+              y: scrollY,
+              max_y: maxScrollY,
+              height: Math.round(scrollHeight),
+              viewport_width: Math.round(viewportWidth),
+              viewport_height: Math.round(viewportHeight),
+              can_scroll_up: scrollY > 2,
+              can_scroll_down: scrollY < maxScrollY - 2,
+              progress: maxScrollY > 0 ? Math.max(0, Math.min(1, scrollY / maxScrollY)) : 1
+            },
+            visible_text: clean(chunks.join(' ')).slice(0, textLimit),
+            visible_elements: visibleElements,
+            visible_element_count: visibleElements.length,
+            total_detected_element_count: elements.length,
+            action_candidates: candidates.slice(0, Math.max(1, Math.min(12, elementLimit))),
+            action_candidate_count: candidates.length,
+            human_verification: verification,
+            requires_user_verification: verification.detected && !verification.completed
+          });
+        })();
+        """
+    }
+
     private static func elementIdentityKey(_ item: [String: Any]) -> String {
         var semanticParts: [String] = []
         var tagPart: String?
@@ -4900,7 +5404,11 @@ final class BrowserWebSearchService: NSObject {
               return null;
             }
             const node = item.node;
-            if (node && document.documentElement && document.documentElement.contains(node)) return node;
+            if (node) {
+              const ownerRoot = node.ownerDocument && node.ownerDocument.documentElement;
+              if ((document.documentElement && document.documentElement.contains(node)) ||
+                  (ownerRoot && ownerRoot.contains(node))) return node;
+            }
             try { delete window.__iexaNodeStore[raw]; } catch (_) {}
             return null;
           }
@@ -6368,6 +6876,7 @@ final class BrowserWebSearchService: NSObject {
         wv.isHidden = false
         wv.alpha = 1
         wv.navigationDelegate = self
+        wv.uiDelegate = self
         attachToWindow(wv)
         return wv
     }
@@ -6397,7 +6906,7 @@ final class BrowserWebSearchService: NSObject {
         automationBrowserUIDelegate = nil
         for tab in browserTabs.values {
             tab.navigationDelegate = self
-            tab.uiDelegate = nil
+            tab.uiDelegate = self
         }
         let active = webView ?? detachedWebView
         if let active {
@@ -7736,7 +8245,7 @@ final class BrowserWebSearchService: NSObject {
         for tab in browserTabs.values where tab !== webView && tab.superview === container {
             tab.removeFromSuperview()
             tab.navigationDelegate = self
-            tab.uiDelegate = nil
+            tab.uiDelegate = self
             attachToWindow(tab)
         }
         if webView.superview !== container {
@@ -7744,7 +8253,7 @@ final class BrowserWebSearchService: NSObject {
             container.addSubview(webView)
         }
         webView.navigationDelegate = automationBrowserNavigationDelegate ?? self
-        webView.uiDelegate = automationBrowserUIDelegate
+        webView.uiDelegate = automationBrowserUIDelegate ?? self
         webView.isHidden = false
         webView.alpha = 1
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -8915,7 +9424,7 @@ final class BrowserWebSearchService: NSObject {
     }
 }
 
-extension BrowserWebSearchService: WKNavigationDelegate {
+extension BrowserWebSearchService: WKNavigationDelegate, WKUIDelegate {
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor [weak self] in
             self?.resolveNavigation(true)
@@ -8932,6 +9441,41 @@ extension BrowserWebSearchService: WKNavigationDelegate {
         Task { @MainActor [weak self] in
             self?.resolveNavigation(false)
         }
+    }
+
+    nonisolated func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        let requestedURL = navigationAction.request.url
+        let opensInNewWindow = navigationAction.targetFrame == nil
+            || navigationAction.targetFrame?.isMainFrame == false
+        Task { @MainActor [weak self, weak webView] in
+            guard let self else { return }
+            guard let source = webView,
+                  self.isKnownBrowserWebView(source),
+                  let url = requestedURL else {
+                return
+            }
+            if opensInNewWindow, self.browserTabs.count < 3 {
+                let tabID = self.nextBrowserTabID
+                self.nextBrowserTabID += 1
+                let tab = self.makeBrowserWebView()
+                self.browserTabs[tabID] = tab
+                self.activeBrowserTabID = tabID
+                self.webView = tab
+                self.mountActiveBrowserIfPresented()
+                tab.load(URLRequest(url: url))
+                self.notifyActiveBrowserDidChange()
+                self.scheduleLiveBrowserPreview(reason: "popup_new_tab", minimumInterval: 0.25)
+            } else {
+                source.load(URLRequest(url: url))
+                self.scheduleLiveBrowserPreview(reason: "popup_same_tab", minimumInterval: 0.25)
+            }
+        }
+        return nil
     }
 }
 
