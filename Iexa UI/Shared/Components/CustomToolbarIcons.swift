@@ -38,11 +38,16 @@ struct IexaNativeGlassFill<S: InsettableShape>: View {
                     shape.fill(baseTint)
                 }
                 .overlay {
+                    if theme.isDark {
+                        shape.fill(Color.black.opacity(darkTintOpacity * 0.35))
+                    }
+                }
+                .overlay {
                     shape.fill(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(theme.isDark ? 0.30 : highlightOpacity),
-                                Color.white.opacity(theme.isDark ? 0.12 : highlightOpacity * 0.34),
+                                Color.white.opacity(theme.isDark ? highlightOpacity * 0.34 : highlightOpacity),
+                                Color.white.opacity(theme.isDark ? highlightOpacity * 0.12 : highlightOpacity * 0.34),
                                 Color.white.opacity(0.0)
                             ],
                             startPoint: .topLeading,
@@ -66,7 +71,7 @@ struct IexaNativeGlassFill<S: InsettableShape>: View {
                 }
                 .overlay {
                     shape.strokeBorder(
-                        Color.white.opacity(theme.isDark ? 0.22 : 0.72),
+                        Color.white.opacity(theme.isDark ? 0.18 : 0.72),
                         lineWidth: theme.isDark ? 0.7 : 0.55
                     )
                 }
@@ -83,12 +88,12 @@ struct IexaNativeGlassFill<S: InsettableShape>: View {
 
     private var baseTint: Color {
         theme.isDark
-            ? Color.white.opacity(darkTintOpacity * 0.42)
+            ? Color.black.opacity(darkTintOpacity)
             : Color.white.opacity(lightTintOpacity)
     }
 
     private var fallbackBlurStyle: UIBlurEffect.Style {
-        theme.isDark ? .systemChromeMaterialDark : .systemChromeMaterialLight
+        theme.isDark ? .systemUltraThinMaterialDark : .systemChromeMaterialLight
     }
 }
 
@@ -107,8 +112,8 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                     IexaNativeGlassFill(
                         shape: shape,
                         lightTintOpacity: 0.88,
-                        darkTintOpacity: 0.22,
-                        highlightOpacity: 0.42
+                        darkTintOpacity: 0.24,
+                        highlightOpacity: 0.22
                     )
                 }
                 .clipShape(shape)
@@ -120,8 +125,8 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                     IexaNativeGlassFill(
                         shape: shape,
                         lightTintOpacity: 0.88,
-                        darkTintOpacity: 0.22,
-                        highlightOpacity: 0.42
+                        darkTintOpacity: 0.24,
+                        highlightOpacity: 0.22
                     )
                 }
                 .clipShape(shape)
@@ -145,13 +150,13 @@ private struct IexaLegacyToolbarGlassChrome<S: InsettableShape>: ViewModifier {
                 .overlay {
                     shape.strokeBorder(toolbarStrokeColor, lineWidth: 0.7)
                 }
-                .shadow(color: toolbarShadowColor, radius: compact ? 15 : 19, x: 0, y: 7)
+                .shadow(color: toolbarShadowColor, radius: compact ? 8 : 12, x: 0, y: 4)
         }
     }
 
     private var toolbarStrokeColor: Color {
         theme.isDark
-            ? Color.white.opacity(0.20)
+            ? Color.white.opacity(0.14)
             : Color.black.opacity(0.045)
     }
 
