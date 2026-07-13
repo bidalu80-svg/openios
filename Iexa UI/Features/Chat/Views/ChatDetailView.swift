@@ -437,7 +437,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             fullCommandResults: [],
             statusHistory: statusHistory,
             officePreviewReferences: [],
-            officeDocumentFiles: []
+            officeDocumentFiles: [],
+            generatedImageFiles: []
         )
         guard !steps.isEmpty else { return nil }
 
@@ -744,7 +745,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
     private static func statusToolBlocks(
         from statusHistory: [ChatStatusUpdate],
         officePreviewReferences: [String],
-        officeDocumentFiles: [ChatMessageFile]
+        officeDocumentFiles: [ChatMessageFile],
+        generatedImageFiles: [ChatMessageFile]
     ) -> [AgentToolBlock] {
         let groups = collapsedStatusGroups(from: statusHistory) { _, action in
             if action.contains("local_alpine_agent") || action.contains("local_alpine_tool") {
@@ -796,7 +798,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 previewThumbnailReference: statusThumbnailReference(
                     for: group.statuses,
                     action: action,
-                    officePreviewReferences: officePreviewReferences
+                    officePreviewReferences: officePreviewReferences,
+                    generatedImageFiles: generatedImageFiles
                 ),
                 previewOpenURL: statusOpenURL(for: group.statuses, action: action),
                 previewFile: previewFile
@@ -891,12 +894,14 @@ private struct AgentActivityItem: Identifiable, Hashable {
         fullCommandResults: [LocalAlpineAgentCommandResult]? = nil,
         statusHistory: [ChatStatusUpdate],
         officePreviewReferences: [String],
-        officeDocumentFiles: [ChatMessageFile]
+        officeDocumentFiles: [ChatMessageFile],
+        generatedImageFiles: [ChatMessageFile]
     ) -> [AgentActivityStep] {
         var blocks = statusToolBlocks(
             from: statusHistory,
             officePreviewReferences: officePreviewReferences,
-            officeDocumentFiles: officeDocumentFiles
+            officeDocumentFiles: officeDocumentFiles,
+            generatedImageFiles: generatedImageFiles
         )
         let localStatusPlaceholderBlocks = localStatusToolBlocks(from: statusHistory)
 
@@ -1379,7 +1384,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
     private static func statusThumbnailReference(
         for statuses: [ChatStatusUpdate],
         action: String,
-        officePreviewReferences: [String]
+        officePreviewReferences: [String],
+        generatedImageFiles: [ChatMessageFile]
     ) -> String? {
         for status in statuses.reversed() {
             if let reference = statusThumbnailReference(
@@ -1389,6 +1395,12 @@ private struct AgentActivityItem: Identifiable, Hashable {
             ) {
                 return reference
             }
+        }
+        if action.contains("image_generation") {
+            return generatedImageFiles
+                .reversed()
+                .compactMap(Self.imageReference(for:))
+                .first
         }
         return nil
     }
@@ -1495,6 +1507,32 @@ private struct AgentActivityItem: Identifiable, Hashable {
             }
             if let url = statusOpenURL(for: status, action: action) {
                 return agentToolWebPreviewReference(for: url)
+            }
+        }
+        if action.contains("image_generation") {
+            if let thumbnail = status.items.compactMap({ item in
+                let candidates = [
+                    item.thumbnailURL,
+                    item.link
+                ]
+                return candidates
+                    .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .first { value in
+                        value.hasPrefix("data:image/")
+                            || isImagePath(value)
+                            || (URL(string: value)?.scheme?.lowercased()).map { ["http", "https", "file"].contains($0) } == true
+                    }
+            }).first {
+                return thumbnail
+            }
+            if let url = status.urls
+                .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+                .first(where: { value in
+                    value.hasPrefix("data:image/")
+                        || isImagePath(value)
+                        || (URL(string: value)?.scheme?.lowercased()).map { ["http", "https", "file"].contains($0) } == true
+                }) {
+                return url
             }
         }
         return nil
@@ -2148,6 +2186,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
         let statusHistory = liveStatus.map { message.statusHistory + [$0] } ?? message.statusHistory
         let officePreviewReferences = Self.officePreviewReferences(from: message.files)
         let officeDocumentFiles = message.files.filter(Self.isOfficeDocumentFile)
+        let generatedImageFiles = message.files.filter { file in
+            Self.isImageFile(file) && !file.isGeneratedImageFailurePlaceholder
+        }
         let parsed = ParsedLocalAlpineResult(
             content: Self.lightweightActivityParseContent(
                 message.content,
@@ -2195,7 +2236,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             fullCommandResults: visibleFullCommands,
             statusHistory: statusHistory,
             officePreviewReferences: officePreviewReferences,
-            officeDocumentFiles: officeDocumentFiles
+            officeDocumentFiles: officeDocumentFiles,
+            generatedImageFiles: generatedImageFiles
         )
 
         let elapsedMs = (CFAbsoluteTimeGetCurrent() - startedAt) * 1_000
@@ -12413,6 +12455,118 @@ private struct LocalAlpineLazyFilePreview: View {
     }
 }
 
+private struct LocalAlpineFullTerminalOutputPreview: View {
+    let path: String
+    let command: String
+    let fallbackOutput: String
+    let isRunning: Bool
+    let byteCount: Int?
+
+    @Environment(\.theme) private var theme
+    @State private var loadedOutput: String?
+    @State private var loadedByteCount: Int?
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+
+    private var output: String {
+        if let loadedOutput { return loadedOutput }
+        return fallbackOutput
+    }
+
+    private var terminalText: String {
+        var lines: [String] = []
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedCommand.isEmpty {
+            lines.append("$ \(trimmedCommand)")
+        }
+        let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedOutput.isEmpty {
+            lines.append(trimmedOutput)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if isLoading && loadedOutput == nil {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在读取完整终端输出...")
+                        .scaledFont(size: 13, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 4)
+            }
+
+            if let errorMessage, loadedOutput == nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(errorMessage)
+                        .scaledFont(size: 13, weight: .semibold)
+                        .foregroundStyle(theme.textSecondary)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 4)
+            }
+
+            AgentLazyOutputPreview(
+                text: terminalText.isEmpty ? "（无输出）" : terminalText,
+                style: .terminal,
+                isRunning: isRunning
+            )
+
+            HStack(spacing: 8) {
+                Image(systemName: loadedOutput == nil ? "doc.text" : "checkmark.circle.fill")
+                    .foregroundStyle(loadedOutput == nil ? theme.textTertiary : theme.success)
+                Text(path)
+                    .scaledFont(size: 12, weight: .semibold, design: .monospaced)
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                if let count = loadedByteCount ?? byteCount {
+                    Text("\(count) B")
+                        .scaledFont(size: 12, weight: .semibold, design: .monospaced)
+                        .foregroundStyle(theme.textTertiary)
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: path) {
+            await loadFullOutputIfNeeded()
+        }
+    }
+
+    private func loadFullOutputIfNeeded() async {
+        let shouldLoad = await MainActor.run { () -> Bool in
+            guard !isLoading, loadedOutput == nil else { return false }
+            isLoading = true
+            errorMessage = nil
+            return true
+        }
+        guard shouldLoad else { return }
+
+        do {
+            let data = try await LocalAlpineTerminalService.shared.readFile(path: path)
+            let content = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+            await MainActor.run {
+                loadedOutput = content.isEmpty ? " " : content
+                loadedByteCount = data.count
+                isLoading = false
+            }
+        } catch {
+            await MainActor.run {
+                errorMessage = "无法读取完整输出，正在显示前台预览"
+                isLoading = false
+            }
+        }
+    }
+}
+
 private struct AgentFloatingStepPreviewItem: Identifiable, Hashable {
     let id = UUID()
     let activity: AgentActivityItem
@@ -12665,11 +12819,11 @@ private struct AgentFloatingStepPreviewSheet: View {
         if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
            let outputReference = step.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !outputReference.isEmpty {
-            LocalAlpineLazyFilePreview(
+            LocalAlpineFullTerminalOutputPreview(
                 path: outputReference,
-                fileName: (outputReference as NSString).lastPathComponent,
-                language: "text",
-                fallbackLines: outputText(for: step).components(separatedBy: .newlines),
+                command: step.command ?? "",
+                fallbackOutput: outputText(for: step),
+                isRunning: step.isRunning,
                 byteCount: step.outputByteCount
             )
         } else if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
