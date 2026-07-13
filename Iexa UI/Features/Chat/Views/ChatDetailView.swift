@@ -4738,10 +4738,10 @@ struct ChatDetailView: View {
                 }
             }
             .padding(.horizontal, 6)
-            .padding(.vertical, 0)
-            .frame(minWidth: toolbarControlsMinWidth, minHeight: 34)
-            .iexaToolbarGlass(cornerRadius: 17, compact: true)
-            .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+            .padding(.vertical, 3)
+            .frame(minWidth: toolbarControlsMinWidth, minHeight: 40)
+            .iexaToolbarGlass(cornerRadius: 20, compact: true)
+            .clipShape(Capsule(style: .continuous))
         }
     }
 
@@ -4781,11 +4781,11 @@ struct ChatDetailView: View {
                             .fixedSize()
                             .layoutPriority(1)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .frame(minHeight: 34)
-                    .iexaToolbarGlass(cornerRadius: 17, compact: true)
-                    .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .frame(minHeight: 40)
+                    .iexaToolbarGlass(cornerRadius: 22, compact: true)
+                    .clipShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .sheet(isPresented: $isShowingModelSelectorSheet) {
