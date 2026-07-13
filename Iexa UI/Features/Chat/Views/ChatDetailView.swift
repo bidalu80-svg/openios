@@ -5458,6 +5458,18 @@ struct ChatDetailView: View {
         }
     }
 
+    private var topChromeOverlayReservedHeight: CGFloat {
+        // The toolbar chrome is visually floating/translucent. Programmatic
+        // current-turn anchors must not land underneath it, especially after
+        // sending a short message where SwiftUI aligns the user bubble to the
+        // top of the ScrollView.
+        86
+    }
+
+    private func turnTopScrollAnchorId(for turnId: String) -> String {
+        "turn_top_anchor_\(turnId)"
+    }
+
     private var bottomComposerOverlayReservedHeight: CGFloat {
         // Keep the composer floating over live chat content so its blur has
         // real pixels to sample, like Telegram's bottom glass bar. We still
@@ -5487,13 +5499,34 @@ struct ChatDetailView: View {
         return scrollToBottomFABBaseBottomPadding + Spacing.sm + floatingBarClearance
     }
 
+    private var hasMeaningfulScrollableOverflowForFAB: Bool {
+        let overflow = viewState_contentHeight - viewState_containerHeight
+        guard overflow > 0 else { return false }
+        // The latest turn intentionally uses minHeight to keep the sent
+        // message anchored near the top while a response streams. That spacer
+        // must not make a one-screen conversation look like it needs a "scroll
+        // to bottom" affordance.
+        let spacerTolerance = bottomComposerOverlayReservedHeight + 44
+        return overflow > spacerTolerance
+    }
+
+    private var shouldShowScrollToBottomFAB: Bool {
+        guard !viewModel.messages.isEmpty,
+              !viewModel.isLoadingConversation,
+              hasMeaningfulScrollableOverflowForFAB else {
+            return false
+        }
+        if isScrolledUp { return true }
+        return pinCurrentTurnStartForLatestTurn
+            && distanceFromBottom > 100
+            && isAnyMessageVisuallyStreaming
+    }
+
     // MARK: - Scroll-to-Bottom FAB
 
     @ViewBuilder
     private var scrollToBottomFAB: some View {
-        if (isScrolledUp || (pinCurrentTurnStartForLatestTurn && distanceFromBottom > 100))
-            && !viewModel.messages.isEmpty
-            && !viewModel.isLoadingConversation {
+        if shouldShowScrollToBottomFAB {
             ZStack {
                 Circle()
                     .fill(.ultraThinMaterial)
@@ -5735,7 +5768,10 @@ struct ChatDetailView: View {
             scrollToBottomWithoutAnimation()
             return
         }
-        scrollPosition.scrollTo(id: turnStartId, anchor: anchor)
+        let targetId = pinCurrentTurnStartForLatestTurn
+            ? turnTopScrollAnchorId(for: turnStartId)
+            : turnStartId
+        scrollPosition.scrollTo(id: targetId, anchor: anchor)
     }
 
     private func scrollToCurrentTurnStartWithoutAnimation(anchor: UnitPoint = .top) {
@@ -5804,6 +5840,12 @@ struct ChatDetailView: View {
     private func messagesList(snapshot: TranscriptRenderSnapshot) -> some View {
         return ForEach(snapshot.turnGroups) { group in
             VStack(spacing: 0) {
+                if pinCurrentTurnStartForLatestTurn,
+                   group.id == snapshot.lastTurnGroupId {
+                    Color.clear
+                        .frame(height: topChromeOverlayReservedHeight)
+                        .id(turnTopScrollAnchorId(for: group.id))
+                }
                 ForEach(group.messages) { message in
                     let index = snapshot.indexByMessageId[message.id] ?? 0
                     messageRow(
