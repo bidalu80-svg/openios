@@ -19,8 +19,10 @@ final class BrowserWebSearchService: NSObject {
     private var browserTabs: [Int: WKWebView] = [:]
     private var activeBrowserTabID = 1
     private var nextBrowserTabID = 2
-    private var browserViewportSize = CGSize(width: 390, height: 720)
+    private static let defaultMobileBrowserViewport = CGSize(width: 390, height: 720)
+    private var browserViewportSize = BrowserWebSearchService.defaultMobileBrowserViewport
     private var browserUserAgentProfile = "mobile_safari"
+    private var browserDesktopModeExplicitlyEnabled = false
     private var browserVisibleChallengeRefreshURLs: Set<String> = []
     private var browserHumanVerificationSeenTabs: Set<Int> = []
     private var browserHumanVerificationCompletedAtByTab: [Int: Date] = [:]
@@ -182,6 +184,12 @@ final class BrowserWebSearchService: NSObject {
         let action = rawAction
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+        let sanitizedCall = browserCallWithMobileDefaultsIfNeeded(call, action: action)
+        if Self.browserCallAllowsDesktopMode(sanitizedCall) {
+            browserDesktopModeExplicitlyEnabled = true
+        } else if !browserDesktopModeExplicitlyEnabled {
+            applyMobileBrowserDefaultsIfNeeded()
+        }
         let publishesLivePreview = Self.browserActionPublishesLivePreview(action)
         if publishesLivePreview {
             scheduleLiveBrowserPreview(reason: "before_\(action)", minimumInterval: 0.35)
@@ -191,62 +199,62 @@ final class BrowserWebSearchService: NSObject {
                 scheduleLiveBrowserPreview(reason: "after_\(action)", minimumInterval: 0.9)
             }
         }
-        let payload: [String: Any]
+        var payload: [String: Any]
         switch action {
         case "web.search", "web_search", "search_web", "browser.search", "browser_search":
-            payload = await executeNativeSearch(call)
+            payload = await executeNativeSearch(sanitizedCall)
         case "browser.use", "browser_use":
-            payload = await executeNativeBrowserUse(call)
+            payload = await executeNativeBrowserUse(sanitizedCall)
         case "browser.auto", "browser_auto", "auto", "complete_task", "browser.complete_task":
-            payload = await executeNativeAutoWorkflow(call)
+            payload = await executeNativeAutoWorkflow(sanitizedCall)
         case "browser.open", "browser.navigate", "browser_open", "browser.navigate_url", "navigate":
-            payload = await executeNativeOpen(call, readable: false)
+            payload = await executeNativeOpen(sanitizedCall, readable: false)
         case "browser.readable", "browser.get_readable", "browser_readable", "get_readable", "read_webpage":
-            payload = await executeNativeOpen(call, readable: true)
+            payload = await executeNativeOpen(sanitizedCall, readable: true)
         case "browser.text", "browser.get_text", "browser_text", "get_text":
-            payload = await executeNativeText(call)
+            payload = await executeNativeText(sanitizedCall)
         case "browser.info", "browser.get_page_info", "browser_info", "get_page_info":
-            payload = await executeNativePageInfo(call)
+            payload = await executeNativePageInfo(sanitizedCall)
         case "browser.inspect", "browser_inspect", "inspect", "page_inspect", "inspect_page", "browser.page_state", "browser_page_state":
-            payload = await executeNativeInspect(call)
+            payload = await executeNativeInspect(sanitizedCall)
         case "browser.observe", "browser_observe", "observe", "browser.get_state", "browser_get_state", "get_state":
-            payload = await executeNativeObserve(call)
+            payload = await executeNativeObserve(sanitizedCall)
         case "browser.screenshot", "browser_screenshot", "screenshot":
-            payload = await executeNativeScreenshot(call)
+            payload = await executeNativeScreenshot(sanitizedCall)
         case "browser.fetch", "browser_fetch", "fetch":
-            payload = await executeNativeFetch(call)
+            payload = await executeNativeFetch(sanitizedCall)
         case "browser.click", "browser_click", "click":
-            payload = await executeNativeClick(call)
+            payload = await executeNativeClick(sanitizedCall)
         case "browser.type", "browser_type", "type":
-            payload = await executeNativeType(call)
+            payload = await executeNativeType(sanitizedCall)
         case "browser.hover", "browser_hover", "hover":
-            payload = await executeNativeHover(call)
+            payload = await executeNativeHover(sanitizedCall)
         case "browser.scroll", "browser_scroll", "scroll":
-            payload = await executeNativeScroll(call)
+            payload = await executeNativeScroll(sanitizedCall)
         case "browser.scroll_and_collect", "browser_scroll_and_collect", "scroll_and_collect":
-            payload = await executeNativeScrollAndCollect(call)
+            payload = await executeNativeScrollAndCollect(sanitizedCall)
         case "browser.find_elements", "browser_find_elements", "find_elements":
-            payload = await executeNativeFindElements(call)
+            payload = await executeNativeFindElements(sanitizedCall)
         case "browser.get_backbone", "browser_get_backbone", "get_backbone":
-            payload = await executeNativeBackbone(call)
+            payload = await executeNativeBackbone(sanitizedCall)
         case "browser.execute_js", "browser_execute_js", "execute_js", "eval_js":
-            payload = await executeNativeExecuteJavaScript(call)
+            payload = await executeNativeExecuteJavaScript(sanitizedCall)
         case "browser.set_viewport", "browser_set_viewport", "set_viewport":
-            payload = await executeNativeSetViewport(call)
+            payload = await executeNativeSetViewport(sanitizedCall)
         case "browser.set_user_agent", "browser_set_user_agent", "set_user_agent":
-            payload = executeNativeSetUserAgent(call)
+            payload = executeNativeSetUserAgent(sanitizedCall)
         case "browser.get_cookies", "browser_get_cookies", "get_cookies":
-            payload = await executeNativeCookies(call)
+            payload = await executeNativeCookies(sanitizedCall)
         case "browser.wait_for_dom_stable", "browser_wait_for_dom_stable", "wait_for_dom_stable":
-            payload = await executeNativeWaitForDOMStable(call)
+            payload = await executeNativeWaitForDOMStable(sanitizedCall)
         case "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result":
-            payload = await executeNativeWaitForImage(call)
+            payload = await executeNativeWaitForImage(sanitizedCall)
         case "browser.new_tab", "browser_new_tab", "new_tab":
-            payload = await executeNativeNewTab(call)
+            payload = await executeNativeNewTab(sanitizedCall)
         case "browser.close_tab", "browser_close_tab", "close_tab":
-            payload = await executeNativeCloseTab(call)
+            payload = await executeNativeCloseTab(sanitizedCall)
         case "browser.list_tabs", "browser_list_tabs", "list_tabs":
-            payload = await executeNativeListTabs(call)
+            payload = await executeNativeListTabs(sanitizedCall)
         default:
             payload = [
                 "action": rawAction,
@@ -254,7 +262,14 @@ final class BrowserWebSearchService: NSObject {
                 "error": "Unsupported browser action"
             ]
         }
-        return await enrichNativeBrowserToolPayload(payload, requestedAction: action, call: call)
+        if Self.boolValue(sanitizedCall["desktop_mode_blocked"]) == true
+            || Self.boolValue(sanitizedCall["desktop_viewport_blocked"]) == true {
+            payload["mobile_defaults_enforced"] = true
+            payload["desktop_mode_blocked"] = Self.boolValue(sanitizedCall["desktop_mode_blocked"]) == true
+            payload["desktop_viewport_blocked"] = Self.boolValue(sanitizedCall["desktop_viewport_blocked"]) == true
+        }
+        payload["desktop_mode_active"] = browserDesktopModeExplicitlyEnabled
+        return await enrichNativeBrowserToolPayload(payload, requestedAction: action, call: sanitizedCall)
     }
 
     private static func browserActionPublishesLivePreview(_ action: String) -> Bool {
@@ -269,6 +284,69 @@ final class BrowserWebSearchService: NSObject {
             "wait_for_dom_stable", "wait_for_image", "screenshot",
             "new_tab", "close_tab", "list_tabs", "set_viewport"
         ].contains(action)
+    }
+
+    private static func browserCallAllowsDesktopMode(_ call: [String: Any]) -> Bool {
+        boolValue(call["allow_desktop"] ?? call["allowDesktop"] ?? call["desktop_mode"] ?? call["desktopMode"] ?? call["force_desktop"] ?? call["forceDesktop"]) == true
+    }
+
+    private func browserCallWithMobileDefaultsIfNeeded(_ call: [String: Any], action: String) -> [String: Any] {
+        guard !Self.browserCallAllowsDesktopMode(call), !browserDesktopModeExplicitlyEnabled else { return call }
+
+        var sanitized = call
+        if let rawProfile = Self.firstString(in: sanitized, keys: ["user_agent", "userAgent", "profile"])?.lowercased(),
+           rawProfile.contains("desktop") || rawProfile == "desktop_chrome" {
+            sanitized["user_agent"] = "mobile_safari"
+            sanitized["userAgent"] = "mobile_safari"
+            sanitized["profile"] = "mobile_safari"
+            sanitized["desktop_mode_blocked"] = true
+        }
+
+        let width = Self.intValue(sanitized["viewport_width"] ?? sanitized["viewportWidth"] ?? sanitized["width"])
+        let height = Self.intValue(sanitized["viewport_height"] ?? sanitized["viewportHeight"] ?? sanitized["height"])
+        let isViewportAction = [
+            "browser.set_viewport", "browser_set_viewport", "set_viewport"
+        ].contains(action)
+        if isViewportAction || width != nil || height != nil {
+            if (width ?? 0) >= 700 || (height ?? 0) >= 1200 {
+                sanitized["viewport_width"] = Int(Self.defaultMobileBrowserViewport.width.rounded())
+                sanitized["viewport_height"] = Int(Self.defaultMobileBrowserViewport.height.rounded())
+                sanitized["width"] = Int(Self.defaultMobileBrowserViewport.width.rounded())
+                sanitized["height"] = Int(Self.defaultMobileBrowserViewport.height.rounded())
+                sanitized["reset"] = false
+                sanitized["desktop_viewport_blocked"] = true
+            }
+        }
+
+        return sanitized
+    }
+
+    private func applyMobileBrowserDefaultsIfNeeded() {
+        if browserUserAgentProfile.lowercased().contains("desktop") {
+            applyBrowserUserAgent("mobile_safari")
+        }
+
+        let width = Int(browserViewportSize.width.rounded())
+        let height = Int(browserViewportSize.height.rounded())
+        guard width >= 700 || height >= 1200 else { return }
+
+        browserViewportSize = Self.defaultMobileBrowserViewport
+        for tab in browserTabs.values {
+            tab.frame = CGRect(
+                x: -10_000,
+                y: -10_000,
+                width: browserViewportSize.width,
+                height: browserViewportSize.height
+            )
+            tab.setNeedsLayout()
+            tab.layoutIfNeeded()
+        }
+        webView?.frame = CGRect(
+            x: -10_000,
+            y: -10_000,
+            width: browserViewportSize.width,
+            height: browserViewportSize.height
+        )
     }
 
     private func enrichNativeBrowserToolPayload(
@@ -3960,9 +4038,13 @@ final class BrowserWebSearchService: NSObject {
 
     private func executeNativeSetViewport(_ call: [String: Any]) async -> [String: Any] {
         if Self.boolValue(call["reset"] ?? call["clear"]) == true {
-            browserViewportSize = CGSize(width: 390, height: 720)
+            browserViewportSize = Self.defaultMobileBrowserViewport
+            browserDesktopModeExplicitlyEnabled = false
         } else if let width = Self.intValue(call["viewport_width"] ?? call["width"]),
                   let height = Self.intValue(call["viewport_height"] ?? call["height"]) {
+            if Self.browserCallAllowsDesktopMode(call) {
+                browserDesktopModeExplicitlyEnabled = true
+            }
             browserViewportSize = CGSize(
                 width: CGFloat(min(max(width, 240), 4096)),
                 height: CGFloat(min(max(height, 240), 4096))
@@ -4053,6 +4135,9 @@ final class BrowserWebSearchService: NSObject {
 
     private func executeNativeSetUserAgent(_ call: [String: Any]) -> [String: Any] {
         let profile = Self.firstString(in: call, keys: ["user_agent", "userAgent", "profile"]) ?? "mobile_safari"
+        if Self.browserCallAllowsDesktopMode(call) {
+            browserDesktopModeExplicitlyEnabled = true
+        }
         applyBrowserUserAgent(profile)
         return [
             "action": "browser.set_user_agent",

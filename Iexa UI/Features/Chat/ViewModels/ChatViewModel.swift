@@ -2800,7 +2800,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "browser_use",
-                    "description": "Minis-style browser automation backed by the shared iOS WKWebView session. Default environment is iPhone-size mobile Safari/WKWebView, not desktop Chrome. Every primitive action auto-waits briefly and returns post_action_observation plus next_action_candidates containing node_id values. Continue with those candidates until the page task is complete; screenshots are optional visual evidence, not the only state. Fetch downloads through the current browser session. After clicking generate/export/download controls, use wait_for_image or wait_for_dom_stable before deciding the task is stuck. Switch to desktop_chrome or a wide desktop viewport only when the user explicitly asks for desktop mode or the mobile page hides the required control.",
+                    "description": "Minis-style browser automation backed by the shared iOS WKWebView session. Default environment is iPhone-size mobile Safari/WKWebView, not desktop Chrome. Every primitive action auto-waits briefly and returns post_action_observation plus next_action_candidates containing node_id values. Continue with those candidates until the page task is complete; screenshots are optional visual evidence, not the only state. Fetch downloads through the current browser session. After clicking generate/export/download controls, use wait_for_image or wait_for_dom_stable before deciding the task is stuck. Switch to desktop_chrome or a wide desktop viewport only when the user explicitly asks for desktop/PC mode.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2846,16 +2846,17 @@ final class ChatViewModel {
                             "full_page": ["type": "boolean", "description": "For screenshot: capture the full scrollable page instead of the current viewport."],
                             "attach_preview": ["type": "boolean", "description": "For screenshot: attach the image to chat. Defaults to false for browser observation screenshots."],
                             "script": ["type": "string", "description": "JavaScript body for execute_js."],
-                            "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile. Default is mobile_safari. Do not use desktop_chrome unless the user asks for desktop mode or the mobile site cannot expose the needed control."],
+                            "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile. Default is mobile_safari. Do not use desktop_chrome unless the user explicitly asks for desktop/PC mode."],
                             "max_depth": ["type": "integer", "description": "DOM backbone depth."],
                             "scroll_count": ["type": "integer", "description": "Number of scroll/collect iterations."],
                             "item_selector": ["type": "string", "description": "Selector for scroll_and_collect items."],
                             "tab_id": ["type": "integer", "description": "Target browser tab id."],
                             "keywords": ["type": "string", "description": "Cookie name keywords."],
                             "fuzzy": ["type": "boolean", "description": "Fuzzy cookie keyword matching."],
-                            "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport. Default mobile viewport is 390; avoid desktop-sized widths unless explicitly needed."],
-                            "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport. Default mobile viewport is 720; avoid desktop-sized heights unless explicitly needed."],
+                            "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport. Default mobile viewport is 390; desktop-sized widths are ignored unless allow_desktop is true and the user explicitly requested desktop/PC mode."],
+                            "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport. Default mobile viewport is 720; desktop-sized heights are ignored unless allow_desktop is true and the user explicitly requested desktop/PC mode."],
                             "reset": ["type": "boolean", "description": "Reset viewport to default."],
+                            "allow_desktop": ["type": "boolean", "description": "Set true only when the user explicitly asks for desktop/PC mode. Otherwise desktop_chrome and wide viewports are blocked and reset to mobile_safari/mobile viewport."],
                             "save_to": ["type": "string", "description": "Optional output path/name for fetch/download compatibility."],
                             "output": ["type": "string", "description": "Compatibility alias for save_to."],
                             "path": ["type": "string", "description": "Compatibility alias for save_to when action is fetch."],
@@ -3050,7 +3051,7 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": "browser_use",
-                        "description": "Minis-style interactive browser tool backed by the shared iOS WKWebView. Default environment is iPhone-size mobile Safari/WKWebView, not desktop Chrome. Supports up to 3 tabs and primitive actions: navigate, observe, screenshot, click, type, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, get_cookies, wait_for_dom_stable, wait_for_image, execute_js, set_user_agent, and set_viewport. Every action returns post_action_observation and next_action_candidates with reusable node_id values after an automatic settle wait. Continue from those candidates until the user task is complete; use screenshot only when visual confirmation or coordinate fallback is needed. After clicking a generate/export/download button, use wait_for_image or wait_for_dom_stable before deciding the task is stuck. Treat click/type/scroll/find success as intermediate, not as page-task completion. Switch to desktop_chrome or a wide desktop viewport only when the user explicitly asks for desktop mode or the mobile page hides the required control.",
+                        "description": "Minis-style interactive browser tool backed by the shared iOS WKWebView. Default environment is iPhone-size mobile Safari/WKWebView, not desktop Chrome. Supports up to 3 tabs and primitive actions: navigate, observe, screenshot, click, type, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, get_cookies, wait_for_dom_stable, wait_for_image, execute_js, set_user_agent, and set_viewport. Every action returns post_action_observation and next_action_candidates with reusable node_id values after an automatic settle wait. Continue from those candidates until the user task is complete; use screenshot only when visual confirmation or coordinate fallback is needed. After clicking a generate/export/download button, use wait_for_image or wait_for_dom_stable before deciding the task is stuck. Treat click/type/scroll/find success as intermediate, not as page-task completion. Switch to desktop_chrome or a wide desktop viewport only when the user explicitly asks for desktop/PC mode.",
                         "parameters": [
                             "type": "object",
                             "properties": [
@@ -3095,7 +3096,7 @@ final class ChatViewModel {
                                 "full_page": ["type": "boolean", "description": "For screenshot: capture the full scrollable page instead of the current viewport."],
                                 "attach_preview": ["type": "boolean", "description": "For screenshot: attach the image to chat. Defaults to false for browser observation screenshots."],
                                 "script": ["type": "string", "description": "JavaScript body for execute_js."],
-                                "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile. Default is mobile_safari. Do not use desktop_chrome unless the user asks for desktop mode or the mobile site cannot expose the needed control."],
+                                "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile. Default is mobile_safari. Do not use desktop_chrome unless the user explicitly asks for desktop/PC mode."],
                                 "max_depth": ["type": "integer", "description": "DOM backbone depth."],
                                 "scroll_count": ["type": "integer", "description": "Number of scroll/collect iterations."],
                                 "item_selector": ["type": "string", "description": "Selector for scroll_and_collect items."],
@@ -3103,9 +3104,10 @@ final class ChatViewModel {
                                 "keywords": ["type": "string", "description": "Cookie name keywords."],
                                 "fuzzy": ["type": "boolean", "description": "Fuzzy cookie keyword matching."],
                                 "timeout": ["type": "integer", "description": "Timeout in seconds."],
-                                "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport. Default mobile viewport is 390; avoid desktop-sized widths unless explicitly needed."],
-                                "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport. Default mobile viewport is 720; avoid desktop-sized heights unless explicitly needed."],
-                                "reset": ["type": "boolean", "description": "Reset viewport to default."]
+                                "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport. Default mobile viewport is 390; desktop-sized widths are ignored unless allow_desktop is true and the user explicitly requested desktop/PC mode."],
+                                "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport. Default mobile viewport is 720; desktop-sized heights are ignored unless allow_desktop is true and the user explicitly requested desktop/PC mode."],
+                                "reset": ["type": "boolean", "description": "Reset viewport to default."],
+                                "allow_desktop": ["type": "boolean", "description": "Set true only when the user explicitly asks for desktop/PC mode. Otherwise desktop_chrome and wide viewports are blocked and reset to mobile_safari/mobile viewport."]
                             ],
                             "required": ["tool_title", "action"]
                         ]
@@ -12167,8 +12169,7 @@ final class ChatViewModel {
                     acc.replace("")
                     updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
                 }
-                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage(suggestedCall: continuationCall))
-                continue
+                calls = [continuationCall]
             } else if !calls.isEmpty {
                 pendingBrowserContinuationCall = nil
             }
@@ -12445,8 +12446,7 @@ final class ChatViewModel {
                     acc.replace("")
                     updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
                 }
-                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage(suggestedCall: continuationCall))
-                continue
+                calls = [continuationCall]
             } else if !calls.isEmpty {
                 pendingBrowserContinuationCall = nil
             }
@@ -13922,7 +13922,9 @@ final class ChatViewModel {
             return redirectURLSearchToBrowserUseIfNeeded(call, latestUserPrompt: latestUserPrompt)
         }
         if toolName == "browser_use" || toolName == "browser_readable" {
-            let arguments = localAlpineNativeToolArguments(for: call)
+            let rawArguments = localAlpineNativeToolArguments(for: call)
+            let sanitized = browserArgumentsWithDesktopIntent(rawArguments, latestUserPrompt: latestUserPrompt)
+            let arguments = sanitized.arguments
             let action = firstNonEmptyString(
                 in: arguments,
                 keys: ["action", "browser_action", "browser_use_action", "operation", "op", "type"]
@@ -13942,8 +13944,52 @@ final class ChatViewModel {
                     arguments: String(data: data, encoding: .utf8) ?? call.arguments
                 )
             }
+            if sanitized.changed {
+                let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
+                return LocalAlpineNativeToolCall(
+                    id: call.id,
+                    name: call.name,
+                    arguments: String(data: data, encoding: .utf8) ?? call.arguments
+                )
+            }
         }
         return call
+    }
+
+    private static func browserPromptExplicitlyRequestsDesktopMode(_ prompt: String?) -> Bool {
+        let normalized = (prompt ?? "")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalized.isEmpty else { return false }
+        return [
+            "桌面版", "电脑版", "pc版", "pc 版", "电脑网页", "桌面网页",
+            "桌面模式", "电脑模式", "请求桌面网站", "切换桌面", "切到桌面",
+            "desktop mode", "desktop site", "desktop version", "request desktop",
+            "pc mode", "pc site", "switch to desktop"
+        ].contains { normalized.contains($0) }
+    }
+
+    private static func browserArgumentsWithDesktopIntent(
+        _ arguments: [String: Any],
+        latestUserPrompt: String?
+    ) -> (arguments: [String: Any], changed: Bool) {
+        let allowDesktop = browserPromptExplicitlyRequestsDesktopMode(latestUserPrompt)
+        var sanitized = arguments
+        var changed = false
+
+        if allowDesktop {
+            sanitized["allow_desktop"] = true
+            changed = true
+            return (sanitized, changed)
+        }
+
+        for key in ["allow_desktop", "allowDesktop", "desktop_mode", "desktopMode", "force_desktop", "forceDesktop"] {
+            if sanitized.removeValue(forKey: key) != nil {
+                changed = true
+            }
+        }
+        return (sanitized, changed)
     }
 
     private static func browserAutomationUpgradeArguments(
@@ -14538,8 +14584,7 @@ final class ChatViewModel {
         guard name == "browser_use" else { return false }
         let userVerificationCompleted = result.summary.localizedCaseInsensitiveContains("Browser human verification was completed")
             || result.summary.localizedCaseInsensitiveContains("人机验证已完成")
-        let needsUserVerification = result.summary.localizedCaseInsensitiveContains("\"requires_user_verification\"")
-            || result.summary.localizedCaseInsensitiveContains("requires_user_verification")
+        let needsUserVerification = anyJSONBoolValue(in: result.summary, key: "requires_user_verification", equals: true)
             || result.summary.localizedCaseInsensitiveContains("human verification is not complete")
             || result.summary.localizedCaseInsensitiveContains("网页需要先完成人机验证")
         if needsUserVerification && !userVerificationCompleted {
@@ -15163,6 +15208,18 @@ final class ChatViewModel {
             keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel", "target", "label"]
         )
         let focusedNodeID = browserFocusedNodeID(in: toolContent)
+        let hasExplicitContinuationTarget = requestedText != nil
+            || (requestedClickTarget?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+        if !hasExplicitContinuationTarget,
+           action == "browser.find_elements",
+           lowerContent.contains("\"visual_viewports\"") || lowerContent.contains("\"focused_element\"") {
+            return nil
+        }
+        if !hasExplicitContinuationTarget,
+           action == "browser.screenshot",
+           ["focused_element_view", "viewport_view", "page_scan", "post_action_scan"].contains(continuationStage) {
+            return nil
+        }
         for key in ["url", "link", "href", "page_url", "source", "input_url"] {
             arguments.removeValue(forKey: key)
         }
@@ -15252,11 +15309,13 @@ final class ChatViewModel {
             arguments["timeout"] = max(nativeToolIntValue(arguments["timeout"]) ?? 8, 8)
             arguments["continuation_stage"] = "post_action_wait"
         } else if action == "browser.wait_for_dom_stable" {
-            arguments["action"] = "screenshot"
-            arguments["full_page"] = false
+            arguments["action"] = "find_elements"
+            arguments["scan_page"] = true
+            arguments["capture_visuals"] = true
+            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 12, 12)
             arguments["attach_preview"] = false
             arguments["screenshot"] = true
-            arguments["continuation_stage"] = "post_action_view"
+            arguments["continuation_stage"] = "post_action_scan"
         } else if ["browser.open", "browser.screenshot", "browser.scroll", "browser.observe", "browser.inspect"].contains(action)
             || (action == "browser.find_elements" && !lowerContent.contains("\"visual_viewports\"")) {
             arguments["action"] = "find_elements"
@@ -20220,7 +20279,7 @@ final class ChatViewModel {
             : ""
         let browserInstructions = includeBrowserTools ? """
 
-        Browser override: use `browser_use` like Minis. The shared browser is an iPhone-size mobile Safari/WKWebView by default, not desktop Chrome. Do not switch to `desktop_chrome` or desktop-sized viewport unless the user explicitly asks for desktop mode or the mobile page hides the required control. For interactive pages, open/navigate first, then read `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll` from every result. Prefer returned candidate `node_id` values for the next `click`, `type`, or `hover`; use `screenshot` only for visual confirmation or coordinate fallback. After pressing a page generate/export/download button, wait for the real result with `wait_for_image` or `wait_for_dom_stable`; do not stop at the click. Treat every browser action result as intermediate until the user task is complete or the tool explicitly returns `requires_user_verification:true`.
+        Browser override: use `browser_use` like Minis. The shared browser is an iPhone-size mobile Safari/WKWebView by default, not desktop Chrome. Do not switch to `desktop_chrome` or desktop-sized viewport unless the user explicitly asks for desktop/PC mode. For interactive pages, open/navigate first, then read `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll` from every result. Prefer returned candidate `node_id` values for the next `click`, `type`, or `hover`; use `screenshot` only for visual confirmation or coordinate fallback. After pressing a page generate/export/download button, wait for the real result with `wait_for_image` or `wait_for_dom_stable`; do not stop at the click. Treat every browser action result as intermediate until the user task is complete or the tool explicitly returns `requires_user_verification:true`.
 
         For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. Use `browser_use` for interactive page work. Use `next_action_candidates` and `post_action_observation.visible_elements` first; use `find_elements` with `scan_page:true` for full-page discovery; reuse returned `nodeId`/`node_id` for the next click/type/hover; use viewport coordinates only when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or the tool explicitly returns `requires_user_verification:true`. Do not narrate intermediate browser work in chat; progress belongs in the tool card. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. If verification is required, the shared browser stays on the same page; after the user completes it, continue from the next observation result without reopening/reloading the same URL.
 
@@ -23798,10 +23857,68 @@ final class ChatViewModel {
         conversation?.history.currentId = messageId
     }
 
+    private func localNativeResultNeedsBrowserContinuation(parentId: String) -> Bool {
+        guard let message = conversation?.messages.first(where: { $0.id == parentId }) else {
+            return false
+        }
+        let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return false }
+        let lowered = content.lowercased()
+
+        let isBrowserResult = Self.messageHasLocalBrowserActivity(message)
+            || lowered.contains("\"browser_action\"")
+            || lowered.contains("\"action\":\"browser.")
+            || lowered.contains("\"action\" : \"browser.")
+            || lowered.contains("\"post_action_observation\"")
+            || lowered.contains("\"next_action_candidates\"")
+            || lowered.contains("\"browser_state_label\"")
+            || lowered.contains("\"browser_scroll\"")
+            || lowered.contains("browser_use")
+            || lowered.contains("本地 ios 工具执行结果")
+                && (lowered.contains("\"url\"") || lowered.contains("网页") || lowered.contains("浏览器"))
+        guard isBrowserResult else {
+            return false
+        }
+
+        if Self.anyJSONBoolValue(in: content, key: "requires_user_verification", equals: true) {
+            return false
+        }
+        if Self.anyJSONBoolValue(in: content, key: "next_action_required", equals: true) {
+            return true
+        }
+
+        if lowered.contains("do not answer the user yet")
+            || lowered.contains("emit the next browser_use tool call")
+            || lowered.contains("intermediate browser observation")
+            || lowered.contains("\"visible_answer_allowed\" : false")
+            || lowered.contains("\"visible_answer_allowed\": false") {
+            return true
+        }
+
+        if let json = Self.firstJSONObjectString(in: content),
+           let data = json.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) {
+            if Self.anyJSONBoolValue(in: object, key: "requires_user_verification", equals: true) {
+                return false
+            }
+            if Self.anyJSONBoolValue(in: object, key: "next_action_required", equals: true) {
+                return true
+            }
+            if let instruction = Self.firstJSONStringValue(in: object, key: "final_answer_instruction")?.lowercased(),
+               instruction.contains("do not answer"),
+               instruction.contains("browser_use") {
+                return true
+            }
+        }
+
+        return false
+    }
+
     private func startLocalNativeContinuation(parentId: String) async {
         guard let manager else { return }
         guard let conversation, conversation.messages.contains(where: { $0.id == parentId }) else { return }
         guard let modelId = selectedModelId ?? conversation.model else { return }
+        let shouldContinueBrowserTools = localNativeResultNeedsBrowserContinuation(parentId: parentId)
 
         let assistantMessageId = UUID().uuidString
         let inheritedStatusHistory = localNativeInheritedStatusByResultMessageId[parentId] ?? []
@@ -23842,7 +23959,10 @@ final class ChatViewModel {
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
         var apiMessages = await buildAPIMessagesAsync(includeLocalAlpineExecutionContext: false)
-        Self.appendLocalNativeResultInstruction(to: &apiMessages)
+        Self.appendLocalNativeResultInstruction(
+            to: &apiMessages,
+            allowBrowserContinuation: shouldContinueBrowserTools
+        )
 
         isStreaming = true
         hasFinishedStreaming = false
@@ -23894,6 +24014,58 @@ final class ChatViewModel {
                     parentId: parentId
                 )
                 await self.populateCommonRequestFields(&request)
+
+                if shouldContinueBrowserTools,
+                   self.shouldUseLocalNativeFunctionTools(for: modelId),
+                   self.isLocalBrowserNativeToolsEnabled {
+                    request.tools = Self.localNativeFunctionToolSchemas(
+                        includeBrowserTools: true,
+                        includeImageTools: false,
+                        includeOfficeTools: false,
+                        includeShortcutsTools: false,
+                        includeMemoryTools: false
+                    )
+                    request.toolChoice = "required"
+                    request.parallelToolCalls = false
+
+                    if self.isOpenAICompatibleProvider {
+                        do {
+                            exactUsage = try await self.streamProviderLocalNativeFunctionLoop(
+                                manager: manager,
+                                initialRequest: request,
+                                assistantMessageId: assistantMessageId,
+                                acc: acc
+                            )
+                        } catch {
+                            guard Self.errorLooksLikeUnsupportedNativeTools(error) else { throw error }
+                            self.localNativeFunctionToolsUnsupportedModels.insert(modelId)
+                            Self.disableAgentToolsForResultContinuation(&request)
+                            let stream = try await manager.sendPreferredOpenAIStreaming(
+                                request: request
+                            )
+                            for try await event in stream {
+                                if Task.isCancelled { break }
+                                if let usage = event.usage, !usage.isEmpty {
+                                    exactUsage = usage
+                                }
+                                self.applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
+                                if event.isFinished { break }
+                            }
+                        }
+                        if Task.isCancelled { return }
+                        acc.markReasoningDone()
+                        await self.finishLocalNativeContinuation(
+                            assistantMessageId: assistantMessageId,
+                            modelId: modelId,
+                            content: acc.content,
+                            usage: exactUsage,
+                            reasoningContent: acc.reasoningContent,
+                            reasoningDone: acc.reasoningDone
+                        )
+                        return
+                    }
+                }
+
                 Self.disableAgentToolsForResultContinuation(&request)
 
                 if self.isOpenAICompatibleProvider {
@@ -24192,14 +24364,24 @@ final class ChatViewModel {
         }
     }
 
-    private static func appendLocalNativeResultInstruction(to messages: inout [[String: Any]]) {
+    private static func appendLocalNativeResultInstruction(
+        to messages: inout [[String: Any]],
+        allowBrowserContinuation: Bool = false
+    ) {
+        let continuationInstruction = allowBrowserContinuation
+            ? """
+            The latest Local Native browser result is an intermediate browser state, not the final user-visible answer. Continue with real `browser_use` function tool calls in this same turn until the page task is complete, a final readable/file result exists, or the tool explicitly reports `requires_user_verification:true`. Do not answer with prose while `next_action_required:true` is present.
+            """
+            : """
+            Reply to the user in normal language only, using Minis-style brevity: final result first, no process narration.
+            """
         let instruction = """
         [Local native tool result]
         The latest Local Native message above is a real on-device iOS tool result for device info, clipboard, local notification, location, weather, calendar, local browser/web reading, local Office document generation, or iOS Shortcuts launching. Do not emit another `iexa_native` block in this turn.
-        Reply to the user in normal language only, using Minis-style brevity: final result first, no process narration.
+        \(continuationInstruction)
         - Do not say you are opening/searching/reading/checking/running unless the user specifically asked for an execution log.
         - Do not recap tool calls, intermediate observations, or hidden loop-control reasons; the app shows tool progress separately.
-        - If the local browser tool succeeded, answer from the returned page/search content and cite page titles/URLs plainly.
+        - If the local browser tool succeeded and no further browser action is required, answer from the returned page/search content and cite page titles/URLs plainly.
         - If an Office document was generated, tell the user the file and previews are attached in the chat.
         - If an iOS Shortcut was run or opened, state the requested shortcut action and any system/user confirmation requirement.
         - If it failed, give the concrete permission/state problem and the next user action.
