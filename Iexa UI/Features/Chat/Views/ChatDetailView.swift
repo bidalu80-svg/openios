@@ -5459,62 +5459,19 @@ struct ChatDetailView: View {
     }
 
     private var bottomComposerOverlayReservedHeight: CGFloat {
-        // Restore the pre-glass scroll reserve so current-turn anchors and
-        // short chats land in the same place they did before the Telegram-style
-        // material pass. The input field can still be rendered as glass; this
-        // value is about scroll geometry, not the material itself.
+        // The composer is a floating overlay so its material can sample chat
+        // content underneath. Reserve scrollable slack separately so the last
+        // message and action row can still be brought above the composer.
         editingMessageId == nil ? 116 : 82
-    }
-
-    private var shouldReserveSpaceForAgentFloatingBar: Bool {
-        localAlpineToolPreviewEnabled
-            && !shouldHideAgentFloatingBarForKeyboard
-            && agentFloatingDisplayItem?.hasConcreteSteps == true
-    }
-
-    private var scrollToBottomFABBaseBottomPadding: CGFloat {
-        // This is visual clearance for the floating scroll button, not the
-        // scroll view's content reserve. Keep it tall enough for the actual
-        // composer shell even though the message list is allowed to overlap
-        // behind the glass for material sampling.
-        editingMessageId == nil ? 116 : 82
-    }
-
-    private var scrollToBottomFABBottomPadding: CGFloat {
-        let floatingBarClearance = shouldReserveSpaceForAgentFloatingBar
-            ? AgentStepFloatingMetrics.layoutHeight + 8
-            : 0
-        return scrollToBottomFABBaseBottomPadding + Spacing.sm + floatingBarClearance
-    }
-
-    private var hasMeaningfulScrollableOverflowForFAB: Bool {
-        let overflow = viewState_contentHeight - viewState_containerHeight
-        guard overflow > 0 else { return false }
-        // The latest turn intentionally uses minHeight to keep the sent
-        // message anchored near the top while a response streams. That spacer
-        // must not make a one-screen conversation look like it needs a "scroll
-        // to bottom" affordance.
-        let spacerTolerance = bottomComposerOverlayReservedHeight + 44
-        return overflow > spacerTolerance
-    }
-
-    private var shouldShowScrollToBottomFAB: Bool {
-        guard !viewModel.messages.isEmpty,
-              !viewModel.isLoadingConversation,
-              hasMeaningfulScrollableOverflowForFAB else {
-            return false
-        }
-        if isScrolledUp { return true }
-        return pinCurrentTurnStartForLatestTurn
-            && distanceFromBottom > 100
-            && isAnyMessageVisuallyStreaming
     }
 
     // MARK: - Scroll-to-Bottom FAB
 
     @ViewBuilder
     private var scrollToBottomFAB: some View {
-        if shouldShowScrollToBottomFAB {
+        if (isScrolledUp || (pinCurrentTurnStartForLatestTurn && distanceFromBottom > 100))
+            && !viewModel.messages.isEmpty
+            && !viewModel.isLoadingConversation {
             ZStack {
                 Circle()
                     .fill(.ultraThinMaterial)
@@ -5543,7 +5500,7 @@ struct ChatDetailView: View {
                 }
             )
             .padding(.trailing, Spacing.md)
-            .padding(.bottom, scrollToBottomFABBottomPadding)
+            .padding(.bottom, bottomComposerOverlayReservedHeight + Spacing.sm)
             .transition(
                 .asymmetric(
                     insertion: .scale(scale: 0.7).combined(with: .opacity),
