@@ -5472,11 +5472,19 @@ struct ChatDetailView: View {
             && agentFloatingDisplayItem?.hasConcreteSteps == true
     }
 
+    private var scrollToBottomFABBaseBottomPadding: CGFloat {
+        // This is visual clearance for the floating scroll button, not the
+        // scroll view's content reserve. Keep it tall enough for the actual
+        // composer shell even though the message list is allowed to overlap
+        // behind the glass for material sampling.
+        editingMessageId == nil ? 116 : 82
+    }
+
     private var scrollToBottomFABBottomPadding: CGFloat {
         let floatingBarClearance = shouldReserveSpaceForAgentFloatingBar
             ? AgentStepFloatingMetrics.layoutHeight + 8
             : 0
-        return bottomComposerOverlayReservedHeight + Spacing.sm + floatingBarClearance
+        return scrollToBottomFABBaseBottomPadding + Spacing.sm + floatingBarClearance
     }
 
     // MARK: - Scroll-to-Bottom FAB
