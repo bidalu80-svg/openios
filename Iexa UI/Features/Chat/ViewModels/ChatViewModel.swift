@@ -14837,7 +14837,7 @@ final class ChatViewModel {
         } else {
             suggestedInstruction = ""
         }
-        [
+        return [
             "role": "system",
             "content": """
             The previous browser result was an intermediate page-operation state, but the assistant did not issue the next browser tool call. The app is continuing the same shared browser session automatically.
