@@ -428,6 +428,7 @@ struct iPadMainChatView: View {
             showCreateFolderSheet: $showCreateFolderSheet,
             showCreateChannel: $showCreateChannel,
             showSettings: $showSettings,
+            settingsInitialDestination: $settingsInitialDestination,
             showNotes: $showNotes,
             showWorkspace: $showWorkspace,
             showMemories: $showMemories,
