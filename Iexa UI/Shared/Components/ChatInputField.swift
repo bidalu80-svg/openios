@@ -383,8 +383,8 @@ struct ChatInputField: View {
             IexaNativeGlassFill(
                 shape: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous),
                 lightTintOpacity: 0.94,
-                darkTintOpacity: 0.26,
-                highlightOpacity: 0.22
+                darkTintOpacity: 0.13,
+                highlightOpacity: 0.18
             )
         }
         .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
@@ -394,11 +394,11 @@ struct ChatInputField: View {
         }
         .shadow(
             color: theme.isDark
-                ? Color.black.opacity(isFocused ? 0.24 : 0.18)
+                ? Color.black.opacity(isFocused ? 0.18 : 0.12)
                 : Color.black.opacity(isFocused ? 0.12 : 0.08),
-            radius: theme.isDark ? (isFocused ? 12 : 9) : (isFocused ? 22 : 16),
+            radius: theme.isDark ? (isFocused ? 9 : 6) : (isFocused ? 22 : 16),
             x: 0,
-            y: theme.isDark ? 4 : 8
+            y: theme.isDark ? 3 : 8
         )
     }
 

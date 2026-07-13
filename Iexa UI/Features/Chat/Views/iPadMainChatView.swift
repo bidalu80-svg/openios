@@ -1030,7 +1030,7 @@ struct iPadSidebarContent: View {
         .padding(.horizontal, Spacing.md)
         .padding(.vertical, 9)
         .background(theme.surfaceContainer.opacity(0.6))
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .clipShape(Capsule(style: .continuous))
         .padding(.horizontal, Spacing.md)
         .padding(.top, Spacing.sm)
         .padding(.bottom, Spacing.xs)

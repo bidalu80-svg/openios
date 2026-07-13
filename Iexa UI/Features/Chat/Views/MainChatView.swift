@@ -2191,7 +2191,7 @@ struct MainChatView: View {
         .padding(.horizontal, Spacing.md)
         .padding(.vertical, Spacing.sm)
         .background(theme.surfaceContainer.opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+        .clipShape(Capsule(style: .continuous))
         .padding(.horizontal, Spacing.md)
         .padding(.top, Spacing.md)
         .padding(.bottom, Spacing.sm)

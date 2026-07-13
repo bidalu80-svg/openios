@@ -39,7 +39,7 @@ struct IexaNativeGlassFill<S: InsettableShape>: View {
                 }
                 .overlay {
                     if theme.isDark {
-                        shape.fill(Color.black.opacity(darkTintOpacity * 0.35))
+                        shape.fill(Color.black.opacity(darkTintOpacity * 0.12))
                     }
                 }
                 .overlay {
@@ -61,7 +61,7 @@ struct IexaNativeGlassFill<S: InsettableShape>: View {
                             colors: [
                                 Color.white.opacity(theme.isDark ? 0.04 : 0.08),
                                 Color.clear,
-                                Color.black.opacity(theme.isDark ? 0.10 : 0.04)
+                                Color.black.opacity(theme.isDark ? 0.055 : 0.04)
                             ],
                             startPoint: .top,
                             endPoint: .bottom
@@ -112,8 +112,8 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                     IexaNativeGlassFill(
                         shape: shape,
                         lightTintOpacity: 0.88,
-                        darkTintOpacity: 0.24,
-                        highlightOpacity: 0.22
+                        darkTintOpacity: 0.11,
+                        highlightOpacity: 0.18
                     )
                 }
                 .clipShape(shape)
@@ -125,8 +125,8 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                     IexaNativeGlassFill(
                         shape: shape,
                         lightTintOpacity: 0.88,
-                        darkTintOpacity: 0.24,
-                        highlightOpacity: 0.22
+                        darkTintOpacity: 0.11,
+                        highlightOpacity: 0.18
                     )
                 }
                 .clipShape(shape)
@@ -161,7 +161,7 @@ private struct IexaLegacyToolbarGlassChrome<S: InsettableShape>: ViewModifier {
     }
 
     private var toolbarShadowColor: Color {
-        Color.black.opacity(theme.isDark ? 0.24 : 0.10)
+        Color.black.opacity(theme.isDark ? 0.18 : 0.10)
     }
 }
 
