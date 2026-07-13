@@ -3481,7 +3481,7 @@ final class ChatViewModel {
                 controllerPolicy = "Inspect the observation, choose one different bounded iexa_alpine step, and continue the agent loop."
             } else {
                 verdict = "ready_for_final_summary"
-                controllerPolicy = "Do not emit another iexa_alpine block unless the user asks for more work. Summarize the verified result."
+                controllerPolicy = "Stop tool use. Give only the final answer: the concrete result, changed paths, or immediate error/next action if needed. Do not narrate the steps; tool progress is already visible in the step card."
             }
             lines.append("  controller_verdict: \(verdict)")
             lines.append("  controller_policy:")
@@ -9759,8 +9759,6 @@ final class ChatViewModel {
             lines.append("")
             lines.append("\(details.joined(separator: "，"))。")
         }
-        lines.append("")
-        lines.append("详细输出已保留在工具步骤和本地上下文中。")
         return lines.joined(separator: "\n")
     }
 
@@ -12169,8 +12167,8 @@ final class ChatViewModel {
                     acc.replace("")
                     updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
                 }
-                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage())
-                calls = [continuationCall]
+                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage(suggestedCall: continuationCall))
+                continue
             } else if !calls.isEmpty {
                 pendingBrowserContinuationCall = nil
             }
@@ -12274,7 +12272,7 @@ final class ChatViewModel {
                     "role": "system",
                     "content": """
                     \(guardMessage)
-                    请现在根据已经返回的本地工具结果回答用户：说明已完成什么、还有什么未解决、下一步不同的操作是什么。不要再调用工具，也不要引用内部循环保护文案。
+                    请现在进入最终答案模式：只根据已有工具结果给用户结论。不要再调用工具，不要引用内部循环保护文案，不要复述“我先/我正在/我会继续”的执行过程；工具过程已经在步骤卡里展示。只保留用户真正需要的结果、失败原因、文件路径或下一步动作。
                     """
                 ])
                 request.messages = apiMessages
@@ -12320,14 +12318,14 @@ final class ChatViewModel {
             "role": "system",
             "content": """
             \(maxStepMessage)
-            请直接根据已有工具结果回答用户，不要再调用工具，也不要引用内部循环保护文案。
+            请进入最终答案模式：只给用户可用结论，不要再调用工具，也不要引用内部循环保护文案。不要复述已执行步骤；步骤卡已经展示过程。失败时只说最后的具体错误和下一步不同处理方式。
             """
         ])
         request.messages = apiMessages
         Self.disableAgentToolsForResultContinuation(&request)
         let fallback = Self.localAlpineNativeLoopBlockedFallbackMessage(maxStepMessage)
         return try await streamFinalWithoutLocalAlpineTools(
-            reason: "Do not call more tools. Summarize the available Local Alpine result or blocker now.",
+            reason: "Do not call more tools. Output only the available Local Alpine result or blocker.",
             fallback: fallback
         )
     }
@@ -12442,8 +12440,8 @@ final class ChatViewModel {
                     acc.replace("")
                     updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
                 }
-                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage())
-                calls = [continuationCall]
+                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage(suggestedCall: continuationCall))
+                continue
             } else if !calls.isEmpty {
                 pendingBrowserContinuationCall = nil
             }
@@ -12594,12 +12592,12 @@ final class ChatViewModel {
             "role": "system",
             "content": """
             \(message)
-            请直接根据已有工具结果回答用户，不要继续调用工具，也不要引用内部循环保护文案。
+            请进入最终答案模式：只给用户可用结论，不要继续调用工具，也不要引用内部循环保护文案或复述执行过程。
             """
         ])
         return try await streamFinalWithoutTools(
-            reason: "请不要继续调用工具，直接总结已有结果或当前阻塞原因。",
-            fallback: "我先停下，避免继续重复调用本地工具。\n\n\(message)"
+            reason: "请不要继续调用工具；只输出已有结果或当前阻塞原因。",
+            fallback: message
         )
     }
 
@@ -14493,6 +14491,9 @@ final class ChatViewModel {
         if anyJSONBoolValue(in: result.summary, key: "next_action_required", equals: true) {
             return false
         }
+        if browserToolResultLooksLikeInteractiveIntermediate(call: call, toolContent: result.summary) {
+            return false
+        }
         if browserToolResultLooksComplete(call: call, toolContent: result.summary) {
             return true
         }
@@ -14530,6 +14531,10 @@ final class ChatViewModel {
             .replacingOccurrences(of: "_", with: ".")
             .lowercased()
         switch normalized {
+        case "open", "navigate", "browser.open", "browser.navigate":
+            return "browser.open"
+        case "find.elements", "browser.find.elements":
+            return "browser.find_elements"
         case "get.readable", "readable", "read.webpage":
             return "browser.readable"
         case "get.text", "text":
@@ -14677,13 +14682,7 @@ final class ChatViewModel {
     private static func localAlpineNativeLoopBlockedFallbackMessage(_ blockedMessage: String) -> String {
         let cleaned = localAlpineNativeLoopGuardModelMessage(blockedMessage)
             ?? "本地工具已停止继续执行。"
-        return """
-        我先停下，避免继续重复执行同一个本地工具。
-
-        \(cleaned)
-
-        我会根据已有工具结果直接总结；如果还没完成，需要换一个不同的浏览器操作或让用户手动接管当前页面。
-        """
+        return cleaned
     }
 
     private static func nativeToolSilentFailureError(kind: String) -> Error {
@@ -14819,19 +14818,30 @@ final class ChatViewModel {
         let cleaned = blockedMessage
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return """
-        我先停下，避免继续重复调用同一个工具。
-
-        \(cleaned)
-        """
+        return cleaned.isEmpty ? "本地工具已停止继续执行。" : cleaned
     }
 
-    private static func localNativeBrowserForcedContinuationSystemMessage() -> [String: Any] {
+    private static func localNativeBrowserForcedContinuationSystemMessage(
+        suggestedCall: LocalAlpineNativeToolCall? = nil
+    ) -> [String: Any] {
+        let suggestedInstruction: String
+        if let suggestedCall {
+            let arguments = suggestedCall.arguments.trimmingCharacters(in: .whitespacesAndNewlines)
+            suggestedInstruction = """
+
+            Suggested next primitive, for reference only:
+            tool: \(suggestedCall.name)
+            arguments: \(arguments.isEmpty ? "{}" : arguments)
+            The model must decide and emit the actual tool call itself; the app must not execute this suggestion directly.
+            """
+        } else {
+            suggestedInstruction = ""
+        }
         [
             "role": "system",
             "content": """
             The previous browser result was an intermediate page-operation state, but the assistant did not issue the next browser tool call. The app is continuing the same shared browser session automatically.
-            Treat the previous prose as premature. Continue from the current screenshot/read result after this forced tool call. Do not navigate/reload the same URL unless explicitly required. Stop only after the user's page task is complete, a final file/result exists, or the tool explicitly reports requires_user_verification.
+            Treat the previous prose as premature. Continue from the current screenshot/read result by emitting the next `browser_use` tool call yourself. Do not navigate/reload the same URL unless explicitly required. Stop only after the user's page task is complete, a final file/result exists, or the tool explicitly reports requires_user_verification.\(suggestedInstruction)
             """
         ]
     }
@@ -20029,7 +20039,7 @@ final class ChatViewModel {
 
         Browser override: use `browser_use` like Minis. The shared browser is an iPhone-size mobile Safari/WKWebView by default, not desktop Chrome. Do not switch to `desktop_chrome` or desktop-sized viewport unless the user explicitly asks for desktop mode or the mobile page hides the required control. For interactive pages, open/navigate first, use `screenshot` to see the current viewport, then issue one primitive action (`click`, `type`, `scroll`, `find_elements`, `get_text`, `get_readable`, `get_backbone`, `scroll_and_collect`, `wait_for_dom_stable`, `wait_for_image`, `fetch`) and screenshot/read again. After pressing a page generate/export/download button, wait for the real result with `wait_for_image` or `wait_for_dom_stable`; do not stop at the click. The hidden tool-only screenshot is primary evidence for visual interaction; DOM/text is auxiliary.
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. Use `browser_use` for interactive page work. Use `find_elements` with `scan_page:true` to discover controls across the full page, reuse returned `nodeId`/`node_id` for the next click/type/hover, use `screenshot` for visual state, and use viewport coordinates when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or the tool explicitly returns `requires_user_verification:true`. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. If verification is required, the shared browser stays on the same page; after the user completes it, continue from the next screenshot/read result without reopening/reloading the same URL.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. Use `browser_use` for interactive page work. Use `find_elements` with `scan_page:true` to discover controls across the full page, reuse returned `nodeId`/`node_id` for the next click/type/hover, use `screenshot` for visual state, and use viewport coordinates when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or the tool explicitly returns `requires_user_verification:true`. Do not narrate intermediate browser work in chat; progress belongs in the tool card. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. If verification is required, the shared browser stays on the same page; after the user completes it, continue from the next screenshot/read result without reopening/reloading the same URL.
 
         Tool call style: when a real or fallback browser/native tool can satisfy the user's request, call it directly instead of only explaining. Infer the search query, URL target, page control, or follow-up intent from the latest user message and visible context; use reasonable safe defaults; ask only when the request is genuinely ambiguous, needs credentials, or would affect data outside the requested scope.
 
@@ -20037,7 +20047,7 @@ final class ChatViewModel {
         """ : ""
         let officeInstructions = includeOfficeTools ? """
 
-        For Office/PDF actions, call real function tools (`office_create_excel`, `office_create_ppt`, `office_create_word`, `office_create_pdf`, `office_delete`) when present, otherwise emit one `iexa_native` fallback action. For deletion/removal, use `file_url` from the latest Office context or `latest:true` for "刚刚那个/latest"; deletion removes the generated artifact folder, previews, and draft metadata. For create/regenerate/modify requests, build a concise structured draft with `title`, `file_name`, content (`sheets`, `slides`, or `sections`), and a concrete `theme` when visual style matters. Preserve prior draft content for revisions, apply the requested changes, and generate a new file instead of answering with only a plan. For luxury/black-gold/premium requests, use dark background plus gold accent; for screenshot/template requests, approximate colors, layout, density, and decoration. For PDF choose `format:"slides"` or `format:"document"`; use `source_url` when converting a visible latest Office file. After the tool result returns, answer from that result and explain exact local permission/state failures when any tool fails.
+        For Office/PDF actions, call real function tools (`office_create_excel`, `office_create_ppt`, `office_create_word`, `office_create_pdf`, `office_delete`) when present, otherwise emit one `iexa_native` fallback action. For deletion/removal, use `file_url` from the latest Office context or `latest:true` for "刚刚那个/latest"; deletion removes the generated artifact folder, previews, and draft metadata. For create/regenerate/modify requests, build a concise structured draft with `title`, `file_name`, content (`sheets`, `slides`, or `sections`), and a concrete `theme` when visual style matters. Preserve prior draft content for revisions, apply the requested changes, and generate a new file instead of answering with only a plan. For luxury/black-gold/premium requests, use dark background plus gold accent; for screenshot/template requests, approximate colors, layout, density, and decoration. For PDF choose `format:"slides"` or `format:"document"`; use `source_url` when converting a visible latest Office file. After the tool result returns, answer from that result only: file/result first, no generation-process recap; explain exact local permission/state failures when any tool fails.
         """ : ""
         let shortcutsInstructions = includeShortcutsTools ? """
 
@@ -20103,8 +20113,24 @@ final class ChatViewModel {
         - If the user asks to run recent code from the conversation, save the latest runnable code block under `/mnt/iexa/shared`, run it with the right interpreter/compiler, and summarize the real output.
         - If the user asks to generate, save, show, display, or send images, write each final image under `/mnt/iexa/shared` and print every final path, preferably one `READY: /mnt/iexa/shared/<name>.png` line per image. If the user requests multiple images, create distinct variants rather than duplicating one file: vary composition, angle, lighting, background details, colors, or small visual details while preserving the user's core prompt. The host app will read PNG/JPEG/WebP/GIF/BMP/AVIF files from `/mnt/iexa` and attach them to the chat bubble automatically. Do not claim you cannot send or display images after creating them.
         - If a tool result shows failure, choose one different bounded fix/diagnostic step or stop with the concrete blocker. Never repeat the exact same failed command.
-        - If a tool result shows success and the user goal is complete, stop tool use and answer normally.
+        - If a tool result shows success and the user goal is complete, stop tool use and answer with only the result, changed paths, or key output. Do not recap the executed steps unless the user explicitly asks for logs or a step-by-step explanation.
         [/Local Alpine client tool registry]
+        """
+    }
+
+    private static func taskExecutionOutputPolicySystemContext() -> String {
+        """
+        [Task execution output policy]
+        Iexa displays tool progress, intermediate observations, screenshots, command output, and step cards separately from the assistant's final chat text.
+        Default final-answer style for tool-backed tasks:
+        - Put the final result first.
+        - Keep the chat body concise; one short paragraph or a few bullets is enough unless the user asks for detail.
+        - Do not narrate process phrases such as “我先…”, “我正在…”, “接下来我会…”, “已执行若干步骤…”, or “我打开/搜索/检查了…”.
+        - Do not duplicate command logs, browser observations, screenshots, or tool-card details in the chat body.
+        - Mention only user-useful facts: result, generated/changed file paths, source links, key output, exact error, or next required user action.
+        - If the user explicitly asks for steps, logs, reasoning, debugging details, or a postmortem, provide the requested detail normally.
+        This should feel quieter than Minis during execution while keeping Iexa's step cards available for audit.
+        [/Task execution output policy]
         """
     }
 
@@ -21680,7 +21706,10 @@ final class ChatViewModel {
                 && shouldExposeLocalImageNativeTools(for: latestUserTextForLocalAlpine)
         )
         let feedbackPreferenceContext = AssistantFeedbackPreferenceStore.systemContext()
-        let combinedSystemPrompt = [asyncEffectiveSP, modelCapabilityContext, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSoulContext, localSkillsContext, memoryContext, feedbackPreferenceContext]
+        let taskExecutionOutputPolicyContext = (alpineContext != nil || alpineExecutionStateContext != nil || localNativeToolContext != nil)
+            ? Self.taskExecutionOutputPolicySystemContext()
+            : nil
+        let combinedSystemPrompt = [asyncEffectiveSP, taskExecutionOutputPolicyContext, modelCapabilityContext, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSoulContext, localSkillsContext, memoryContext, feedbackPreferenceContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
@@ -22260,6 +22289,11 @@ final class ChatViewModel {
         }
         let effectiveModelId = selectedModelId ?? message.model ?? conversation?.model ?? ""
         if shouldKeepMediaGenerationRequestOffLocalAlpine(latestUserText, modelId: effectiveModelId) {
+            return false
+        }
+        if localAlpineHasRealResultSinceLastUser(before: messageId),
+           Self.localAlpineAssistantProseCanEndTurn(content) {
+            localAlpineAgentExecutedMessageIds.insert(messageId)
             return false
         }
         guard !localAlpineMissingToolCorrectionParentIds.contains(messageId) else {
@@ -23929,7 +23963,13 @@ final class ChatViewModel {
         let instruction = """
         [Local native tool result]
         The latest Local Native message above is a real on-device iOS tool result for device info, clipboard, local notification, location, weather, calendar, local browser/web reading, local Office document generation, or iOS Shortcuts launching. Do not emit another `iexa_native` block in this turn.
-        Reply to the user in normal language only. If the local browser tool succeeded, answer from the returned page/search content and cite page titles/URLs plainly. If an Office document was generated, tell the user the file and previews are attached in the chat. If an iOS Shortcut was run or opened, summarize the requested shortcut action and mention any system/user confirmation requirement. If it failed, explain the permission/state problem and the next user action.
+        Reply to the user in normal language only, using Minis-style brevity: final result first, no process narration.
+        - Do not say you are opening/searching/reading/checking/running unless the user specifically asked for an execution log.
+        - Do not recap tool calls, intermediate observations, or hidden loop-control reasons; the app shows tool progress separately.
+        - If the local browser tool succeeded, answer from the returned page/search content and cite page titles/URLs plainly.
+        - If an Office document was generated, tell the user the file and previews are attached in the chat.
+        - If an iOS Shortcut was run or opened, state the requested shortcut action and any system/user confirmation requirement.
+        - If it failed, give the concrete permission/state problem and the next user action.
         [/Local native tool result]
         """
         appendSystemInstruction(instruction, marker: "[Local native tool result]", to: &messages)
@@ -23994,6 +24034,28 @@ final class ChatViewModel {
         return messages[startIndex...].filter {
             Self.isLocalAlpineAgentResult($0) && !Self.isLocalAlpineProtocolCorrectionMessage($0)
         }.count
+    }
+
+    private func localAlpineHasRealResultSinceLastUser(before messageId: String? = nil) -> Bool {
+        guard let messages = conversation?.messages,
+              let lastUserIndex = messages.lastIndex(where: {
+                  $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+              }) else { return false }
+        let startIndex = messages.index(after: lastUserIndex)
+        guard startIndex < messages.endIndex else { return false }
+
+        let endIndex: Array<ChatMessage>.Index
+        if let messageId,
+           let messageIndex = messages.firstIndex(where: { $0.id == messageId }) {
+            endIndex = messageIndex
+        } else {
+            endIndex = messages.endIndex
+        }
+        guard startIndex < endIndex else { return false }
+
+        return messages[startIndex..<endIndex].contains {
+            Self.isLocalAlpineAgentResult($0) && !Self.isLocalAlpineProtocolCorrectionMessage($0)
+        }
     }
 
     private func appendLocalAlpineAgentLimitMessage(parentId: String) {
@@ -24330,7 +24392,7 @@ final class ChatViewModel {
             pythonRepairInstruction = ""
         }
         let content = """
-        我先停下，避免继续死循环。
+        Local Alpine 执行结果
 
         同类错误已经连续出现多次，最后一次命令退出码是 `\(result.exitCode.map(String.init) ?? "unknown")`。
 
@@ -24356,11 +24418,9 @@ final class ChatViewModel {
         let content = """
         Local Alpine 执行结果
 
-        我先停下，避免继续空转。
-
         原因：\(reason)
 
-        下一步需要模型换一种更明确的本地操作，比如读取目标文件、列目录、运行一个有界验证命令，或直接总结当前已完成的结果。
+        下一步需要换一种更明确的本地操作，比如读取目标文件、列目录、运行一个有界验证命令，或直接总结当前已完成的结果。
         """
         appendLocalAlpineSystemResult(parentId: parentId, content: content)
     }
@@ -24796,6 +24856,10 @@ final class ChatViewModel {
     private func isLocalAlpineAgentStillNeeded(after resultMessageId: String) -> Bool {
         guard let messages = conversation?.messages,
               let resultIndex = messages.firstIndex(where: { $0.id == resultMessageId }) else { return false }
+        if Self.isLocalAlpineAgentResult(messages[resultIndex]),
+           !localAlpineResultNeedsFollowUp(after: resultMessageId) {
+            return false
+        }
         if let resultNode = conversation?.history.nodes[resultMessageId],
            let parentId = resultNode.parentId,
            let nodes = conversation?.history.nodes,
@@ -26005,14 +26069,16 @@ final class ChatViewModel {
         let instruction = """
         [Local Alpine final summary]
         The latest Local Alpine message above is a real command execution result. Do not emit `iexa_alpine` in this turn.
-        Reply to the user in normal language only.
-        Summarize the completed operation concisely:
-        - For inspection/listing commands, state the concrete result the user asked for.
-        - For script/project commands, say what ran, whether it succeeded, and the key output.
-        - If files were created or changed, mention their paths.
+        Reply to the user in normal language only, using Minis-style brevity: final result first, no process narration.
+        Output policy:
+        - Do not narrate tool execution, intermediate steps, or intent phrases like “我先/我正在/接下来我会/已执行若干步骤”.
+        - Do not recap command logs or say “详细输出在步骤卡里” unless the user asks for logs or the output was too long to quote safely.
+        - For inspection/listing commands, state only the concrete result the user asked for.
+        - For script/project commands, state whether it succeeded and the key output/error.
+        - If files were created or changed, mention only the relevant paths.
         - If the command failed, explain the immediate error and the next fix path, but do not run another command until the user asks.
         - When describing source code, prefer prose, identifiers, line numbers, and behavior. Short code examples are allowed only when they clarify the specific issue: quote exact snippets with indentation preserved from the Local Alpine observation, or label them as illustrative snippets. Keep them short.
-        - Do not reproduce full command output, file contents, source code, HTML/CSS/JS, markdown tables, or long directory listings. If the output is long, mention only the important filenames/counts/errors and say that the detailed tool output is available in the step card.
+        - Do not reproduce full command output, file contents, source code, HTML/CSS/JS, markdown tables, or long directory listings.
         Keep it short and based only on the real Local Alpine output.
         Always output at least one visible sentence. Do not output JSON tool instructions, `iexa_alpine` blocks, or protocol tags.
         [/Local Alpine final summary]
@@ -26072,6 +26138,45 @@ final class ChatViewModel {
         let visible = LocalAlpineAgentService.visibleContent(from: content)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return visible
+    }
+
+    private static func localAlpineAssistantProseCanEndTurn(_ content: String) -> Bool {
+        if contentContainsLocalAlpineInstruction(content) {
+            return false
+        }
+        let visible = localAlpineFinalSummaryVisibleContent(from: content)
+        let normalized = visible.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+
+        let protocolLeakMarkers = [
+            "[local alpine continuation]",
+            "[/local alpine continuation]",
+            "[local alpine missing tool correction]",
+            "[/local alpine missing tool correction]",
+            "[local alpine final summary]",
+            "[/local alpine final summary]",
+            "controller_verdict:",
+            "controller_policy:",
+            "needs_next_tool",
+            "ready_for_final_summary"
+        ]
+        if protocolLeakMarkers.contains(where: { normalized.contains($0) }) {
+            return false
+        }
+
+        let pendingToolMarkers = [
+            "```iexa_alpine",
+            "<iexa_alpine",
+            "\"iexa_alpine\"",
+            "language `iexa_alpine`",
+            "emit exactly one",
+            "fenced markdown block"
+        ]
+        if pendingToolMarkers.contains(where: { normalized.contains($0) }) {
+            return false
+        }
+
+        return true
     }
 
     private func updateAssistantMessage(
