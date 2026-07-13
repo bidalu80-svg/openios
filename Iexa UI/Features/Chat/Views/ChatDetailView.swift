@@ -1050,7 +1050,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
     private static func statusSteps(
         from statusHistory: [ChatStatusUpdate],
         officePreviewReferences: [String],
-        officeDocumentFiles: [ChatMessageFile]
+        officeDocumentFiles: [ChatMessageFile],
+        generatedImageFiles: [ChatMessageFile] = []
     ) -> [AgentActivityStep] {
         let groups = collapsedStatusGroups(from: statusHistory) { _, action in
             if action.contains("local_alpine_agent") || action.contains("local_alpine_tool") {
@@ -1080,7 +1081,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let previewThumbnail = statusThumbnailReference(
                 for: group.statuses,
                 action: action,
-                officePreviewReferences: officePreviewReferences
+                officePreviewReferences: officePreviewReferences,
+                generatedImageFiles: generatedImageFiles
             )
             let previewURL = statusOpenURL(for: group.statuses, action: action)
             let previewFile = action.contains("local_office_agent") ? officeDocumentFiles.first : nil
