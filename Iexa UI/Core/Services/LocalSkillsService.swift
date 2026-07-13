@@ -80,7 +80,6 @@ final class LocalSkillsService {
     func contextPrompt() -> String? {
         let enabled = enabledSkills
             .filter { !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .prefix(6)
         guard !enabled.isEmpty else { return nil }
         let blocks = enabled.map { skill in
             """

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import PhotosUI
 import UniformTypeIdentifiers
 import AVFoundation
@@ -10,6 +11,7 @@ import MarkdownView
 import Translation
 import WebKit
 import os.log
+import Darwin
 
 // MARK: - Chat Detail View
 
@@ -3257,6 +3259,8 @@ struct ChatDetailView: View {
                 signature &+= step.id.hashValue
                 signature &+= step.title.hashValue
                 signature &+= step.detail.hashValue
+                signature &+= Self.lightweightTranscriptTextSignature(step.outputPreview)
+                signature &+= Self.lightweightTranscriptTextSignature(step.fullOutput ?? "")
                 signature &+= step.isRunning ? 31 : 7
                 signature &+= step.failed ? 37 : 11
                 signature &+= step.durationText?.hashValue ?? 0
@@ -4447,7 +4451,10 @@ struct ChatDetailView: View {
                 .themed()
         }
         .sheet(item: $agentFloatingStepPreview) { item in
-            AgentFloatingStepPreviewSheet(item: item)
+            AgentFloatingStepPreviewSheet(
+                item: item,
+                liveActivity: agentFloatingDisplayItem
+            )
                 .themed()
         }
         .sheet(item: $previewWebURL) { item in
@@ -11501,12 +11508,12 @@ private struct AgentToolPreviewPop: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(previewTitle)
-                    .font(.system(size: 6.6, weight: .bold, design: .monospaced))
+                    .font(.system(size: 6.1, weight: .bold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.88))
                     .lineLimit(1)
 
                 Text(previewSubtitle)
-                    .font(.system(size: 5.6, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 5.1, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.66))
                     .lineLimit(1)
 
@@ -11514,11 +11521,15 @@ private struct AgentToolPreviewPop: View {
                     AgentToolPreviewMiniDiff(lines: diffLines)
                 } else if !hasThumbnail {
                     Text(previewText)
-                        .font(.system(size: 5.6, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 5.0, weight: .semibold, design: .monospaced))
                         .foregroundStyle(Color(red: 0.30, green: 0.63, blue: 1.0))
                         .lineLimit(2)
                         .truncationMode(.tail)
                 }
+
+                Spacer(minLength: 0)
+
+                AgentToolResourceFooter(compact: true)
             }
             .padding(.horizontal, 5)
             .padding(.vertical, 4)
@@ -11779,6 +11790,117 @@ private struct AgentToolPreviewWebThumbnailView: UIViewRepresentable {
 
     final class Coordinator {
         var loadedURL: URL?
+    }
+}
+
+private struct AgentToolResourceFooter: View {
+    let compact: Bool
+
+    @State private var snapshot = AgentToolResourceSnapshot.current()
+
+    var body: some View {
+        HStack(spacing: compact ? 4 : 8) {
+            Text("CPU \(snapshot.cpuText)")
+            Text("MEM \(snapshot.memoryText)")
+        }
+        .font(.system(size: compact ? 4.4 : 10, weight: .semibold, design: .monospaced))
+        .foregroundStyle(.white.opacity(compact ? 0.52 : 0.66))
+        .lineLimit(1)
+        .minimumScaleFactor(0.72)
+        .monospacedDigit()
+        .frame(maxWidth: .infinity, alignment: alignment)
+        .onReceive(Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()) { _ in
+            snapshot = AgentToolResourceSnapshot.current()
+        }
+    }
+
+    private var alignment: Alignment {
+        compact ? .leading : .trailing
+    }
+}
+
+private struct AgentToolResourceSnapshot: Equatable {
+    let cpuPercent: Double
+    let residentBytes: UInt64
+    let totalBytes: UInt64
+
+    var cpuText: String {
+        "\(Int(cpuPercent.rounded()))%"
+    }
+
+    var memoryText: String {
+        "\(Self.memoryText(residentBytes))/\(Self.memoryText(totalBytes))"
+    }
+
+    static func current() -> AgentToolResourceSnapshot {
+        AgentToolResourceSnapshot(
+            cpuPercent: currentProcessCPUUsage(),
+            residentBytes: currentResidentMemoryBytes(),
+            totalBytes: ProcessInfo.processInfo.physicalMemory
+        )
+    }
+
+    private static func memoryText(_ bytes: UInt64) -> String {
+        guard bytes > 0 else { return "0 MB" }
+        let gb = Double(bytes) / 1_073_741_824.0
+        if gb >= 1 {
+            return String(format: "%.1f GB", gb)
+        }
+        let mb = Double(bytes) / 1_048_576.0
+        return "\(Int(mb.rounded())) MB"
+    }
+
+    private static func currentResidentMemoryBytes() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPointer in
+                task_info(
+                    mach_task_self_,
+                    task_flavor_t(TASK_VM_INFO),
+                    reboundPointer,
+                    &count
+                )
+            }
+        }
+        guard result == KERN_SUCCESS else { return 0 }
+        return UInt64(info.phys_footprint)
+    }
+
+    private static func currentProcessCPUUsage() -> Double {
+        var threadList: thread_act_array_t?
+        var threadCount = mach_msg_type_number_t(0)
+        let result = task_threads(mach_task_self_, &threadList, &threadCount)
+        guard result == KERN_SUCCESS, let threadList else { return 0 }
+        defer {
+            vm_deallocate(
+                mach_task_self_,
+                vm_address_t(UInt(bitPattern: threadList)),
+                vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.stride)
+            )
+        }
+
+        var totalUsage: Double = 0
+        for index in 0..<Int(threadCount) {
+            var threadInfo = thread_basic_info_data_t()
+            var threadInfoCount = mach_msg_type_number_t(
+                MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<integer_t>.size
+            )
+            let infoResult = withUnsafeMutablePointer(to: &threadInfo) { pointer in
+                pointer.withMemoryRebound(to: integer_t.self, capacity: Int(threadInfoCount)) { reboundPointer in
+                    thread_info(
+                        threadList[index],
+                        thread_flavor_t(THREAD_BASIC_INFO),
+                        reboundPointer,
+                        &threadInfoCount
+                    )
+                }
+            }
+            guard infoResult == KERN_SUCCESS else { continue }
+            guard (threadInfo.flags & TH_FLAGS_IDLE) == 0 else { continue }
+            totalUsage += Double(threadInfo.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
+        }
+        return min(max(totalUsage, 0), 999)
     }
 }
 
@@ -12404,20 +12526,34 @@ private struct LocalAlpineDiffPreviewView: View {
 
 private struct AgentFloatingStepPreviewSheet: View {
     let item: AgentFloatingStepPreviewItem
+    let liveActivity: AgentActivityItem?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @State private var selectedIndex: Int
     @State private var copied = false
 
-    init(item: AgentFloatingStepPreviewItem) {
+    init(item: AgentFloatingStepPreviewItem, liveActivity: AgentActivityItem?) {
         self.item = item
+        self.liveActivity = liveActivity
         let maxIndex = max(0, item.activity.steps.count - 1)
         _selectedIndex = State(initialValue: min(max(item.initialIndex, 0), maxIndex))
     }
 
+    private var activity: AgentActivityItem {
+        guard let liveActivity,
+              liveActivity.hasConcreteSteps,
+              liveActivity.id == item.activity.id || liveActivity.steps.contains(where: { liveStep in
+                  item.activity.steps.contains(where: { $0.id == liveStep.id })
+              })
+        else {
+            return item.activity
+        }
+        return liveActivity
+    }
+
     private var steps: [AgentActivityStep] {
-        item.activity.steps
+        activity.steps
     }
 
     private var clampedIndex: Int {
@@ -12488,6 +12624,9 @@ private struct AgentFloatingStepPreviewSheet: View {
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.hidden)
+        .onChange(of: steps.count) { _, count in
+            selectedIndex = min(max(selectedIndex, 0), max(count - 1, 0))
+        }
     }
 
     private var title: String {
@@ -12497,9 +12636,21 @@ private struct AgentFloatingStepPreviewSheet: View {
     private var previewArea: some View {
         Group {
             if let step = selectedStep {
-                ScrollView {
-                    stepPreview(step)
-                        .padding(16)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        stepPreview(step)
+                            .padding(16)
+                        Color.clear
+                            .frame(height: 1)
+                            .id("agent-terminal-preview-bottom")
+                    }
+                    .onAppear {
+                        scrollPreviewToBottom(proxy)
+                    }
+                    .onChange(of: previewScrollSignature) { _, _ in
+                        guard selectedStep?.isRunning == true else { return }
+                        scrollPreviewToBottom(proxy)
+                    }
                 }
             } else {
                 ContentUnavailableView("暂无步骤", systemImage: "checklist")
@@ -12576,7 +12727,8 @@ private struct AgentFloatingStepPreviewSheet: View {
     private func terminalPreview(_ step: AgentActivityStep) -> some View {
         AgentLazyOutputPreview(
             text: terminalText(for: step),
-            style: .terminal
+            style: .terminal,
+            isRunning: step.isRunning
         )
     }
 
@@ -12646,6 +12798,24 @@ private struct AgentFloatingStepPreviewSheet: View {
         .padding(.top, 14)
         .padding(.bottom, 18)
         .background(theme.surfaceContainer.opacity(theme.isDark ? 0.92 : 0.98))
+    }
+
+    private var previewScrollSignature: Int {
+        guard let step = selectedStep else { return 0 }
+        var signature = step.id.hashValue
+        signature &+= step.isRunning ? 31 : 7
+        signature &+= step.outputPreview.hashValue
+        signature &+= (step.fullOutput ?? "").hashValue
+        signature &+= (step.outputReference ?? "").hashValue
+        return signature
+    }
+
+    private func scrollPreviewToBottom(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.18)) {
+                proxy.scrollTo("agent-terminal-preview-bottom", anchor: .bottom)
+            }
+        }
     }
 
     private func movePage(_ delta: Int) {
@@ -12731,24 +12901,46 @@ private struct AgentLazyOutputPreview: View {
 
     let lines: [String]
     let style: Style
+    let isRunning: Bool
 
     @Environment(\.theme) private var theme
 
-    init(text: String, style: Style) {
+    init(text: String, style: Style, isRunning: Bool = false) {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         self.lines = Self.softWrappedLines(normalized.isEmpty ? "（无内容）" : normalized)
         self.style = style
+        self.isRunning = isRunning
     }
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: 2) {
-            ForEach(lines.indices, id: \.self) { index in
-                Text(lines[index])
-                    .font(font)
-                    .foregroundStyle(foreground)
-                    .lineLimit(nil)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: isTerminal ? 9 : 2) {
+            if isTerminal {
+                HStack(spacing: 8) {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(isRunning ? Color.green : Color.white.opacity(0.42))
+                            .frame(width: 6, height: 6)
+                        Text(isRunning ? "实时" : "完成")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.74))
+                    }
+
+                    Spacer(minLength: 8)
+
+                    AgentToolResourceFooter(compact: false)
+                        .frame(maxWidth: 210, alignment: .trailing)
+                }
+            }
+
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(lines.indices, id: \.self) { index in
+                    Text(lines[index])
+                        .font(font)
+                        .foregroundStyle(foreground)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -12757,10 +12949,15 @@ private struct AgentLazyOutputPreview: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
+    private var isTerminal: Bool {
+        if case .terminal = style { return true }
+        return false
+    }
+
     private var font: Font {
         switch style {
         case .terminal:
-            return .system(size: 15, weight: .semibold, design: .monospaced)
+            return .system(size: 13, weight: .semibold, design: .monospaced)
         case .plain:
             return .system(size: 14, weight: .regular, design: .monospaced)
         }

@@ -1314,6 +1314,15 @@ actor LocalAlpineTerminalService {
             )
         }
 
+        if stdinInput == nil, let onOutput = onOutput {
+            return await executeStreaming(
+                command: trimmed,
+                cwd: cwd,
+                cwdIsRuntimePath: cwdIsRuntimePath,
+                onOutput: onOutput
+            )
+        }
+
         let status = status()
         guard let rootArchiveURL = bundledRootFSURL() else {
             return LocalAlpineCommandResult(
@@ -1491,7 +1500,22 @@ actor LocalAlpineTerminalService {
             || lowered.contains("/ping ") {
             return min(defaultTimeout, 20)
         }
+        if lowered.range(of: #"(^|[;&|()\s])(?:dig|host)(\s|$)"#, options: .regularExpression) != nil
+            || lowered.contains("/dig ")
+            || lowered.contains("/host ") {
+            return min(defaultTimeout, 30)
+        }
         return defaultTimeout
+    }
+
+    private func effectiveStreamingTimeout(for command: String) -> TimeInterval? {
+        let lowered = command.lowercased()
+        if lowered.range(of: #"(^|[;&|()\s])(?:dig|host)(\s|$)"#, options: .regularExpression) != nil
+            || lowered.contains("/dig ")
+            || lowered.contains("/host ") {
+            return 30
+        }
+        return nil
     }
 
     private func persistentAgentSessionID(sessionKey: String, runtimeCWD: String) async -> (sessionID: Int?, message: String?) {
@@ -1738,6 +1762,7 @@ actor LocalAlpineTerminalService {
             runtimeCWD: runtimeCWD,
             rootArchiveURL: runtimeRootFSURL,
             workspaceURL: workspaceURL,
+            timeoutSeconds: effectiveStreamingTimeout(for: trimmed),
             onSessionStart: onSessionStart,
             onOutput: onOutput
         )
@@ -2785,6 +2810,7 @@ actor LocalAlpineTerminalService {
         runtimeCWD: String,
         rootArchiveURL: URL,
         workspaceURL: URL,
+        timeoutSeconds: TimeInterval?,
         onSessionStart: (@MainActor @Sendable (Int?) -> Void)?,
         onOutput: @escaping @MainActor @Sendable (String) -> Void
     ) async -> LocalAlpineCommandResult? {
@@ -2831,6 +2857,7 @@ actor LocalAlpineTerminalService {
         var emptyPollsAfterExit = 0
         var openTargets = Set<String>()
         var openRequests: [LocalAlpineOpenRequest] = []
+        let deadline = timeoutSeconds.map { Date().addingTimeInterval(max(1, $0)) }
 
         func cleanedOutputAndCollectOpenRequests(_ output: String) -> String {
             let parsed = LocalAlpineOpenMarkerParser.extract(from: output)
@@ -2855,6 +2882,15 @@ actor LocalAlpineTerminalService {
         }
 
         while !Task.isCancelled {
+            if let deadline = deadline, Date() >= deadline {
+                _ = LocalAlpineNativeRuntime.shared.interruptSession(sessionID: sessionID)
+                let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
+                let timedOutOutput = trimTrailingNewlines(parsed.rawOutput)
+                let suffix = "[Command timed out after \(Int(max(1, timeoutSeconds ?? 0)))s]"
+                let output = timedOutOutput.isEmpty ? suffix : "\(timedOutOutput)\n\(suffix)"
+                return commandResult(rawOutput: output, exitCode: 124)
+            }
+
             let chunk = LocalAlpineNativeRuntime.shared.readSessionOutput(sessionID: sessionID)
             if !chunk.isEmpty {
                 rawOutput += chunk
@@ -3491,9 +3527,9 @@ actor LocalAlpineTerminalService {
         iexa_refresh_toolchain_env
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-07-07.4
+          _iexa_bootstrap_version=2026-07-13.1
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
-          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
+          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ -x "$_iexa_bootstrap_bin/dig" ] && [ -x "$_iexa_bootstrap_bin/host" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:${PATH:-}"
             export BROWSER=iexa-open
             hash -r 2>/dev/null || true
@@ -3766,8 +3802,43 @@ actor LocalAlpineTerminalService {
           cat > "$_iexa_bootstrap_bin/top" <<'IEXA_TOP_FALLBACK'
         \(localTopShimScript)
         IEXA_TOP_FALLBACK
+          cat > "$_iexa_bootstrap_bin/dig" <<'IEXA_DNS_TIMEOUT_FALLBACK'
+        #!/bin/sh
+        _iexa_dns_tool=$(basename "$0")
+        _iexa_dns_real=""
+        _iexa_dns_wrapper_dir=$(dirname "$0")
+        _iexa_dns_old_ifs="$IFS"
+        IFS=:
+        for _iexa_dns_dir in ${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}; do
+          [ -n "$_iexa_dns_dir" ] || _iexa_dns_dir=.
+          _iexa_dns_candidate="$_iexa_dns_dir/$_iexa_dns_tool"
+          if [ -x "$_iexa_dns_candidate" ] && [ "$_iexa_dns_dir" != "$_iexa_dns_wrapper_dir" ]; then
+            _iexa_dns_real="$_iexa_dns_candidate"
+            break
+          fi
+        done
+        IFS="$_iexa_dns_old_ifs"
+        if [ -z "$_iexa_dns_real" ]; then
+          printf '/bin/sh: %s: not found\n' "$_iexa_dns_tool" >&2
+          exit 127
+        fi
+        if command -v timeout >/dev/null 2>&1; then
+          timeout 30 "$_iexa_dns_real" "$@"
+          _iexa_dns_status=$?
+        else
+          "$_iexa_dns_real" "$@"
+          _iexa_dns_status=$?
+        fi
+        case "$_iexa_dns_status" in
+          124|137|143)
+            printf '\nIEXA_DNS_TIMEOUT: %s exceeded 30 seconds in Local Alpine.\n' "$_iexa_dns_tool" >&2
+            ;;
+        esac
+        exit "$_iexa_dns_status"
+        IEXA_DNS_TIMEOUT_FALLBACK
+          cp "$_iexa_bootstrap_bin/dig" "$_iexa_bootstrap_bin/host" 2>/dev/null || true
           cp "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" 2>/dev/null || true
-          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" "$_iexa_bootstrap_bin/top" 2>/dev/null || true
+          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" "$_iexa_bootstrap_bin/top" "$_iexa_bootstrap_bin/dig" "$_iexa_bootstrap_bin/host" 2>/dev/null || true
           printf '%s\\n' "$_iexa_bootstrap_version" > "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null || true
           export PATH="$_iexa_bootstrap_bin:${PATH:-}"
           export BROWSER=iexa-open
