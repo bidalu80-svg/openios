@@ -6546,8 +6546,17 @@ final class ChatViewModel {
         selectedToolIds = []
         selectedKnowledgeItems = []
         selectedSkillIds = []
+        pendingChatParams = nil
         // Sync UI toggles with the selected model's server-configured defaults.
         syncUIWithModelDefaults()
+    }
+
+    private func chatParamsForNewConversation() -> ChatAdvancedParams? {
+        if let pending = pendingChatParams {
+            pendingChatParams = nil
+            return pending.hasAnyOverride ? pending : nil
+        }
+        return ChatAdvancedParams.savedDefault
     }
 
     /// Converts a temporary chat into a permanent one by saving it to the server.
@@ -7027,9 +7036,8 @@ final class ChatViewModel {
                 id: localId,
                 title: chatTitle, model: modelId, messages: [userMessage])
             // Apply any chat params that were set before the conversation existed
-            if let pending = pendingChatParams {
-                newConv.chatParams = pending
-                pendingChatParams = nil
+            if let params = chatParamsForNewConversation() {
+                newConv.chatParams = params
             }
             conversation = newConv
             if isOpenAICompatibleProvider {
@@ -9130,9 +9138,8 @@ final class ChatViewModel {
                 model: modelId,
                 messages: [userMessage]
             )
-            if let pending = pendingChatParams {
-                conversation?.chatParams = pending
-                pendingChatParams = nil
+            if let params = chatParamsForNewConversation() {
+                conversation?.chatParams = params
             }
             if isOpenAICompatibleProvider, let id = conversation?.id {
                 activeChatStore?.promoteNewChat(to: id)
@@ -9385,9 +9392,8 @@ final class ChatViewModel {
                 model: modelId,
                 messages: [userMessage]
             )
-            if let pending = pendingChatParams {
-                conversation?.chatParams = pending
-                pendingChatParams = nil
+            if let params = chatParamsForNewConversation() {
+                conversation?.chatParams = params
             }
             if isOpenAICompatibleProvider, let id = conversation?.id {
                 activeChatStore?.promoteNewChat(to: id)

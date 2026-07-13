@@ -4636,12 +4636,21 @@ struct ChatDetailView: View {
         .sheet(isPresented: $isShowingChatParams) {
             ChatAdvancedParamsSheet(
                 params: Binding(
-                    get: { viewModel.conversation?.chatParams ?? viewModel.pendingChatParams ?? ChatAdvancedParams() },
-                    set: { newParams in
+                    get: {
                         if viewModel.conversation != nil {
-                            viewModel.conversation?.chatParams = newParams
+                            return viewModel.conversation?.chatParams ?? ChatAdvancedParams()
+                        }
+                        return viewModel.pendingChatParams
+                            ?? ChatAdvancedParams.savedDefault
+                            ?? ChatAdvancedParams()
+                    },
+                    set: { newParams in
+                        let normalizedParams = newParams.hasAnyOverride ? newParams : nil
+                        ChatAdvancedParams.saveDefault(normalizedParams)
+                        if viewModel.conversation != nil {
+                            viewModel.conversation?.chatParams = normalizedParams
                         } else {
-                            viewModel.pendingChatParams = newParams
+                            viewModel.pendingChatParams = normalizedParams
                         }
                     }
                 )
@@ -4705,7 +4714,7 @@ struct ChatDetailView: View {
                 } label: {
                     SettingsGearIcon()
                         .scaledFont(size: 12, weight: .medium)
-                        .foregroundStyle((viewModel.conversation?.chatParams != nil || viewModel.pendingChatParams != nil) ? theme.brandPrimary : theme.textTertiary)
+                        .foregroundStyle((viewModel.conversation != nil ? viewModel.conversation?.chatParams != nil : (viewModel.pendingChatParams != nil || ChatAdvancedParams.savedDefault != nil)) ? theme.brandPrimary : theme.textTertiary)
                         .frame(width: 34, height: 34)
                         .contentShape(Rectangle())
                 }

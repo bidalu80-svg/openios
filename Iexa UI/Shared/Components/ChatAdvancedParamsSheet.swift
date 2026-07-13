@@ -79,7 +79,7 @@ struct ChatAdvancedParamsSheet: View {
         } header: {
             Text("系统提示词")
         } footer: {
-            Text("只覆盖当前聊天的默认系统提示词。")
+            Text("保存后会覆盖当前聊天，并作为新会话的默认聊天控制；已有聊天仍使用各自保存的设置。")
         }
     }
 

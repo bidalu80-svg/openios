@@ -39,6 +39,7 @@ enum ThinkMode: Equatable, Sendable {
 /// Per-chat override params. All fields are optional (nil = use model/server default).
 /// Stored in `Conversation.chatParams` and persisted alongside the conversation.
 struct ChatAdvancedParams: Codable, Sendable, Equatable {
+    private static let savedDefaultUserDefaultsKey = "iexa.chat.defaultAdvancedParams.v1"
 
     // MARK: Basic
     var systemPrompt: String?
@@ -117,6 +118,32 @@ struct ChatAdvancedParams: Codable, Sendable, Equatable {
     // MARK: - Init
 
     init() {}
+
+    // MARK: - Saved defaults
+
+    /// User-level default chat controls for newly-created conversations.
+    /// Existing conversations still keep their own `Conversation.chatParams` override.
+    static var savedDefault: ChatAdvancedParams? {
+        guard let data = UserDefaults.standard.data(forKey: savedDefaultUserDefaultsKey) else {
+            return nil
+        }
+        guard let params = try? JSONDecoder().decode(ChatAdvancedParams.self, from: data),
+              params.hasAnyOverride else {
+            UserDefaults.standard.removeObject(forKey: savedDefaultUserDefaultsKey)
+            return nil
+        }
+        return params
+    }
+
+    static func saveDefault(_ params: ChatAdvancedParams?) {
+        guard let params, params.hasAnyOverride else {
+            UserDefaults.standard.removeObject(forKey: savedDefaultUserDefaultsKey)
+            return
+        }
+        if let data = try? JSONEncoder().encode(params) {
+            UserDefaults.standard.set(data, forKey: savedDefaultUserDefaultsKey)
+        }
+    }
 
     /// Initialise from a server-side `params` dict (e.g. `chat["params"]` in a conversation JSON).
     /// All unknown keys are silently ignored.
