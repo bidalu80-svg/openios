@@ -28,6 +28,7 @@ struct MainChatView: View {
 
     /// Controls the settings sheet presentation.
     @State private var showSettings = false
+    @State private var settingsInitialDestination: SettingsDestination?
 
     /// Controls the notes sheet presentation.
     @State private var showNotes = false
@@ -675,10 +676,14 @@ struct MainChatView: View {
         case .settings:
             SettingsView(
                 viewModel: dependencies.authViewModel,
-                appearanceManager: dependencies.appearanceManager
+                appearanceManager: dependencies.appearanceManager,
+                initialDestination: settingsInitialDestination
             )
             .preferredColorScheme(dependencies.appearanceManager.resolvedColorScheme ?? systemColorScheme)
             .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+            .onDisappear {
+                settingsInitialDestination = nil
+            }
 
         case .notes:
             NavigationStack {
@@ -907,6 +912,7 @@ struct MainChatView: View {
         switch route {
         case .settings:
             showSettings = false
+            settingsInitialDestination = nil
         case .notes:
             showNotes = false
         case .createChannel:
@@ -2096,7 +2102,7 @@ struct MainChatView: View {
         .padding(.horizontal, Spacing.md)
         .padding(.vertical, Spacing.sm)
         .background(theme.surfaceContainer.opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .padding(.horizontal, Spacing.md)
         .padding(.top, Spacing.md)
         .padding(.bottom, Spacing.sm)
@@ -2847,10 +2853,24 @@ struct MainChatView: View {
                 }
                 .simultaneousGesture(TapGesture().onEnded {
                     closeDrawer()
+                    settingsInitialDestination = nil
                     showSettings = true
                 })
 
                 Spacer()
+
+                Button {
+                    closeDrawer()
+                    settingsInitialDestination = .serverSwitcher
+                    showSettings = true
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right.circle")
+                        .scaledFont(size: 18, weight: .medium)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(width: 40, height: 40)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("切换站点")
 
                 // New Chat — primary action, always visible
                 Button {
@@ -2942,6 +2962,7 @@ struct MainChatView: View {
 
                     Button {
                         closeDrawer()
+                        settingsInitialDestination = nil
                         showSettings = true
                     } label: {
                         Label("Settings", systemImage: "gearshape")

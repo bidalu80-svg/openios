@@ -36,6 +36,7 @@ struct iPadMainChatView: View {
 
     /// Whether the settings sheet is visible.
     @State private var showSettings = false
+    @State private var settingsInitialDestination: SettingsDestination?
 
     /// Whether the notes sheet is visible.
     @State private var showNotes = false
@@ -162,6 +163,7 @@ struct iPadMainChatView: View {
         .navigationSplitViewStyle(.balanced)
         .applySheets(
             showSettings: $showSettings,
+            settingsInitialDestination: $settingsInitialDestination,
             showNotes: $showNotes,
             showCreateFolderSheet: $showCreateFolderSheet,
             sharingConversation: $sharingConversation,
@@ -794,6 +796,7 @@ struct iPadSidebarContent: View {
     @Binding var showCreateFolderSheet: Bool
     @Binding var showCreateChannel: Bool
     @Binding var showSettings: Bool
+    @Binding var settingsInitialDestination: SettingsDestination?
     @Binding var showNotes: Bool
     @Binding var showWorkspace: Bool
     @Binding var showMemories: Bool
@@ -1026,7 +1029,7 @@ struct iPadSidebarContent: View {
         .padding(.horizontal, Spacing.md)
         .padding(.vertical, 9)
         .background(theme.surfaceContainer.opacity(0.6))
-        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         .padding(.horizontal, Spacing.md)
         .padding(.top, Spacing.sm)
         .padding(.bottom, Spacing.xs)
@@ -1696,10 +1699,23 @@ struct iPadSidebarContent: View {
                     dependencies.authViewModel.showAccountPicker = true
                 }
                 .simultaneousGesture(TapGesture().onEnded {
+                    settingsInitialDestination = nil
                     showSettings = true
                 })
 
                 Spacer()
+
+                Button {
+                    settingsInitialDestination = .serverSwitcher
+                    showSettings = true
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right.circle")
+                        .scaledFont(size: 17, weight: .medium)
+                        .foregroundStyle(theme.textSecondary)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("切换站点")
 
                 // New Chat — primary action, always visible
                 Button(action: onNewChat) {
@@ -1755,7 +1771,10 @@ struct iPadSidebarContent: View {
 
                     Divider()
 
-                    Button { showSettings = true } label: {
+                    Button {
+                        settingsInitialDestination = nil
+                        showSettings = true
+                    } label: {
                         Label("Settings", systemImage: "gearshape")
                     }
 
@@ -1917,6 +1936,7 @@ private struct iPadConversationContextMenu: View {
 private extension View {
     func applySheets(
         showSettings: Binding<Bool>,
+        settingsInitialDestination: Binding<SettingsDestination?>,
         showNotes: Binding<Bool>,
         showCreateFolderSheet: Binding<Bool>,
         sharingConversation: Binding<Conversation?>,
@@ -1942,11 +1962,15 @@ private extension View {
             .sheet(isPresented: showSettings) {
                 SettingsView(
                     viewModel: dependencies.authViewModel,
-                    appearanceManager: dependencies.appearanceManager
+                    appearanceManager: dependencies.appearanceManager,
+                    initialDestination: settingsInitialDestination.wrappedValue
                 )
                 .preferredColorScheme(dependencies.appearanceManager.resolvedColorScheme ?? systemColorScheme)
                 .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
                 .presentationCornerRadius(20)
+                .onDisappear {
+                    settingsInitialDestination.wrappedValue = nil
+                }
             }
             .sheet(isPresented: showNotes) {
                 NavigationStack {

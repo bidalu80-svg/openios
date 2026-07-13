@@ -11,8 +11,10 @@ struct SettingsView: View {
     @Environment(AppDependencyContainer.self) private var dependencies
     @Bindable var viewModel: AuthViewModel
     @Bindable var appearanceManager: AppearanceManager
+    let initialDestination: SettingsDestination?
     @State private var showSignOutConfirmation = false
     @State private var navigationPath = NavigationPath()
+    @State private var didApplyInitialDestination = false
     @State private var showDefaultModelPicker = false
     @State private var showLanguagePicker = false
     @State private var showRestartAlert = false
@@ -20,6 +22,16 @@ struct SettingsView: View {
     @State private var defaultModelId: String?
     @State private var isLoadingModels = false
     @State private var usageStore = TokenUsageHistoryStore.shared
+
+    init(
+        viewModel: AuthViewModel,
+        appearanceManager: AppearanceManager,
+        initialDestination: SettingsDestination? = nil
+    ) {
+        self._viewModel = Bindable(viewModel)
+        self._appearanceManager = Bindable(appearanceManager)
+        self.initialDestination = initialDestination
+    }
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -376,9 +388,20 @@ struct SettingsView: View {
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(24)
             }
+            .onAppear {
+                applyInitialDestinationIfNeeded()
+            }
             .task {
                 await loadModels()
             }
+        }
+    }
+
+    private func applyInitialDestinationIfNeeded() {
+        guard !didApplyInitialDestination, let initialDestination else { return }
+        didApplyInitialDestination = true
+        if navigationPath.isEmpty {
+            navigationPath.append(initialDestination)
         }
     }
 
