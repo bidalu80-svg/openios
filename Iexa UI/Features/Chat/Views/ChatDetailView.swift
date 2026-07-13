@@ -5466,6 +5466,19 @@ struct ChatDetailView: View {
         editingMessageId == nil ? 78 : 56
     }
 
+    private var shouldReserveSpaceForAgentFloatingBar: Bool {
+        localAlpineToolPreviewEnabled
+            && !shouldHideAgentFloatingBarForKeyboard
+            && agentFloatingDisplayItem?.hasConcreteSteps == true
+    }
+
+    private var scrollToBottomFABBottomPadding: CGFloat {
+        let floatingBarClearance = shouldReserveSpaceForAgentFloatingBar
+            ? AgentStepFloatingMetrics.layoutHeight + 8
+            : 0
+        return bottomComposerOverlayReservedHeight + Spacing.sm + floatingBarClearance
+    }
+
     // MARK: - Scroll-to-Bottom FAB
 
     @ViewBuilder
@@ -5501,7 +5514,7 @@ struct ChatDetailView: View {
                 }
             )
             .padding(.trailing, Spacing.md)
-            .padding(.bottom, bottomComposerOverlayReservedHeight + Spacing.sm)
+            .padding(.bottom, scrollToBottomFABBottomPadding)
             .transition(
                 .asymmetric(
                     insertion: .scale(scale: 0.7).combined(with: .opacity),
