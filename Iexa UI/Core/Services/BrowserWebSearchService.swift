@@ -748,8 +748,6 @@ final class BrowserWebSearchService: NSObject {
                     : "已观察当前网页视口；页面已接近底部，可基于当前状态继续。")
         ]
         if let screenshot {
-            payload["screenshot_url"] = screenshot.absoluteString
-            payload["screenshot_path"] = screenshot.path
             payload["visual_observation"] = [
                 "screenshot_url": screenshot.absoluteString,
                 "file_path": screenshot.path,
@@ -787,17 +785,11 @@ final class BrowserWebSearchService: NSObject {
         let snapshot = await evaluatePageSnapshot()
         let title = snapshot?.title.isEmpty == false ? snapshot!.title : "网页截图"
         let url = snapshot?.url ?? webView?.url?.absoluteString ?? ""
-        return [
+        var payload: [String: Any] = [
             "action": "browser.screenshot",
             "ok": true,
             "title": title,
             "url": url,
-            "screenshot_url": screenshot.absoluteString,
-            "file_url": screenshot.absoluteString,
-            "image_path": screenshot.path,
-            "file_path": screenshot.path,
-            "file_name": screenshot.lastPathComponent,
-            "content_type": "image/png",
             "full_page": fullPage,
             "attach_preview": attachPreview,
             "attach_file": attachPreview,
@@ -820,6 +812,15 @@ final class BrowserWebSearchService: NSObject {
             ]],
             "summary": fullPage ? "已生成整页网页截图（仅供工具观察，不默认插入对话）。" : "已生成当前视口网页截图（仅供工具观察，不默认插入对话）。"
         ]
+        if attachPreview {
+            payload["screenshot_url"] = screenshot.absoluteString
+            payload["file_url"] = screenshot.absoluteString
+            payload["image_path"] = screenshot.path
+            payload["file_path"] = screenshot.path
+            payload["file_name"] = screenshot.lastPathComponent
+            payload["content_type"] = "image/png"
+        }
+        return payload
     }
 
     private func executeNativeFetch(_ call: [String: Any]) async -> [String: Any] {
@@ -1421,8 +1422,6 @@ final class BrowserWebSearchService: NSObject {
             if visualFallback,
                Self.boolValue(payload["needs_visual_coordinates"]) == true,
                let screenshot = await captureViewportScreenshot(prefix: "browser_click_miss") {
-                payload["screenshot_url"] = screenshot.absoluteString
-                payload["screenshot_path"] = screenshot.path
                 payload["attach_file"] = false
                 payload["preview_images"] = []
                 payload["visual_observation"] = [
@@ -2919,8 +2918,6 @@ final class BrowserWebSearchService: NSObject {
             return payload
         }
         var updated = payload
-        updated["screenshot_url"] = screenshot.absoluteString
-        updated["screenshot_path"] = screenshot.path
         updated["attach_file"] = false
         updated["preview_images"] = []
         updated["visual_observation"] = [
@@ -3540,7 +3537,6 @@ final class BrowserWebSearchService: NSObject {
                         "viewport_index": viewportIndex,
                         "scroll_y": offset,
                         "screenshot_url": screenshot.absoluteString,
-                        "file_url": screenshot.absoluteString,
                         "file_path": screenshot.path,
                         "tool_only": true,
                         "note": "Tool-only viewport sample from full-page scan. Use with DOM/text samples to choose the next browser action."
@@ -3621,9 +3617,7 @@ final class BrowserWebSearchService: NSObject {
                    let screenshot = await captureViewportScreenshot(prefix: "browser_find_focus", scrollY: targetY) {
                     focusedVisual = [
                         "screenshot_url": screenshot.absoluteString,
-                        "file_url": screenshot.absoluteString,
                         "file_path": screenshot.path,
-                        "image_path": screenshot.path,
                         "scroll_y": targetY,
                         "tool_only": true,
                         "note": "Tool-only focused viewport after full-page element scan. The browser is left near the best matching element so the next click/type/coordinate action can operate on the visible page."

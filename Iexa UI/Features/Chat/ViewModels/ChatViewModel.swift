@@ -12181,6 +12181,11 @@ final class ChatViewModel {
             }
             executedAnyTool = true
 
+            if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                acc.replace("")
+                updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
+            }
+
             apiMessages.append(Self.toolCallAssistantMessage(
                 for: calls,
                 providerType: currentProviderType
@@ -12655,7 +12660,11 @@ final class ChatViewModel {
         if let officeKind {
             markLocalOfficeGenerationStarted(messageId: assistantMessageId, kind: officeKind)
         } else if let browserAction {
-            markLocalBrowserToolStarted(messageId: assistantMessageId, actionName: browserAction)
+            markLocalBrowserToolStarted(
+                messageId: assistantMessageId,
+                actionName: browserAction,
+                displayTitle: Self.localNativeToolTitle(from: effectiveCall, fallbackAction: browserAction)
+            )
         }
 
         var result = await LocalNativeToolService.shared.executeBlocks(
@@ -12729,6 +12738,7 @@ final class ChatViewModel {
                         error: "模型返回的搜索指令无法解析。",
                         requiresUserVerification: false
                     ),
+                    displayTitle: Self.localNativeToolTitle(from: effectiveCall, fallbackAction: browserAction),
                     keepStreaming: true
                 )
             }
@@ -12791,6 +12801,7 @@ final class ChatViewModel {
                 document: browserVerificationCompleted && browserDocument.requiresUserVerification
                     ? Self.localNativeBrowserVerificationCompletedDocument(from: browserDocument)
                     : browserDocument,
+                displayTitle: Self.localNativeToolTitle(from: effectiveCall, fallbackAction: browserDocument.action),
                 keepStreaming: true
             )
         } else if let browserAction {
@@ -12808,6 +12819,7 @@ final class ChatViewModel {
                     error: "搜索没有返回可用结果。",
                     requiresUserVerification: false
                 ),
+                displayTitle: Self.localNativeToolTitle(from: effectiveCall, fallbackAction: browserAction),
                 keepStreaming: true
             )
         }
@@ -13428,11 +13440,12 @@ final class ChatViewModel {
         let statusQuery = effectiveCall.name == "browser_use" ? "" : query
         let content = Self.localNativeFunctionToolEnvelopeContent(for: effectiveCall)
         let actionName = Self.localAlpineBrowserActionName(from: effectiveCall)
+        let toolTitle = Self.localNativeToolTitle(from: effectiveCall, fallbackAction: actionName)
         let startingStatus = ChatStatusUpdate(
-            action: "browser_web_search",
+            action: Self.localBrowserToolStatusAction(for: actionName),
             status: Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .start),
             description: query.isEmpty || effectiveCall.name == "browser_use"
-                ? localBrowserToolRunningTitle(for: actionName)
+                ? localBrowserToolRunningTitle(for: actionName, displayTitle: toolTitle)
                 : "正在搜索网页：\(detail)",
             done: false,
             occurredAt: .now,
@@ -13442,7 +13455,7 @@ final class ChatViewModel {
         updateLocalBrowserToolMessage(
             messageId: assistantMessageId,
             content: query.isEmpty || effectiveCall.name == "browser_use"
-                ? localBrowserToolRunningTitle(for: actionName)
+                ? localBrowserToolRunningTitle(for: actionName, displayTitle: toolTitle)
                 : "正在搜索网页：\(detail)",
             isStreaming: true,
             status: startingStatus
@@ -13470,7 +13483,7 @@ final class ChatViewModel {
         }
         let browserURLCount = result.browserDocument?.url == nil ? 0 : 1
         let inProgressStatus = ChatStatusUpdate(
-            action: "browser_web_search",
+            action: Self.localBrowserToolStatusAction(for: actionName),
             status: browserVerificationCompleted
                 ? Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .verificationCompleted)
                 : (result.requiresBrowserUserVerification
@@ -13499,11 +13512,11 @@ final class ChatViewModel {
         let finalDone = !result.requiresBrowserUserVerification
         let browserSucceeded = browserDocument?.ok == true
         let finalStatus = ChatStatusUpdate(
-            action: "browser_web_search",
+            action: Self.localBrowserToolStatusAction(for: actionName),
             status: Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .completed),
-            description: browserVerificationCompleted
-                ? (result.requiresBrowserUserVerification ? "网页正在等待你再次完成人机验证" : (browserDocument?.summary ?? result.summary))
-                : (result.requiresBrowserUserVerification ? "网页正在等待你完成人机验证" : (browserDocument?.summary ?? result.summary)),
+            description: result.requiresBrowserUserVerification
+                ? (browserVerificationCompleted ? "网页正在等待你再次完成人机验证" : "网页正在等待你完成人机验证")
+                : Self.localBrowserToolCompletedTitle(for: actionName, displayTitle: toolTitle),
             done: finalDone,
             urls: browserDocument?.url.map { [$0] } ?? [],
             occurredAt: .now,
@@ -13515,7 +13528,7 @@ final class ChatViewModel {
         updateLocalBrowserToolMessage(
             messageId: assistantMessageId,
             content: browserSucceeded
-                ? "\(Self.localBrowserToolCompletedTitle(for: actionName))：\(browserDocument?.title ?? detailFallback)"
+                ? "\(Self.localBrowserToolCompletedTitle(for: actionName, displayTitle: toolTitle))：\(browserDocument?.title ?? detailFallback)"
                 : (result.requiresBrowserUserVerification
                     ? "网页操作暂停：请先完成人机验证"
                     : "\(Self.localBrowserToolFailedTitle(for: actionName))：\(browserDocument?.error ?? browserDocument?.summary ?? result.summary)"),
@@ -13817,6 +13830,50 @@ final class ChatViewModel {
         }
         let trimmed = call.arguments.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? [:] : ["value": trimmed]
+    }
+
+    private static func localNativeToolTitle(
+        from call: LocalAlpineNativeToolCall?,
+        fallbackAction: String
+    ) -> String {
+        if let call {
+            let arguments = localAlpineNativeToolArguments(for: call)
+            if let title = firstNonEmptyString(in: arguments, keys: ["tool_title", "toolTitle", "step_title", "stepTitle", "label"]) {
+                let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return String(trimmed.prefix(80))
+                }
+            }
+        }
+        let normalized = fallbackAction
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: ".")
+            .lowercased()
+        switch normalized {
+        case "browser.use", "browser.use.browser.use", "browser_use":
+            return "浏览网页"
+        case "web.search", "web_search", "websearch", "search.web":
+            return "搜索网页"
+        case "shell.execute", "shell_execute":
+            return "执行命令"
+        case "file.read", "file_read":
+            return "读取文件"
+        case "file.write", "file_write":
+            return "写入文件"
+        case "file.edit", "file_edit":
+            return "编辑文件"
+        case "read.image", "read_image":
+            return "读取图片"
+        case "memory.write", "memory_write":
+            return "写入记忆"
+        case "memory.get", "memory_get":
+            return "读取记忆"
+        default:
+            if normalized.contains("browser") || normalized.contains("web.search") || normalized == "web_search" {
+                return localBrowserToolActionLabel(for: normalized)
+            }
+            return ""
+        }
     }
 
     private static func redirectURLSearchToBrowserUseIfNeeded(
@@ -14585,6 +14642,10 @@ final class ChatViewModel {
         let name = call.name.trimmingCharacters(in: .whitespacesAndNewlines)
         if name == "browser_use" || name == "web_search" {
             let browserAction = localAlpineBrowserActionName(from: call, result: result)
+            if anyJSONBoolValue(in: result.summary, key: "next_action_required", equals: true)
+                || browserToolResultLooksLikeInteractiveIntermediate(call: call, toolContent: result.summary) {
+                return "网页工具还在执行中，模型没有继续发起下一步浏览器工具。"
+            }
             if let summary = firstJSONStringValue(in: result.summary, key: "summary"),
                !summary.isEmpty {
                 return summary
@@ -14841,7 +14902,9 @@ final class ChatViewModel {
             "role": "system",
             "content": """
             The previous browser result was an intermediate page-operation state, but the assistant did not issue the next browser tool call. The app is continuing the same shared browser session automatically.
-            Treat the previous prose as premature. Continue from the current screenshot/read result by emitting the next `browser_use` tool call yourself. Do not navigate/reload the same URL unless explicitly required. Stop only after the user's page task is complete, a final file/result exists, or the tool explicitly reports requires_user_verification.\(suggestedInstruction)
+            Treat any previous prose as premature and discarded. Emit exactly one `browser_use` tool call now, with no visible prose before or after the tool call.
+            Continue from the current screenshot/read/result state. Do not navigate/reload the same URL unless explicitly required. Stop only after the user's page task is complete, a final file/result exists, or the tool explicitly reports requires_user_verification.
+            If the suggested primitive matches the page state, use it as the next browser_use arguments; otherwise choose the next primitive from the current page evidence yourself.\(suggestedInstruction)
             """
         ]
     }
@@ -15226,6 +15289,9 @@ final class ChatViewModel {
     }
 
     private static func localNativeBrowserFallbackMessage(from toolContent: String) -> String {
+        if anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
+            return "网页工具还在执行中，模型没有继续发起下一步浏览器工具。"
+        }
         if let summary = firstJSONStringValue(in: toolContent, key: "summary"),
            !summary.isEmpty {
             return summary
@@ -15685,11 +15751,16 @@ final class ChatViewModel {
         let nextActionRequired = !requiresUserVerification
             && !browserToolResultLooksComplete(call: call, toolContent: resultToolContent)
 
+        let sourceSummary = firstNonEmptyString(in: result, keys: ["summary", "description"]) ?? ""
         var payloadData: [String: Any] = [
             "success": ok,
-            "text": localNativeBrowserObservationText(from: result),
-            "summary": firstNonEmptyString(in: result, keys: ["summary", "description"]) ?? "",
+            "text": localNativeBrowserObservationText(
+                from: result,
+                includeProcessSummary: !nextActionRequired
+            ),
+            "summary": nextActionRequired ? "" : sourceSummary,
             "next_action_required": nextActionRequired,
+            "visible_answer_allowed": !nextActionRequired,
             "page_state": localNativeBrowserPageState(from: result, browserAction: browserAction),
             "available_primitive_actions": [
                 "navigate", "screenshot", "find_elements", "click", "type", "scroll",
@@ -15699,6 +15770,9 @@ final class ChatViewModel {
         ]
         if nextActionRequired {
             payloadData["model_instruction"] = "Intermediate browser observation. Decide the next browser_use primitive from the page_state, focused_element, items, viewport_contexts, and screenshots. Do not ask the user to send a continuation unless credentials, payment, destructive action, or explicit human verification is required."
+            payloadData["final_answer_instruction"] = "Do not answer the user yet. Emit the next browser_use tool call."
+        } else {
+            payloadData["final_answer_instruction"] = "Answer the user with the final page result only. Do not recap intermediate browser steps and do not embed browser screenshots unless the user explicitly asked for a screenshot."
         }
         if let title = firstNonEmptyString(in: result, keys: ["title", "name"]) {
             payloadData["title"] = title
@@ -15730,11 +15804,13 @@ final class ChatViewModel {
         if let visualViewports = result["visual_viewports"] as? [[String: Any]], !visualViewports.isEmpty {
             payloadData["visual_viewports"] = visualViewports.prefix(4).map { localNativeBrowserCompactVisualReference($0) }
         }
-        if let fileURL = firstNonEmptyString(in: result, keys: ["file_url", "display_url"]) {
-            payloadData["file_url"] = fileURL
-        }
-        if let imagePath = firstNonEmptyString(in: result, keys: ["image_path", "file_path"]) {
-            payloadData["image_path"] = imagePath
+        if localNativeBrowserAllowsVisibleFileReference(result: result, browserAction: browserAction) {
+            if let fileURL = firstNonEmptyString(in: result, keys: ["file_url", "display_url"]) {
+                payloadData["file_url"] = fileURL
+            }
+            if let imagePath = firstNonEmptyString(in: result, keys: ["image_path", "file_path"]) {
+                payloadData["image_path"] = imagePath
+            }
         }
 
         let envelope: [String: Any] = [
@@ -15796,7 +15872,10 @@ final class ChatViewModel {
         return nil
     }
 
-    private static func localNativeBrowserObservationText(from result: [String: Any]) -> String {
+    private static func localNativeBrowserObservationText(
+        from result: [String: Any],
+        includeProcessSummary: Bool = true
+    ) -> String {
         var chunks: [String] = []
         if let title = firstNonEmptyString(in: result, keys: ["title", "name"]) {
             chunks.append("title: \(title)")
@@ -15804,7 +15883,10 @@ final class ChatViewModel {
         if let pageURL = firstNonEmptyString(in: result, keys: ["page_url", "url", "link", "href"]) {
             chunks.append("url: \(pageURL)")
         }
-        for key in ["summary", "text", "content", "readable_text", "markdown", "error"] {
+        let textualKeys = includeProcessSummary
+            ? ["summary", "text", "content", "readable_text", "markdown", "error"]
+            : ["text", "content", "readable_text", "markdown", "error"]
+        for key in textualKeys {
             if let text = firstNonEmptyString(in: result, keys: [key]) {
                 chunks.append(text)
             }
@@ -15933,7 +16015,7 @@ final class ChatViewModel {
 
     private static func localNativeBrowserCompactVisualReference(_ raw: [String: Any]) -> [String: Any] {
         var compact: [String: Any] = [:]
-        for key in ["viewport_index", "scroll_y", "screenshot_url", "file_url", "file_path", "image_path", "note", "tool_only"] {
+        for key in ["viewport_index", "scroll_y", "note", "tool_only"] {
             guard let value = raw[key] else { continue }
             if let text = value as? String {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -15944,7 +16026,24 @@ final class ChatViewModel {
                 compact[key] = value
             }
         }
+        if raw["screenshot_url"] != nil || raw["file_url"] != nil || raw["file_path"] != nil || raw["image_path"] != nil {
+            compact["visual_state"] = "captured_tool_only"
+        }
         return compact
+    }
+
+    private static func localNativeBrowserAllowsVisibleFileReference(
+        result: [String: Any],
+        browserAction: String
+    ) -> Bool {
+        if browserAction == "browser.fetch" || browserAction == "browser.wait_for_image" {
+            return true
+        }
+        if browserAction == "browser.screenshot",
+           nativeToolBoolValue(result["attach_preview"] ?? result["attach_file"]) == true {
+            return true
+        }
+        return false
     }
 
     private static func localNativeBrowserPrettyJSONString(_ object: Any) -> String? {
@@ -22694,9 +22793,17 @@ final class ChatViewModel {
         if let officeKind {
             markLocalOfficeGenerationStarted(messageId: messageId, kind: officeKind)
         } else if let browserAction {
-            markLocalBrowserToolStarted(messageId: messageId, actionName: browserAction)
+            markLocalBrowserToolStarted(
+                messageId: messageId,
+                actionName: browserAction,
+                displayTitle: Self.localNativeToolTitle(from: directCalls.first, fallbackAction: browserAction)
+            )
         } else if usesGenericNativeStep {
-            markLocalNativeToolStarted(messageId: messageId, action: nativeAction)
+            markLocalNativeToolStarted(
+                messageId: messageId,
+                action: nativeAction,
+                displayTitle: Self.localNativeToolTitle(from: directCalls.first, fallbackAction: nativeAction)
+            )
         }
         var result = await LocalNativeToolService.shared.executeBlocks(
             in: executableContent,
@@ -22767,12 +22874,14 @@ final class ChatViewModel {
                         previewImages: [],
                         error: "模型返回的搜索指令无法解析。",
                         requiresUserVerification: false
-                    )
+                    ),
+                    displayTitle: Self.localNativeToolTitle(from: directCalls.first, fallbackAction: browserAction)
                 )
             } else if usesGenericNativeStep {
                 finishLocalNativeToolStep(
                     messageId: messageId,
                     action: nativeAction,
+                    displayTitle: Self.localNativeToolTitle(from: directCalls.first, fallbackAction: nativeAction),
                     succeeded: false
                 )
             }
@@ -22812,6 +22921,7 @@ final class ChatViewModel {
             finishLocalNativeToolStep(
                 messageId: messageId,
                 action: nativeAction,
+                displayTitle: Self.localNativeToolTitle(from: directCalls.first, fallbackAction: nativeAction),
                 succeeded: !Self.localNativeToolSummaryContainsFailure(result.summary)
             )
         }
@@ -22824,7 +22934,8 @@ final class ChatViewModel {
                 messageId: messageId,
                 document: browserVerificationCompleted && browserDocument.requiresUserVerification
                     ? Self.localNativeBrowserVerificationCompletedDocument(from: browserDocument)
-                    : browserDocument
+                    : browserDocument,
+                displayTitle: Self.localNativeToolTitle(from: directCalls.first, fallbackAction: browserDocument.action)
             )
             inheritedStatusHistory = localNativeContinuationStatusHistory(from: messageId)
         } else if browserAction != nil {
@@ -22841,7 +22952,8 @@ final class ChatViewModel {
                     previewImages: [],
                     error: "搜索没有返回可用结果。",
                     requiresUserVerification: false
-                )
+                ),
+                displayTitle: Self.localNativeToolTitle(from: directCalls.first, fallbackAction: browserAction ?? "browser")
             )
             inheritedStatusHistory = localNativeContinuationStatusHistory(from: messageId)
         }
@@ -22925,18 +23037,22 @@ final class ChatViewModel {
         await startLocalNativeContinuation(parentId: resultMessage.id)
     }
 
-    private func markLocalBrowserToolStarted(messageId: String, actionName: String) {
+    private func markLocalBrowserToolStarted(
+        messageId: String,
+        actionName: String,
+        displayTitle: String? = nil
+    ) {
         isStreaming = true
         hasFinishedStreaming = false
         selfInitiatedStream = true
         activeTaskId = nil
-        let title = localBrowserToolRunningTitle(for: actionName)
+        let title = localBrowserToolRunningTitle(for: actionName, displayTitle: displayTitle)
         updateLocalBrowserToolMessage(
             messageId: messageId,
             content: title,
             isStreaming: true,
             status: ChatStatusUpdate(
-                action: "browser_web_search",
+                action: Self.localBrowserToolStatusAction(for: actionName),
                 status: Self.localBrowserToolStepKey(for: actionName),
                 description: title,
                 done: false,
@@ -22949,6 +23065,7 @@ final class ChatViewModel {
     private func finishLocalBrowserTool(
         messageId: String,
         document: LocalNativeBrowserDocument,
+        displayTitle: String? = nil,
         keepStreaming: Bool = false
     ) {
         var urls = document.items.compactMap(\.link)
@@ -22956,9 +23073,11 @@ final class ChatViewModel {
             urls.insert(url, at: 0)
         }
         let status = ChatStatusUpdate(
-            action: "browser_web_search",
+            action: Self.localBrowserToolStatusAction(for: document.action),
             status: Self.localBrowserToolStepKey(for: document.action),
-            description: document.ok ? document.summary : (document.error ?? document.summary),
+            description: document.ok
+                ? Self.localBrowserToolCompletedTitle(for: document.action, displayTitle: displayTitle)
+                : "\(Self.localBrowserToolFailedTitle(for: document.action))：\(document.error ?? document.summary)",
             done: true,
             urls: urls,
             occurredAt: .now,
@@ -22970,7 +23089,7 @@ final class ChatViewModel {
         updateLocalBrowserToolMessage(
             messageId: messageId,
             content: document.ok
-                ? "\(Self.localBrowserToolCompletedTitle(for: document.action))：\(document.title)"
+                ? "\(Self.localBrowserToolCompletedTitle(for: document.action, displayTitle: displayTitle))：\(document.title)"
                 : "\(Self.localBrowserToolFailedTitle(for: document.action))：\(document.error ?? document.summary)",
             isStreaming: keepStreaming,
             status: status
@@ -22988,7 +23107,8 @@ final class ChatViewModel {
         metadata["iexa_local_browser_tool"] = "true"
         metadata["iexa_local_native_tool_parent"] = "true"
 
-        conversation?.messages[index].content = content
+        let visibleContent = Self.localBrowserToolVisibleContent(content, status: status)
+        conversation?.messages[index].content = visibleContent
         conversation?.messages[index].isStreaming = isStreaming
         let statusHistory = Self.appendingLocalBrowserStatus(
             status,
@@ -22997,16 +23117,33 @@ final class ChatViewModel {
         conversation?.messages[index].statusHistory = statusHistory
         conversation?.messages[index].metadata = metadata
         conversation?.history.updateNode(id: messageId) { node in
-            node.content = content
+            node.content = visibleContent
             node.done = !isStreaming
             node.statusHistory = statusHistory
             node.metadata = metadata
         }
         if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
-            streamingStore.updateContent(content, displayContent: content)
+            streamingStore.updateContent(visibleContent, displayContent: visibleContent)
             streamingStore.setStatusHistory(statusHistory)
         }
         conversation?.history.currentId = messageId
+    }
+
+    private static func localBrowserToolVisibleContent(
+        _ content: String,
+        status: ChatStatusUpdate
+    ) -> String {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let combined = "\(trimmed)\n\(status.description ?? "")".lowercased()
+        let shouldShow = combined.contains("人机验证")
+            || combined.contains("验证码")
+            || combined.contains("requires_user_verification")
+            || combined.contains("失败")
+            || combined.contains("错误")
+            || combined.contains("error")
+            || combined.contains("failed")
+        return shouldShow ? trimmed : ""
     }
 
     private static func appendingLocalBrowserStatus(
@@ -23143,20 +23280,29 @@ final class ChatViewModel {
         }
     }
 
-    private func markLocalNativeToolStarted(messageId: String, action: String) {
+    private func markLocalNativeToolStarted(
+        messageId: String,
+        action: String,
+        displayTitle: String? = nil
+    ) {
         updateLocalNativeToolStepMessage(
             messageId: messageId,
             action: action,
-            description: Self.localNativeToolStepTitle(for: action, completed: false),
+            description: Self.localNativeToolStepTitle(for: action, completed: false, displayTitle: displayTitle),
             done: false
         )
     }
 
-    private func finishLocalNativeToolStep(messageId: String, action: String, succeeded: Bool) {
+    private func finishLocalNativeToolStep(
+        messageId: String,
+        action: String,
+        displayTitle: String? = nil,
+        succeeded: Bool
+    ) {
         updateLocalNativeToolStepMessage(
             messageId: messageId,
             action: action,
-            description: Self.localNativeToolStepTitle(for: action, completed: true, succeeded: succeeded),
+            description: Self.localNativeToolStepTitle(for: action, completed: true, succeeded: succeeded, displayTitle: displayTitle),
             done: true
         )
     }
@@ -23182,29 +23328,47 @@ final class ChatViewModel {
             status,
             to: conversation?.messages[index].statusHistory ?? []
         )
-        conversation?.messages[index].content = description
+        let visibleContent = Self.localNativeToolVisibleContent(description, done: done, succeeded: !description.contains("执行失败"))
+        conversation?.messages[index].content = visibleContent
         conversation?.messages[index].isStreaming = false
         conversation?.messages[index].statusHistory = history
         conversation?.messages[index].metadata = metadata
         conversation?.history.updateNode(id: messageId) { node in
-            node.content = description
+            node.content = visibleContent
             node.done = true
             node.statusHistory = history
             node.metadata = metadata
         }
         if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
-            streamingStore.updateContent(description, displayContent: description)
+            streamingStore.updateContent(visibleContent, displayContent: visibleContent)
             streamingStore.setStatusHistory(history)
         }
         conversation?.history.currentId = messageId
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
     }
 
+    private static func localNativeToolVisibleContent(
+        _ description: String,
+        done: Bool,
+        succeeded: Bool
+    ) -> String {
+        guard done, !succeeded else { return "" }
+        return description.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private static func localNativeToolStepTitle(
         for action: String,
         completed: Bool,
-        succeeded: Bool = true
+        succeeded: Bool = true,
+        displayTitle: String? = nil
     ) -> String {
+        if let displayTitle {
+            let trimmed = displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                guard completed else { return "正在\(trimmed)..." }
+                return succeeded ? trimmed : "执行失败：\(trimmed)"
+            }
+        }
         let normalized = action.lowercased()
         let base: String
         if normalized.contains("contacts.search") { base = "搜索联系人" }
@@ -23241,71 +23405,56 @@ final class ChatViewModel {
             || action.hasPrefix("browser.")
     }
 
-    private func localBrowserToolRunningTitle(for actionName: String) -> String {
-        let action = actionName.lowercased()
-        if action.contains("web.search") || action == "web_search" || action.contains("browser.search") {
-            return "正在搜索网页..."
+    private static func localBrowserToolStatusAction(for actionName: String) -> String {
+        let action = actionName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: ".")
+            .lowercased()
+        if action.contains("web.search") || action == "web.search" || action.contains("browser.search") {
+            return "web_search"
         }
-        if action.contains("inspect") || action.contains("page_state") || action.contains("page.state") { return "正在理解网页结构..." }
-        if action.contains("auto") { return "正在自动操作网页..." }
-        if action.contains("observe") || action.contains("get_state") { return "正在观察网页状态..." }
-        if action.contains("navigate") || action.contains("open") { return "正在打开网页..." }
-        if action.contains("readable") || action.contains("text") { return "正在查看网页内容..." }
-        if action.contains("find_elements") { return "正在识别网页元素..." }
-        if action.contains("click") { return "正在点击网页控件..." }
-        if action.contains("type") { return "正在输入网页内容..." }
-        if action.contains("hover") { return "正在悬停网页控件..." }
-        if action.contains("scroll_and_collect") { return "正在滚动收集网页内容..." }
-        if action.contains("scroll") { return "正在滚动网页..." }
-        if action.contains("wait_for_image") { return "正在等待网页生成结果..." }
-        if action.contains("wait_for_dom_stable") { return "正在等待网页加载稳定..." }
-        if action.contains("get_backbone") || action.contains("info") { return "正在分析网页结构..." }
-        if action.contains("execute_js") { return "正在执行网页脚本..." }
-        if action.contains("set_viewport") { return "正在调整浏览器视口..." }
-        if action.contains("set_user_agent") { return "正在切换浏览器标识..." }
-        if action.contains("get_cookies") { return "正在读取站点 Cookie..." }
-        if action.contains("new_tab") { return "正在打开新标签页..." }
-        if action.contains("close_tab") { return "正在关闭标签页..." }
-        if action.contains("list_tabs") { return "正在查看标签页..." }
-        if action.contains("screenshot") {
-            return "正在截取网页画面..."
-        }
-        if action.contains("fetch") {
-            return "正在下载网页资源..."
-        }
-        if action.contains("browser_use")
-            || action.contains("click")
-            || action.contains("type")
-            || action.contains("scroll")
-            || action.contains("find_elements")
-            || action.contains("get_backbone")
-            || action.contains("set_viewport")
-            || action.contains("get_cookies")
-            || action.contains("wait_for_dom_stable")
-            || action.contains("new_tab")
-            || action.contains("close_tab")
-            || action.contains("list_tabs") {
-            return "正在操作网页..."
-        }
-        return "正在读取网页..."
+        return "browser_use"
     }
 
-    private static func localBrowserToolCompletedTitle(for actionName: String) -> String {
-        let action = actionName.lowercased()
-        if action.contains("web.search") || action == "web_search" || action.contains("browser.search") { return "网页搜索完成" }
-        if action.contains("inspect") || action.contains("page_state") || action.contains("page.state") { return "网页结构已理解" }
-        if action.contains("auto") { return "网页自动操作完成" }
-        if action.contains("observe") || action.contains("get_state") { return "网页状态已观察" }
-        if action.contains("navigate") || action.contains("open") { return "网页已打开" }
-        if action.contains("readable") || action.contains("text") { return "网页内容已查看" }
-        if action.contains("find_elements") { return "网页元素已识别" }
-        if action.contains("click") { return "网页控件已点击" }
-        if action.contains("type") { return "网页内容已输入" }
-        if action.contains("scroll_and_collect") { return "网页内容已收集" }
-        if action.contains("scroll") { return "网页已滚动" }
-        if action.contains("wait_for_image") { return "网页结果已保存" }
-        if action.contains("screenshot") { return "网页画面已截取" }
-        return "网页操作完成"
+    private static func localBrowserToolActionLabel(for actionName: String) -> String {
+        let action = actionName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "_", with: ".")
+            .lowercased()
+        if action.contains("web.search") || action == "web.search" || action.contains("browser.search") { return "搜索网页" }
+        if action.contains("navigate") || action.contains("open") { return "打开网页" }
+        if action.contains("find.elements") { return "识别网页元素" }
+        if action.contains("click") { return "点击网页控件" }
+        if action.contains("type") { return "输入网页内容" }
+        if action.contains("readable") || action.contains("text") { return "查看网页内容" }
+        if action.contains("scroll.and.collect") { return "滚动收集网页内容" }
+        if action.contains("scroll") { return "滚动网页" }
+        if action.contains("screenshot") { return "截取网页画面" }
+        if action.contains("wait.for.image") { return "等待网页生成结果" }
+        if action.contains("wait.for.dom.stable") { return "等待网页加载" }
+        if action.contains("fetch") { return "下载网页资源" }
+        if action.contains("inspect") || action.contains("page.state") || action.contains("observe") || action.contains("get.state") { return "查看网页状态" }
+        if action.contains("get.backbone") || action.contains("info") { return "分析网页结构" }
+        if action.contains("execute.js") { return "执行网页脚本" }
+        if action.contains("hover") { return "悬停网页控件" }
+        if action.contains("set.viewport") { return "调整浏览器视口" }
+        if action.contains("set.user.agent") { return "切换浏览器标识" }
+        if action.contains("get.cookies") { return "读取站点 Cookie" }
+        if action.contains("new.tab") { return "打开新标签页" }
+        if action.contains("close.tab") { return "关闭标签页" }
+        if action.contains("list.tabs") { return "查看标签页" }
+        return "操作网页"
+    }
+
+    private func localBrowserToolRunningTitle(for actionName: String, displayTitle: String? = nil) -> String {
+        let title = displayTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = title?.isEmpty == false ? title! : Self.localBrowserToolActionLabel(for: actionName)
+        return "正在\(label)..."
+    }
+
+    private static func localBrowserToolCompletedTitle(for actionName: String, displayTitle: String? = nil) -> String {
+        let title = displayTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title?.isEmpty == false ? title! : localBrowserToolActionLabel(for: actionName)
     }
 
     private static func localBrowserToolFailedTitle(for actionName: String) -> String {
