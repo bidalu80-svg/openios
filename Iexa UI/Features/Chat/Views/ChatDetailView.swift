@@ -5459,10 +5459,11 @@ struct ChatDetailView: View {
     }
 
     private var bottomComposerOverlayReservedHeight: CGFloat {
-        // The composer is a floating overlay so its material can sample chat
-        // content underneath. Reserve scrollable slack separately so the last
-        // message and action row can still be brought above the composer.
-        editingMessageId == nil ? 116 : 82
+        // Keep the composer floating over live chat content so its blur has
+        // real pixels to sample, like Telegram's bottom glass bar. We still
+        // reserve enough slack to keep the last turn reachable, but do not
+        // fully push content out from behind the glass.
+        editingMessageId == nil ? 78 : 56
     }
 
     // MARK: - Scroll-to-Bottom FAB

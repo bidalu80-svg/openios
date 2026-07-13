@@ -23,11 +23,11 @@ struct IexaNativeGlassFill<S: InsettableShape>: View {
     @Environment(\.theme) private var theme
 
     let shape: S
-    var lightTintOpacity: Double = 0.34
-    var darkTintOpacity: Double = 0.10
-    var highlightOpacity: Double = 0.52
+    var lightTintOpacity: Double = 0.20
+    var darkTintOpacity: Double = 0.16
+    var highlightOpacity: Double = 0.32
     var allowsDarkTint: Bool = true
-    var darkBlurOpacity: Double = 1.0
+    var darkBlurOpacity: Double = 0.96
 
     var body: some View {
         if #available(iOS 26.0, *) {
@@ -42,7 +42,7 @@ struct IexaNativeGlassFill<S: InsettableShape>: View {
                 }
                 .overlay {
                     if theme.isDark && allowsDarkTint {
-                        shape.fill(Color.black.opacity(darkTintOpacity * 0.34))
+                        shape.fill(Color.black.opacity(darkTintOpacity * 0.42))
                     }
                 }
                 .overlay {
@@ -74,13 +74,13 @@ struct IexaNativeGlassFill<S: InsettableShape>: View {
                 }
                 .overlay {
                     shape.strokeBorder(
-                        Color.white.opacity(theme.isDark ? 0.24 : 0.66),
+                        Color.white.opacity(theme.isDark ? 0.20 : 0.36),
                         lineWidth: theme.isDark ? 0.75 : 0.65
                     )
                 }
                 .overlay {
                     shape.strokeBorder(
-                        Color.black.opacity(theme.isDark ? 0.18 : 0.075),
+                        Color.black.opacity(theme.isDark ? 0.16 : 0.06),
                         lineWidth: 0.55
                     )
                     .blendMode(.multiply)
@@ -126,11 +126,11 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                 .background {
                     IexaNativeGlassFill(
                         shape: shape,
-                        lightTintOpacity: 0.30,
-                        darkTintOpacity: 0.12,
-                        highlightOpacity: 0.52,
+                        lightTintOpacity: 0.20,
+                        darkTintOpacity: 0.16,
+                        highlightOpacity: 0.32,
                         allowsDarkTint: true,
-                        darkBlurOpacity: 1.0
+                        darkBlurOpacity: 0.96
                     )
                 }
                 .clipShape(shape)
@@ -141,11 +141,11 @@ private struct IexaToolbarGlassBackground: ViewModifier {
                 .background {
                     IexaNativeGlassFill(
                         shape: shape,
-                        lightTintOpacity: 0.30,
-                        darkTintOpacity: 0.12,
-                        highlightOpacity: 0.52,
+                        lightTintOpacity: 0.20,
+                        darkTintOpacity: 0.16,
+                        highlightOpacity: 0.32,
                         allowsDarkTint: true,
-                        darkBlurOpacity: 1.0
+                        darkBlurOpacity: 0.96
                     )
                 }
                 .clipShape(shape)
@@ -175,12 +175,12 @@ private struct IexaLegacyToolbarGlassChrome<S: InsettableShape>: ViewModifier {
 
     private var toolbarStrokeColor: Color {
         theme.isDark
-            ? Color.white.opacity(0.18)
-            : Color.black.opacity(0.055)
+            ? Color.white.opacity(0.14)
+            : Color.black.opacity(0.045)
     }
 
     private var toolbarShadowColor: Color {
-        Color.black.opacity(theme.isDark ? 0.22 : 0.09)
+        Color.black.opacity(theme.isDark ? 0.24 : 0.075)
     }
 }
 
