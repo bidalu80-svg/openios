@@ -4285,7 +4285,7 @@ struct ChatDetailView: View {
             ChatAmbientBackgroundView(mode: ambientBackgroundMode)
             messageListArea
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        .overlay(alignment: .bottom) {
             if editingMessageId != nil {
                 editInputBar
             } else {
@@ -5357,7 +5357,7 @@ struct ChatDetailView: View {
                 }
             }
             .padding(.top, 8)
-            .padding(.bottom, 8)
+            .padding(.bottom, bottomComposerOverlayReservedHeight)
             .frame(maxWidth: iPadMaxContentWidth)
             .frame(maxWidth: .infinity)
             .transaction { $0.animation = nil }
@@ -5458,6 +5458,13 @@ struct ChatDetailView: View {
         }
     }
 
+    private var bottomComposerOverlayReservedHeight: CGFloat {
+        // The composer is a floating overlay so its material can sample chat
+        // content underneath. Reserve scrollable slack separately so the last
+        // message and action row can still be brought above the composer.
+        editingMessageId == nil ? 116 : 82
+    }
+
     // MARK: - Scroll-to-Bottom FAB
 
     @ViewBuilder
@@ -5493,7 +5500,7 @@ struct ChatDetailView: View {
                 }
             )
             .padding(.trailing, Spacing.md)
-            .padding(.bottom, Spacing.sm)
+            .padding(.bottom, bottomComposerOverlayReservedHeight + Spacing.sm)
             .transition(
                 .asymmetric(
                     insertion: .scale(scale: 0.7).combined(with: .opacity),
@@ -6374,8 +6381,7 @@ struct ChatDetailView: View {
     // MARK: - iMessage-Style Edit Input Bar
 
     /// Replaces the normal input bar when editing a message.
-    /// Lives in the safeAreaInset bottom slot — exactly where the normal
-    /// ChatInputField sits — so iOS keyboard avoidance just works.
+    /// Lives in the same bottom overlay slot as the normal ChatInputField.
     private var editInputBar: some View {
         HStack(spacing: 10) {
             // Cancel button
