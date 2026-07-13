@@ -5458,24 +5458,12 @@ struct ChatDetailView: View {
         }
     }
 
-    private var topChromeOverlayReservedHeight: CGFloat {
-        // The toolbar chrome is visually floating/translucent. Programmatic
-        // current-turn anchors must not land underneath it, especially after
-        // sending a short message where SwiftUI aligns the user bubble to the
-        // top of the ScrollView.
-        86
-    }
-
-    private func turnTopScrollAnchorId(for turnId: String) -> String {
-        "turn_top_anchor_\(turnId)"
-    }
-
     private var bottomComposerOverlayReservedHeight: CGFloat {
-        // Keep the composer floating over live chat content so its blur has
-        // real pixels to sample, like Telegram's bottom glass bar. We still
-        // reserve enough slack to keep the last turn reachable, but do not
-        // fully push content out from behind the glass.
-        editingMessageId == nil ? 78 : 56
+        // Restore the pre-glass scroll reserve so current-turn anchors and
+        // short chats land in the same place they did before the Telegram-style
+        // material pass. The input field can still be rendered as glass; this
+        // value is about scroll geometry, not the material itself.
+        editingMessageId == nil ? 116 : 82
     }
 
     private var shouldReserveSpaceForAgentFloatingBar: Bool {
@@ -5768,10 +5756,7 @@ struct ChatDetailView: View {
             scrollToBottomWithoutAnimation()
             return
         }
-        let targetId = pinCurrentTurnStartForLatestTurn
-            ? turnTopScrollAnchorId(for: turnStartId)
-            : turnStartId
-        scrollPosition.scrollTo(id: targetId, anchor: anchor)
+        scrollPosition.scrollTo(id: turnStartId, anchor: anchor)
     }
 
     private func scrollToCurrentTurnStartWithoutAnimation(anchor: UnitPoint = .top) {
@@ -5840,12 +5825,6 @@ struct ChatDetailView: View {
     private func messagesList(snapshot: TranscriptRenderSnapshot) -> some View {
         return ForEach(snapshot.turnGroups) { group in
             VStack(spacing: 0) {
-                if pinCurrentTurnStartForLatestTurn,
-                   group.id == snapshot.lastTurnGroupId {
-                    Color.clear
-                        .frame(height: topChromeOverlayReservedHeight)
-                        .id(turnTopScrollAnchorId(for: group.id))
-                }
                 ForEach(group.messages) { message in
                     let index = snapshot.indexByMessageId[message.id] ?? 0
                     messageRow(
