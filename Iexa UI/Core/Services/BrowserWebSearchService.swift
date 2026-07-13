@@ -829,7 +829,14 @@ final class BrowserWebSearchService: NSObject {
             try? await Task.sleep(nanoseconds: 180_000_000)
         }
 
-        let context = await evaluateJSONObject(Self.viewportContextScript(textLimit: 2600, elementLimit: 32)) ?? [:]
+        let automationContext = await evaluateJSONObject(Self.browserAutomationStateScript(
+            elementLimit: min(max(Self.intValue(call["observation_limit"] ?? call["observationLimit"] ?? call["element_limit"] ?? call["limit"]) ?? 48, 12), 100),
+            textLimit: min(max(Self.intValue(call["observation_text_limit"] ?? call["observationTextLimit"] ?? call["max_length"]) ?? 2600, 600), 6000)
+        )) ?? [:]
+        let legacyContext = automationContext.isEmpty
+            ? (await evaluateJSONObject(Self.viewportContextScript(textLimit: 2600, elementLimit: 32)) ?? [:])
+            : [:]
+        let context = automationContext.isEmpty ? legacyContext : automationContext
         let metrics = await evaluateJSONObject(Self.pageScrollMetricsScript()) ?? [:]
         let includeScreenshot = Self.browserVisualObservationEnabled(in: call)
         let screenshot = includeScreenshot ? await captureViewportScreenshot(prefix: "browser_observe") : nil
@@ -842,21 +849,39 @@ final class BrowserWebSearchService: NSObject {
             ?? webView?.url?.absoluteString
             ?? ""
         let visibleText = context["visible_text"] as? String ?? ""
-        let visibleElements = context["interactive_elements"] as? [[String: Any]] ?? []
-        let scrollY = Self.intValue(context["scroll_y"] ?? metrics["scroll_y"]) ?? 0
-        let scrollHeight = Self.intValue(metrics["scroll_height"]) ?? 0
-        let viewportHeight = Self.intValue(metrics["viewport_height"] ?? context["viewport_height"]) ?? 0
+        let visibleElements = (context["visible_elements"] as? [[String: Any]])
+            ?? (context["interactive_elements"] as? [[String: Any]])
+            ?? []
+        let nextActionCandidates = context["action_candidates"] as? [[String: Any]] ?? []
+        let scrollInfo = context["scroll"] as? [String: Any] ?? [:]
+        let scrollY = Self.intValue(scrollInfo["y"] ?? context["scroll_y"] ?? metrics["scroll_y"]) ?? 0
+        let scrollHeight = Self.intValue(scrollInfo["height"] ?? metrics["scroll_height"]) ?? 0
+        let viewportHeight = Self.intValue(scrollInfo["viewport_height"] ?? metrics["viewport_height"] ?? context["viewport_height"]) ?? 0
         let nearBottom = scrollHeight > 0 && viewportHeight > 0 && scrollY + viewportHeight >= scrollHeight - 24
-        let canScrollDown = scrollHeight > 0 && viewportHeight > 0 && !nearBottom
+        let canScrollDown = (Self.boolValue(scrollInfo["can_scroll_down"]) ?? false)
+            || (scrollHeight > 0 && viewportHeight > 0 && !nearBottom)
         let stateLabel: String
         if verificationRequiresUser {
             stateLabel = "needs_user_verification"
         } else if visibleElements.contains(where: { (($0["tag"] as? String) ?? "").lowercased() == "input" || (($0["tag"] as? String) ?? "").lowercased() == "textarea" }) {
             stateLabel = "form_available"
+        } else if !nextActionCandidates.isEmpty {
+            stateLabel = "actionable"
         } else if canScrollDown {
             stateLabel = "needs_more_scroll"
         } else {
             stateLabel = "ready"
+        }
+
+        let summaryText: String
+        if verificationRequiresUser {
+            summaryText = "已观察当前网页：发现人机验证，并已尝试滚动定位验证区域；等待用户在同一浏览器页面完成。"
+        } else if !nextActionCandidates.isEmpty {
+            summaryText = "已观察当前网页并找到 \(nextActionCandidates.count) 个可继续操作入口。"
+        } else if canScrollDown {
+            summaryText = "已观察当前网页视口；页面仍可继续向下滚动，继续任务前应按需滚动/扫描。"
+        } else {
+            summaryText = "已观察当前网页视口；页面已接近底部，可基于当前状态继续。"
         }
 
         var payload: [String: Any] = [
@@ -868,12 +893,15 @@ final class BrowserWebSearchService: NSObject {
             "scroll_y": scrollY,
             "scroll_height": scrollHeight,
             "viewport_height": viewportHeight,
-            "viewport_width": Self.intValue(metrics["viewport_width"] ?? context["viewport_width"]) ?? 0,
+            "viewport_width": Self.intValue(scrollInfo["viewport_width"] ?? metrics["viewport_width"] ?? context["viewport_width"]) ?? 0,
             "can_scroll_down": canScrollDown,
             "near_bottom": nearBottom,
             "visible_text": visibleText,
             "visible_elements": visibleElements,
             "visible_element_count": visibleElements.count,
+            "next_action_candidates": nextActionCandidates,
+            "next_action_candidate_count": Self.intValue(context["action_candidate_count"]) ?? nextActionCandidates.count,
+            "post_action_observation": context,
             "viewport_context": context,
             "human_verification": verification,
             "requires_user_verification": verificationRequiresUser,
@@ -881,11 +909,7 @@ final class BrowserWebSearchService: NSObject {
             "state_label": stateLabel,
             "attach_file": false,
             "preview_images": [],
-            "summary": verificationRequiresUser
-                ? "已观察当前网页：发现人机验证，并已尝试滚动定位验证区域；等待用户在同一浏览器页面完成。"
-                : (canScrollDown
-                    ? "已观察当前网页视口；页面仍可继续向下滚动，继续任务前应按需滚动/扫描。"
-                    : "已观察当前网页视口；页面已接近底部，可基于当前状态继续。")
+            "summary": summaryText
         ]
         if let screenshot {
             payload["visual_observation"] = [
@@ -4821,7 +4845,11 @@ final class BrowserWebSearchService: NSObject {
             '[role="checkbox"]', '[role="radio"]', '[role="switch"]', '[role="textbox"]', '[role="searchbox"]',
             '[onclick]', '[tabindex]:not([tabindex="-1"])', '[contenteditable]',
             '[aria-label]', '[aria-labelledby]', '[aria-describedby]', '[title]', '[alt]',
-            '[data-testid]', '[data-test]', '[data-cy]', '[jsaction]'
+            '[data-testid]', '[data-test]', '[data-cy]', '[jsaction]',
+            '[data-click]', '[data-clickable]', '[data-href]', '[data-url]', '[data-link]',
+            '[class*="btn" i]', '[class*="button" i]', '[class*="link" i]', '[class*="tab" i]',
+            '[class*="nav" i]', '[class*="menu" i]', '[class*="item" i]', '[class*="card" i]',
+            '[class*="result" i]', '[class*="select" i]', '[class*="dropdown" i]'
           ].join(',');
 
           function clean(value) {
@@ -4961,11 +4989,21 @@ final class BrowserWebSearchService: NSObject {
             const tag = (node.tagName || node.nodeName || '').toLowerCase();
             const role = attr(node, 'role').toLowerCase();
             const type = attr(node, 'type').toLowerCase();
+            const className = String(node.className || '').toLowerCase();
+            const id = attr(node, 'id').toLowerCase();
+            const dataTarget = attr(node, 'data-click') || attr(node, 'data-clickable') || attr(node, 'data-href') || attr(node, 'data-url') || attr(node, 'data-link');
             if (tag === 'a' && attr(node, 'href')) return true;
             if (tag === 'button' || tag === 'summary' || tag === 'label' || tag === 'iframe') return true;
             if (tag === 'input' && ['button', 'submit', 'reset', 'image'].includes(type)) return true;
             if (['button', 'link', 'menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch'].includes(role)) return true;
-            return Boolean(attr(node, 'onclick') || attr(node, 'jsaction') || attr(node, 'tabindex'));
+            if (dataTarget) return true;
+            if (attr(node, 'onclick') || attr(node, 'jsaction') || attr(node, 'tabindex')) return true;
+            if (/(^|[-_\\s])(btn|button|link|tab|nav|menu|item|card|result|select|dropdown)([-_\\s]|$)/.test(className + ' ' + id)) return true;
+            try {
+              const style = getComputedStyle(node);
+              if (style && style.cursor === 'pointer') return true;
+            } catch (_) {}
+            return false;
           }
           function nodeKind(node) {
             if (isEditable(node)) return 'input';

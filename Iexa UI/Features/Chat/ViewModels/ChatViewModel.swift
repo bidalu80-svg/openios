@@ -15789,6 +15789,15 @@ final class ChatViewModel {
         if let items = result["items"] as? [[String: Any]], !items.isEmpty {
             payloadData["items"] = items.prefix(24).map { localNativeBrowserCompactElement($0) }
         }
+        if let visibleElements = result["visible_elements"] as? [[String: Any]], !visibleElements.isEmpty {
+            payloadData["visible_elements"] = visibleElements.prefix(24).map { localNativeBrowserCompactElement($0) }
+        }
+        if let candidates = result["next_action_candidates"] as? [[String: Any]], !candidates.isEmpty {
+            payloadData["next_action_candidates"] = candidates.prefix(16).map { localNativeBrowserCompactElement($0) }
+        }
+        if let observation = result["post_action_observation"] as? [String: Any] {
+            payloadData["post_action_observation"] = localNativeBrowserCompactObservation(observation)
+        }
         if let focused = result["focused_element"] as? [String: Any] {
             payloadData["focused_element"] = localNativeBrowserCompactElement(focused)
         }
@@ -15919,6 +15928,37 @@ final class ChatViewModel {
                 chunks.append("elements:\n\(itemLines.joined(separator: "\n"))")
             }
         }
+        if let candidates = result["next_action_candidates"] as? [[String: Any]], !candidates.isEmpty {
+            let candidateLines = candidates.prefix(16).enumerated().compactMap { index, item -> String? in
+                let label = firstNonEmptyString(
+                    in: item,
+                    keys: ["label", "text", "title", "aria_label", "name", "placeholder", "href", "url", "link", "selector"]
+                )
+                guard let label, !label.isEmpty else { return nil }
+                let action = firstNonEmptyString(in: item, keys: ["action"]) ?? "browser.click"
+                let nodeID = firstNonEmptyString(in: item, keys: ["node_id", "nodeId"])
+                return nodeID == nil
+                    ? "\(index + 1). \(action): \(label)"
+                    : "\(index + 1). \(action): \(label) [node_id: \(nodeID!)]"
+            }
+            if !candidateLines.isEmpty {
+                chunks.append("next_action_candidates:\n\(candidateLines.joined(separator: "\n"))")
+            }
+        }
+        if let visibleElements = result["visible_elements"] as? [[String: Any]], !visibleElements.isEmpty {
+            let elementLines = visibleElements.prefix(16).enumerated().compactMap { index, item -> String? in
+                let label = firstNonEmptyString(
+                    in: item,
+                    keys: ["label", "text", "title", "aria_label", "name", "placeholder", "href", "url", "link", "selector"]
+                )
+                guard let label, !label.isEmpty else { return nil }
+                let nodeID = firstNonEmptyString(in: item, keys: ["node_id", "nodeId"])
+                return nodeID == nil ? "\(index + 1). \(label)" : "\(index + 1). \(label) [node_id: \(nodeID!)]"
+            }
+            if !elementLines.isEmpty {
+                chunks.append("visible_elements:\n\(elementLines.joined(separator: "\n"))")
+            }
+        }
         let joined = chunks
             .joined(separator: "\n\n")
             .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
@@ -15955,13 +15995,23 @@ final class ChatViewModel {
         if let ok = nativeToolBoolValue(result["ok"]) {
             state["ok"] = ok
         }
+        if let candidateCount = result["next_action_candidate_count"] {
+            state["next_action_candidate_count"] = candidateCount
+        }
+        if let visibleElementCount = result["visible_element_count"] {
+            state["visible_element_count"] = visibleElementCount
+        }
+        if let stateLabel = firstNonEmptyString(in: result, keys: ["state_label", "browser_state_label"]) {
+            state["state_label"] = stateLabel
+        }
         return state
     }
 
     private static func localNativeBrowserCompactElement(_ raw: [String: Any]) -> [String: Any] {
         var compact: [String: Any] = [:]
         for key in [
-            "index", "node_id", "nodeId", "tag", "role", "type", "text", "title", "aria_label",
+            "index", "node_id", "nodeId", "action", "kind", "reason", "confidence",
+            "tag", "role", "type", "text", "label", "title", "aria_label",
             "placeholder", "name", "value", "href", "url", "link", "selector", "score",
             "scroll_y", "page_x", "page_y", "page_center_x", "page_center_y"
         ] {
@@ -15985,6 +16035,40 @@ final class ChatViewModel {
             if !compactRect.isEmpty {
                 compact["rect"] = compactRect
             }
+        }
+        return compact
+    }
+
+    private static func localNativeBrowserCompactObservation(_ raw: [String: Any]) -> [String: Any] {
+        var compact: [String: Any] = [:]
+        for key in ["title", "url", "ready_state", "state_label", "visible_text", "visible_element_count", "total_detected_element_count", "action_candidate_count", "requires_user_verification"] {
+            if let value = raw[key] {
+                if let text = value as? String {
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        compact[key] = String(trimmed.prefix(key == "visible_text" ? 1200 : 400))
+                    }
+                } else if value is NSNumber || value is Bool {
+                    compact[key] = value
+                }
+            }
+        }
+        if let scroll = raw["scroll"] as? [String: Any] {
+            var compactScroll: [String: Any] = [:]
+            for key in ["x", "y", "max_y", "height", "viewport_width", "viewport_height", "can_scroll_up", "can_scroll_down", "progress"] {
+                if let value = scroll[key], value is NSNumber || value is Bool {
+                    compactScroll[key] = value
+                }
+            }
+            if !compactScroll.isEmpty {
+                compact["scroll"] = compactScroll
+            }
+        }
+        if let candidates = raw["action_candidates"] as? [[String: Any]], !candidates.isEmpty {
+            compact["action_candidates"] = candidates.prefix(16).map { localNativeBrowserCompactElement($0) }
+        }
+        if let visibleElements = raw["visible_elements"] as? [[String: Any]], !visibleElements.isEmpty {
+            compact["visible_elements"] = visibleElements.prefix(16).map { localNativeBrowserCompactElement($0) }
         }
         return compact
     }
