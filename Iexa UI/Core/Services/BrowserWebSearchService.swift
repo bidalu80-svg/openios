@@ -3580,7 +3580,11 @@ final class BrowserWebSearchService: NSObject {
         [role='checkbox'], [role='radio'], [role='switch'], [role='textbox'], [role='searchbox'],
         [onclick], [tabindex], [contenteditable],
         [aria-label], [aria-labelledby], [aria-describedby], [title], [alt],
-        [data-testid], [data-test], [data-cy], [jsaction]
+        [data-testid], [data-test], [data-cy], [jsaction],
+        [data-click], [data-clickable], [data-href], [data-url], [data-link],
+        [class*="btn"], [class*="button"], [class*="link"], [class*="tab"],
+        [class*="nav"], [class*="menu"], [class*="item"], [class*="card"],
+        [class*="result"], [class*="select"], [class*="dropdown"]
         """
         let selector = Self.firstString(in: call, keys: ["selector", "css"]) ?? defaultSelector
         let limit = min(max(Self.intValue(call["limit"] ?? call["max_results"]) ?? 30, 1), 100)
@@ -4759,11 +4763,20 @@ final class BrowserWebSearchService: NSObject {
             return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0.01;
           }
           const interactiveSelector = [
-            'a[href]', 'button', 'input', 'textarea', 'select', 'summary',
-            '[role="button"]', '[role="link"]', '[role="menuitem"]',
-            '[tabindex]:not([tabindex="-1"])', '[contenteditable="true"]'
+            'a[href]', 'button', 'input', 'textarea', 'select', 'summary', 'label', 'iframe',
+            '[role="button"]', '[role="link"]', '[role="menuitem"]', '[role="tab"]', '[role="option"]',
+            '[role="checkbox"]', '[role="radio"]', '[role="switch"]', '[role="textbox"]', '[role="searchbox"]',
+            '[onclick]', '[tabindex]:not([tabindex="-1"])', '[contenteditable]',
+            '[aria-label]', '[aria-labelledby]', '[aria-describedby]', '[title]', '[alt]',
+            '[data-testid]', '[data-test]', '[data-cy]', '[jsaction]',
+            '[data-click]', '[data-clickable]', '[data-href]', '[data-url]', '[data-link]',
+            '[class*="btn"]', '[class*="button"]', '[class*="link"]', '[class*="tab"]',
+            '[class*="nav"]', '[class*="menu"]', '[class*="item"]', '[class*="card"]',
+            '[class*="result"]', '[class*="select"]', '[class*="dropdown"]'
           ].join(',');
-          const elements = Array.from(document.querySelectorAll(interactiveSelector))
+          let rawElements = [];
+          try { rawElements = Array.from(document.querySelectorAll(interactiveSelector)); } catch (_) { rawElements = []; }
+          const elements = rawElements
             .filter(isVisible)
             .slice(0, elementLimit)
             .map((el, index) => {
@@ -4847,9 +4860,9 @@ final class BrowserWebSearchService: NSObject {
             '[aria-label]', '[aria-labelledby]', '[aria-describedby]', '[title]', '[alt]',
             '[data-testid]', '[data-test]', '[data-cy]', '[jsaction]',
             '[data-click]', '[data-clickable]', '[data-href]', '[data-url]', '[data-link]',
-            '[class*="btn" i]', '[class*="button" i]', '[class*="link" i]', '[class*="tab" i]',
-            '[class*="nav" i]', '[class*="menu" i]', '[class*="item" i]', '[class*="card" i]',
-            '[class*="result" i]', '[class*="select" i]', '[class*="dropdown" i]'
+            '[class*="btn"]', '[class*="button"]', '[class*="link"]', '[class*="tab"]',
+            '[class*="nav"]', '[class*="menu"]', '[class*="item"]', '[class*="card"]',
+            '[class*="result"]', '[class*="select"]', '[class*="dropdown"]'
           ].join(',');
 
           function clean(value) {
@@ -5059,6 +5072,11 @@ final class BrowserWebSearchService: NSObject {
           for (const root of allRoots()) {
             let nodes = [];
             try { nodes = Array.from(root.querySelectorAll(interactiveSelector)); } catch (_) { nodes = []; }
+            try {
+              for (const candidate of Array.from(root.querySelectorAll('div, span, li, p, section, article, header, footer'))) {
+                if (isEditable(candidate) || isClickable(candidate)) nodes.push(candidate);
+              }
+            } catch (_) {}
             for (const node of nodes) {
               if (!visible(node)) continue;
               const key = [
@@ -6023,14 +6041,25 @@ final class BrowserWebSearchService: NSObject {
             const tag = norm(node.tagName || node.nodeName || '');
             const role = norm(attr(node, 'role'));
             const type = norm(attr(node, 'type'));
+            const className = norm(typeof node.className === 'string' ? node.className : '');
+            const id = norm(node.id || '');
+            const dataTarget = attr(node, 'data-click') || attr(node, 'data-clickable') || attr(node, 'data-href') || attr(node, 'data-url') || attr(node, 'data-link');
+            let cursorPointer = false;
+            try {
+              const style = getComputedStyle(node);
+              cursorPointer = Boolean(style && style.cursor === 'pointer');
+            } catch (_) {}
             return tag === 'button'
               || tag === 'a'
               || tag === 'summary'
               || tag === 'label'
               || (tag === 'input' && ['button', 'submit', 'reset', 'image', 'checkbox', 'radio'].includes(type))
               || ['button', 'link', 'menuitem', 'tab', 'option', 'checkbox', 'radio', 'switch'].includes(role)
+              || Boolean(dataTarget)
               || Boolean(attr(node, 'onclick') || attr(node, 'jsaction'))
-              || (attr(node, 'tabindex') && attr(node, 'tabindex') !== '-1');
+              || (attr(node, 'tabindex') && attr(node, 'tabindex') !== '-1')
+              || /(^|[-_\\s])(btn|button|link|tab|nav|menu|item|card|result|select|dropdown)([-_\\s]|$)/.test(className + ' ' + id)
+              || cursorPointer;
           }
           function editableState(node) {
             if (!node) return false;
@@ -6227,7 +6256,13 @@ final class BrowserWebSearchService: NSObject {
               try { delete window.__iexaNodeStore[key]; } catch (_) {}
             }
           }
-          const elements = findElements(selector)
+          const rawElements = findElements(selector);
+          for (const node of findElements('div, span, li, p, section, article, header, footer')) {
+            if ((clickableState(node) || editableState(node)) && !rawElements.includes(node)) {
+              rawElements.push(node);
+            }
+          }
+          const elements = rawElements
             .filter(visible)
             .filter(node => matchesFilters(node, accessibleText(node), href(node)));
           let items = elements.map((node, sourceIndex) => {
@@ -6547,7 +6582,7 @@ final class BrowserWebSearchService: NSObject {
           const retryVisible = visibleFailureNodes.some(value => /点击重试|重试|try again|retry/i.test(value));
           const loadingVisible = Boolean(
             busyPattern.test(bodyText) ||
-            findElements('[aria-busy="true"], [role="progressbar"], [role="status"], progress, .loading, .spinner, .progress, [class*="loading" i], [class*="spinner" i], [class*="progress" i], [class*="skeleton" i], [data-state="loading"], [data-loading="true"]')
+            findElements('[aria-busy="true"], [role="progressbar"], [role="status"], progress, .loading, .spinner, .progress, [class*="loading"], [class*="spinner"], [class*="progress"], [class*="skeleton"], [data-state="loading"], [data-loading="true"]')
               .some(visible)
           );
           const downloadNodes = findElements('a[href], button, [role="button"], [role="link"], [download]')
@@ -6561,14 +6596,14 @@ final class BrowserWebSearchService: NSObject {
             '[aria-live]',
             '[role="status"]',
             '[role="log"]',
-            '[data-testid*="result" i]',
-            '[data-testid*="output" i]',
-            '[data-testid*="answer" i]',
-            '[class*="result" i]',
-            '[class*="output" i]',
-            '[class*="answer" i]',
-            '[class*="response" i]',
-            '[class*="preview" i]',
+            '[data-testid*="result"]',
+            '[data-testid*="output"]',
+            '[data-testid*="answer"]',
+            '[class*="result"]',
+            '[class*="output"]',
+            '[class*="answer"]',
+            '[class*="response"]',
+            '[class*="preview"]',
             'main article',
             'main section',
             'article',
@@ -6737,7 +6772,7 @@ final class BrowserWebSearchService: NSObject {
             const failureText = failureNodes.join(' | ').slice(0, 240);
             const retryVisible = failureNodes.some(value => /点击重试|重试|try again|retry/i.test(value));
             const loadingVisible = busyPattern.test(bodyText) ||
-              Array.from(document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [role="status"], progress, .loading, .spinner, .progress, [class*="loading" i], [class*="spinner" i], [class*="progress" i], [class*="skeleton" i], [data-state="loading"], [data-loading="true"]')).some(visible);
+              Array.from(document.querySelectorAll('[aria-busy="true"], [role="progressbar"], [role="status"], progress, .loading, .spinner, .progress, [class*="loading"], [class*="spinner"], [class*="progress"], [class*="skeleton"], [data-state="loading"], [data-loading="true"]')).some(visible);
             return {
               challengeDetected,
               retryVisible,
@@ -8457,18 +8492,18 @@ final class BrowserWebSearchService: NSObject {
             '[data-sitekey]',
             '[name="g-recaptcha-response"]',
             '.g-recaptcha',
-            '[class*="turnstile" i]',
-            '[class*="captcha" i]',
-            '[id*="turnstile" i]',
-            '[id*="captcha" i]',
-            '[id*="challenge" i]',
-            'iframe[src*="turnstile" i]',
-            'iframe[src*="recaptcha" i]',
-            'iframe[src*="challenge" i]',
-            'iframe[title*="challenge" i]',
-            'iframe[title*="captcha" i]',
-            'iframe[title*="verification" i]',
-            'iframe[title*="cloudflare" i]'
+            '[class*="turnstile"]',
+            '[class*="captcha"]',
+            '[id*="turnstile"]',
+            '[id*="captcha"]',
+            '[id*="challenge"]',
+            'iframe[src*="turnstile"]',
+            'iframe[src*="recaptcha"]',
+            'iframe[src*="challenge"]',
+            'iframe[title*="challenge"]',
+            'iframe[title*="captcha"]',
+            'iframe[title*="verification"]',
+            'iframe[title*="cloudflare"]'
           ];
           const viewportH = Math.max(window.innerHeight || 0, document.documentElement.clientHeight || 0, 1);
           const viewportW = Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0, 1);
@@ -8596,14 +8631,14 @@ final class BrowserWebSearchService: NSObject {
               '[data-sitekey]',
               '[name="g-recaptcha-response"]',
               '.g-recaptcha',
-              'iframe[src*="turnstile" i]',
-              'iframe[src*="recaptcha" i]',
-              'iframe[src*="challenge" i]',
-              '[class*="turnstile" i]',
-              '[class*="captcha" i]',
-              '[id*="turnstile" i]',
-              '[id*="captcha" i]',
-              '[id*="challenge" i]'
+              'iframe[src*="turnstile"]',
+              'iframe[src*="recaptcha"]',
+              'iframe[src*="challenge"]',
+              '[class*="turnstile"]',
+              '[class*="captcha"]',
+              '[id*="turnstile"]',
+              '[id*="captcha"]',
+              '[id*="challenge"]'
             ];
             return selectors.some(selector => {
               try { return Array.from(document.querySelectorAll(selector)).some(visible); }
