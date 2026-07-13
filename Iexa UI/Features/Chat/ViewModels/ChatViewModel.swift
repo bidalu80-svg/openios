@@ -7199,6 +7199,10 @@ final class ChatViewModel {
                         }
                         let requestedVideoSize = Self.requestedImageSize(from: videoPrompt)
                         let videoSeedImage = self.firstEditableImage(from: currentAttachments)
+                        try self.validateDirectVideoInputs(
+                            modelId: modelId,
+                            seedImage: videoSeedImage
+                        )
                         await RunLiveActivityService.shared.update(
                             id: assistantMessageId,
                             title: "正在生成视频",
@@ -9862,6 +9866,10 @@ final class ChatViewModel {
                     }
                     let requestedVideoSize = Self.requestedImageSize(from: videoPrompt)
                     let videoSeedImage = self.firstEditableImage(from: currentAttachments)
+                    try self.validateDirectVideoInputs(
+                        modelId: modelId,
+                        seedImage: videoSeedImage
+                    )
                     await RunLiveActivityService.shared.update(
                         id: assistantMessageId,
                         title: "正在生成视频",
@@ -18165,6 +18173,29 @@ final class ChatViewModel {
         let negatives = ["vision", "ocr", "vl", "video-chat", "videochat"]
         return positives.contains(where: { haystack.contains($0) })
             && !negatives.contains(where: { haystack.contains($0) })
+    }
+
+    private func validateDirectVideoInputs(
+        modelId: String,
+        seedImage: (data: Data, fileName: String)?
+    ) throws {
+        guard xaiVideoModelRequiresSeedImage(modelId: modelId),
+              seedImage == nil else {
+            return
+        }
+        throw APIError.unknown(
+            underlying: NSError(
+                domain: "ChatViewModel",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "grok-imagine-video-1.5 目前只支持图生视频，请先附加一张图片后再生成视频。"]
+            )
+        )
+    }
+
+    private func xaiVideoModelRequiresSeedImage(modelId: String) -> Bool {
+        let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
+            .lowercased()
+        return haystack.contains("grok-imagine-video-1.5")
     }
 
     private func firstEditableImage(from attachments: [ChatAttachment]) -> (data: Data, fileName: String)? {

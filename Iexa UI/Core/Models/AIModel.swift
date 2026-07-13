@@ -225,6 +225,8 @@ struct AIModel: Codable, Identifiable, Hashable, Sendable {
         "video", "videos", "text-to-video", "image-to-video", "t2v", "i2v",
         "veo", "sora", "kling", "hailuo", "runway", "luma", "pika", "vidu",
         "seedance", "wan-", "wan_", "wan2", "minimax-video", "grok-imagine-video",
+        "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview",
+        "grok-imagine-video-1.5-2026-05-30",
         "视频", "生视频", "视频生成"
     ]
 

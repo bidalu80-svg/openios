@@ -2027,6 +2027,9 @@ final class APIClient: @unchecked Sendable {
             if let aspectRatio = xaiAspectRatio(for: sizeValue) {
                 officialBase["aspect_ratio"] = aspectRatio
             }
+            if usesXAIVideoShape {
+                officialBase["resolution"] = xaiVideoResolution(for: sizeValue)
+            }
 
             var base: [String: Any] = [
                 "model": model,
@@ -2035,7 +2038,7 @@ final class APIClient: @unchecked Sendable {
                 "size": sizeValue
             ]
             if let duration {
-                let seconds = min(max(duration, 1), 60)
+                let seconds = clampedVideoDuration(duration, usesXAIVideoShape: usesXAIVideoShape)
                 if usesXAIVideoShape {
                     var officialBody = officialBase
                     officialBody["duration"] = seconds
@@ -2110,6 +2113,31 @@ final class APIClient: @unchecked Sendable {
         return raw.contains("grok-imagine-video")
             || (raw.contains("grok") && raw.contains("video"))
             || (raw.contains("grok") && raw.contains("imagine"))
+    }
+
+    private func clampedVideoDuration(_ duration: Int, usesXAIVideoShape: Bool) -> Int {
+        let maximum = usesXAIVideoShape ? 15 : 60
+        return min(max(duration, 1), maximum)
+    }
+
+    private func xaiVideoResolution(for size: String) -> String {
+        let lowercased = size.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lowercased.contains("1080") || lowercased.contains("1080p") {
+            return "1080p"
+        }
+        if lowercased.contains("480") || lowercased.contains("480p") {
+            return "480p"
+        }
+        if lowercased.contains("720") || lowercased.contains("720p") {
+            return "720p"
+        }
+        guard let dimensions = videoDimensions(from: lowercased) else {
+            return "720p"
+        }
+        let longestSide = max(dimensions.width, dimensions.height)
+        if longestSide >= 1600 { return "1080p" }
+        if longestSide <= 640 { return "480p" }
+        return "720p"
     }
 
     private func normalizedVideoSize(for size: String) -> String {
