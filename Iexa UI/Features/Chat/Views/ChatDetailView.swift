@@ -5889,14 +5889,16 @@ struct ChatDetailView: View {
         )
         let isLatestUserMessage = message.role == .user
             && message.id == latestUserMessageId
+        let isDirectMediaPlaceholder = message.metadata?["iexa_image_generation_placeholder"] == "true"
 
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 0) {
 
             // ── Assistant header (avatar + model name) ──
-            // The model identity belongs to the assistant row, not to the
-            // render card. Keep it immediate even when only a direct-media
-            // card is intentionally held for the keyboard-settle interval.
-            if message.role == .assistant {
+            // A direct media card is its own rendering surface.  ChatGPT's
+            // reference does not prepend the regular assistant identity row
+            // to that surface; normal text/tool replies still show it as soon
+            // as their assistant row mounts.
+            if message.role == .assistant && !isDirectMediaPlaceholder {
                 assistantHeader(for: message, animated: isLastAssistant || message.isStreaming)
             }
 
@@ -9990,6 +9992,10 @@ private struct MediaGenerationPlaceholderView: View {
     /// to protect scroll anchoring, which previously made `withAnimation`
     /// resolve as a direct full-size appearance.
     @State private var entranceStartedAt: Date?
+    /// Keeps the dot sequence deterministic from the moment this particular
+    /// card appears.  A global reference-date phase made two renders of the
+    /// same card begin at unrelated visual positions.
+    @State private var dotsStartedAt: Date?
 
     private var isVideo: Bool { kind == "video" }
 
@@ -10008,10 +10014,12 @@ private struct MediaGenerationPlaceholderView: View {
             .onAppear {
                 isActive = scenePhase == .active
                 beginCardEntrance()
+                dotsStartedAt = .now
             }
             .onDisappear {
                 isActive = false
                 entranceStartedAt = nil
+                dotsStartedAt = nil
             }
             .onChange(of: scenePhase) { _, phase in
                 isActive = phase == .active
@@ -10104,14 +10112,15 @@ private struct MediaGenerationPlaceholderView: View {
     private var animatedDots: some View {
         if isActive && !reduceMotion {
             TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+                let elapsed = max(0, timeline.date.timeIntervalSince(dotsStartedAt ?? timeline.date))
                 MediaGenerationDotsCanvas(
                     isDark: theme.isDark,
                     isVideo: isVideo,
-                    time: timeline.date.timeIntervalSinceReferenceDate
+                    time: elapsed
                 )
             }
         } else {
-            MediaGenerationDotsCanvas(isDark: theme.isDark, isVideo: isVideo, time: 0.4)
+            MediaGenerationDotsCanvas(isDark: theme.isDark, isVideo: isVideo, time: 0)
         }
     }
 
@@ -10258,25 +10267,24 @@ private struct MediaGenerationDotsCanvas: View {
     }
 
     private func scanState(for size: CGSize) -> ScanState {
-        let period = isVideo ? 5.2 : 4.6
-        let cycle = (time.truncatingRemainder(dividingBy: period) + period) / period
-        // A four-lane serpentine path deliberately crosses the whole card,
-        // including its rounded outer perimeter.  The former focus point was
-        // confined to the central 44% x 46%, visibly trapping the scan inside
-        // a small rectangle.
-        let laneCount = 4
-        let lanePosition = min(Double(laneCount) - 0.000_1, cycle * Double(laneCount))
-        let lane = Int(lanePosition)
-        let laneProgress = lanePosition - Double(lane)
-        let horizontalProgress = lane.isMultiple(of: 2) ? laneProgress : 1 - laneProgress
+        // ChatGPT's card is a fine, regular lattice with a soft radial bloom
+        // drifting through it.  It is not a scanner that visits a sequence of
+        // horizontal lanes.  Keep the lattice across the full card, then let
+        // this edge-less focus cloud create the perceived motion.
+        let period = isVideo ? 5.0 : 4.4
+        let phase = (time.truncatingRemainder(dividingBy: period) + period) / period * .pi * 2
         let focus = CGPoint(
-            x: size.width * CGFloat(-0.08 + horizontalProgress * 1.16),
-            y: size.height * CGFloat((Double(lane) + 0.5) / Double(laneCount))
+            x: size.width * CGFloat(
+                0.50 + 0.20 * sin(phase) + 0.065 * sin(phase * 2.0 + 0.75)
+            ),
+            y: size.height * CGFloat(
+                0.54 + 0.17 * cos(phase - 0.62) + 0.055 * sin(phase * 1.6)
+            )
         )
         let tint = isDark
             ? Color(red: 0.82, green: 0.80, blue: 0.89)
             : Color(red: 0.55, green: 0.52, blue: 0.63)
-        let spacing: CGFloat = isVideo ? 10.5 : 10.8
+        let spacing: CGFloat = isVideo ? 11.4 : 11.1
         return ScanState(
             focus: focus,
             tint: tint,
@@ -10294,7 +10302,7 @@ private struct MediaGenerationDotsCanvas: View {
         column: Int
     ) {
         let point = dotPosition(row: row, column: column, spacing: state.spacing)
-        let intensity = dotIntensity(point: point, size: size, focus: state.focus, row: row, column: column)
+        let intensity = dotIntensity(point: point, size: size, focus: state.focus)
         guard intensity > 0.075 else { return }
         let radius = CGFloat(0.40 + intensity * 0.82)
         let rect = CGRect(
@@ -10310,33 +10318,22 @@ private struct MediaGenerationDotsCanvas: View {
     }
 
     private func dotPosition(row: Int, column: Int, spacing: CGFloat) -> CGPoint {
-        let xJitter = CGFloat(dotNoise(row: row, column: column, salt: 0.11) - 0.5) * spacing * 0.42
-        let yJitter = CGFloat(dotNoise(row: row, column: column, salt: 0.69) - 0.5) * spacing * 0.42
         return CGPoint(
-            x: CGFloat(column) * spacing + xJitter,
-            y: CGFloat(row) * spacing + yJitter
+            x: CGFloat(column) * spacing,
+            y: CGFloat(row) * spacing
         )
     }
 
     private func dotIntensity(
         point: CGPoint,
         size: CGSize,
-        focus: CGPoint,
-        row: Int,
-        column: Int
+        focus: CGPoint
     ) -> Double {
         let dx = Double((point.x - focus.x) / max(size.width, 1))
         let dy = Double((point.y - focus.y) / max(size.height, 1))
-        let scan = exp(-(dx * dx + dy * dy) * 22)
-        let wave = 0.5 + 0.5 * sin(time * 2.3 + Double(row) * 0.38 + Double(column) * 0.51)
-        return 0.06 + wave * 0.08 + scan * (0.66 + wave * 0.34)
-    }
-
-    private func dotNoise(row: Int, column: Int, salt: Double) -> Double {
-        let value = sin(
-            Double(row) * 12.9898 + Double(column) * 78.233 + salt * 37.719
-        ) * 43_758.5453
-        return value - floor(value)
+        let bloom = exp(-(dx * dx + dy * dy) * 15)
+        let pulse = 0.88 + 0.12 * sin(time * 2.05)
+        return 0.075 + bloom * 0.88 * pulse
     }
 }
 
