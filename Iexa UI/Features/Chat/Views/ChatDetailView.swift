@@ -4181,6 +4181,10 @@ struct ChatDetailView: View {
     @State private var keyboard = KeyboardTracker()
     @State private var isPostSendWaitingUIDelayed = false
     @State private var postSendWaitingUIDelayGeneration = 0
+    /// Latches only the first displayed assistant body token.  A dedicated
+    /// probe observes streaming text so the full ChatDetailView does not become
+    /// a per-token observer.
+    @State private var firstTurnVisibleAssistantMessageId: String?
 
     // MARK: Attachment pickers
     @State private var selectedPhotos: [PhotosPickerItem] = []
@@ -4263,11 +4267,14 @@ struct ChatDetailView: View {
     }
 
     /// The Gemini field is an entrance / first-response effect, not a permanent
-    /// first-conversation wallpaper. The complete capture fades it away as soon
-    /// as the first assistant response has finished streaming.
+    /// first-conversation wallpaper. The capture fades it as soon as the first
+    /// visible assistant body token is displayed.
     private var hasCompletedFirstTurn: Bool {
         guard let firstAssistant = viewModel.messages.first(where: { $0.role == .assistant }) else {
             return false
+        }
+        if firstTurnVisibleAssistantMessageId == firstAssistant.id {
+            return true
         }
         guard !isMessageVisuallyStreaming(firstAssistant) else { return false }
         return !firstAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -4299,6 +4306,16 @@ struct ChatDetailView: View {
                 keyboardIsVisible: keyboard.isVisible
             )
             messageListArea
+            if let firstAssistant = viewModel.messages.first(where: { $0.role == .assistant }) {
+                FirstAssistantVisibleTokenProbe(
+                    streamingStore: viewModel.streamingStore,
+                    assistantMessageId: firstAssistant.id,
+                    fallbackContent: firstAssistant.content
+                ) { messageId in
+                    guard self.firstTurnVisibleAssistantMessageId != messageId else { return }
+                    self.firstTurnVisibleAssistantMessageId = messageId
+                }
+            }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if editingMessageId != nil {
@@ -9454,6 +9471,54 @@ private enum ChatAmbientBackgroundMode: Equatable {
     case normal
     case idleFirstTurn
     case activeFirstTurn
+}
+
+/// Keeps first-token observation isolated from ChatDetailView's large body.
+/// The ambient background only needs one transition, so this reports once when
+/// actual visible assistant prose begins to drain into the transcript.
+private struct FirstAssistantVisibleTokenProbe: View {
+    let streamingStore: StreamingContentStore
+    let assistantMessageId: String
+    let fallbackContent: String
+    let onVisibleBodyToken: @MainActor (String) -> Void
+
+    private var visibleContent: String {
+        let isActiveMessage = streamingStore.isActive
+            && streamingStore.streamingMessageId == assistantMessageId
+        return isActiveMessage ? streamingStore.displayContent : fallbackContent
+    }
+
+    var body: some View {
+        let content = visibleContent
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .onAppear { reportIfVisible(content) }
+            .onChange(of: content) { _, updatedContent in
+                reportIfVisible(updatedContent)
+            }
+    }
+
+    private func reportIfVisible(_ content: String) {
+        guard Self.containsVisibleAssistantBodyToken(content) else { return }
+        Task { @MainActor in
+            onVisibleBodyToken(assistantMessageId)
+        }
+    }
+
+    private static func containsVisibleAssistantBodyToken(_ content: String) -> Bool {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        // Do not fade for reasoning/tool details.  Only prose after a completed
+        // details envelope is a user-visible assistant body token here.
+        if trimmed.hasPrefix("<details") {
+            guard let closing = trimmed.range(of: "</details>") else { return false }
+            let body = trimmed[closing.upperBound...]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return !body.isEmpty
+        }
+        return true
+    }
 }
 
 private struct ChatAmbientBackgroundView: View {
