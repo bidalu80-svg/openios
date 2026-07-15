@@ -4268,7 +4268,8 @@ struct ChatDetailView: View {
 
     /// The Gemini field is an entrance / first-response effect, not a permanent
     /// first-conversation wallpaper. The capture fades it as soon as the first
-    /// visible assistant body token is displayed.
+    /// visible assistant output is displayed: prose for a normal response, or
+    /// the media-rendering card for a direct image/video response.
     private var hasCompletedFirstTurn: Bool {
         guard let firstAssistant = viewModel.messages.first(where: { $0.role == .assistant }) else {
             return false
@@ -4310,7 +4311,8 @@ struct ChatDetailView: View {
                 FirstAssistantVisibleTokenProbe(
                     streamingStore: viewModel.streamingStore,
                     assistantMessageId: firstAssistant.id,
-                    fallbackContent: firstAssistant.content
+                    fallbackContent: firstAssistant.content,
+                    hasVisibleMediaPlaceholder: firstAssistant.metadata?["iexa_image_generation_placeholder"] == "true"
                 ) { messageId in
                     guard self.firstTurnVisibleAssistantMessageId != messageId else { return }
                     self.firstTurnVisibleAssistantMessageId = messageId
@@ -9473,13 +9475,15 @@ private enum ChatAmbientBackgroundMode: Equatable {
     case activeFirstTurn
 }
 
-/// Keeps first-token observation isolated from ChatDetailView's large body.
+/// Keeps first-output observation isolated from ChatDetailView's large body.
 /// The ambient background only needs one transition, so this reports once when
-/// actual visible assistant prose begins to drain into the transcript.
+/// actual visible assistant prose begins to drain into the transcript, or when
+/// the first direct-media rendering card is presented in place of prose.
 private struct FirstAssistantVisibleTokenProbe: View {
     let streamingStore: StreamingContentStore
     let assistantMessageId: String
     let fallbackContent: String
+    let hasVisibleMediaPlaceholder: Bool
     let onVisibleBodyToken: @MainActor (String) -> Void
 
     private var visibleContent: String {
@@ -9493,14 +9497,17 @@ private struct FirstAssistantVisibleTokenProbe: View {
         Color.clear
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
-            .onAppear { reportIfVisible(content) }
+            .onAppear { reportIfVisible(content, mediaPlaceholderIsVisible: hasVisibleMediaPlaceholder) }
             .onChange(of: content) { _, updatedContent in
-                reportIfVisible(updatedContent)
+                reportIfVisible(updatedContent, mediaPlaceholderIsVisible: hasVisibleMediaPlaceholder)
+            }
+            .onChange(of: hasVisibleMediaPlaceholder) { _, isVisible in
+                reportIfVisible(content, mediaPlaceholderIsVisible: isVisible)
             }
     }
 
-    private func reportIfVisible(_ content: String) {
-        guard Self.containsVisibleAssistantBodyToken(content) else { return }
+    private func reportIfVisible(_ content: String, mediaPlaceholderIsVisible: Bool) {
+        guard mediaPlaceholderIsVisible || Self.containsVisibleAssistantBodyToken(content) else { return }
         Task { @MainActor in
             onVisibleBodyToken(assistantMessageId)
         }
