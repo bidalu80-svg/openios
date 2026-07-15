@@ -201,11 +201,16 @@ struct TypingIndicator: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var appeared = false
+    @State private var motionStartedAt = Date()
+
+    // Gemini's 8.5 px capture spacing maps to roughly 5.6 points in Iexa's
+    // chat coordinate space on the recorded device.
+    private let waveDotSpacing: CGFloat = 5.6
 
     var body: some View {
         Group {
             if reduceMotion {
-                indicator(progress: 0.08)
+                indicator(progress: 0)
             } else {
                 TimelineView(.animation) { timeline in
                     indicator(progress: progress(for: timeline.date))
@@ -220,6 +225,10 @@ struct TypingIndicator: View {
         .offset(y: appeared ? 0 : 5)
         .onAppear {
             guard !appeared else { return }
+            // A pending assistant turn always starts from the same visual
+            // phase. Reference-date modulo made the old indicator appear in a
+            // random part of its loop whenever the message view was created.
+            motionStartedAt = .now
             if reduceMotion {
                 appeared = true
             } else {
@@ -230,11 +239,11 @@ struct TypingIndicator: View {
         }
     }
 
-    private func indicator(progress: Double) -> some View {
+    private func indicator(progress elapsed: TimeInterval) -> some View {
         Canvas { context, size in
             for index in 0..<3 {
-                let point = dotPoint(index: index, progress: progress)
-                let diameter = CGFloat(3.2) * dotScale(index: index, progress: progress)
+                let point = dotPoint(index: index, elapsed: elapsed)
+                let diameter: CGFloat = 3.4
                 let center = CGPoint(
                     x: size.width / 2 + point.x,
                     y: size.height / 2 + point.y
@@ -248,168 +257,131 @@ struct TypingIndicator: View {
 
                 context.fill(
                     Path(ellipseIn: rect),
-                    with: .color(theme.textPrimary.opacity(dotOpacity(index: index, progress: progress)))
+                    with: .color(theme.textPrimary.opacity(0.94))
                 )
             }
         }
         .frame(width: 34, height: 24)
     }
 
-    private func progress(for date: Date) -> Double {
-        let period = 3.20
-        let value = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: period) / period
-        return value < 0 ? value + 1 : value
+    private func progress(for date: Date) -> TimeInterval {
+        max(0, date.timeIntervalSince(motionStartedAt))
     }
 
-    private func dotPoint(index: Int, progress: Double) -> CGPoint {
-        let waveEnd = 0.54
-
-        if progress < waveEnd {
-            return waveLinePoint(index: index, progress: progress / waveEnd)
+    /// Gemini's waiting mark has two visible phases in the supplied recording:
+    /// fixed-x dots that travel through a vertical wave, then each dot follows
+    /// its own arc while the line rotates into a collapsing / opening triangle.
+    private func dotPoint(index: Int, elapsed: TimeInterval) -> CGPoint {
+        if reduceMotion {
+            return CGPoint(x: CGFloat(index - 1) * waveDotSpacing, y: 0)
         }
-        return orbitDropPoint(
+
+        // Measured from the complete Gemini capture: the fixed-x wave remains
+        // visible for about three seconds before the triangle takes over.
+        let lineDuration: TimeInterval = 3.0
+        // The complete reference shows an eight-tenths-of-a-second turn into
+        // the triangle. This is not a straight interpolation: each dot leaves
+        // the wave on a different curved path.
+        let handoffDuration: TimeInterval = 0.80
+
+        if elapsed < lineDuration {
+            return waveLinePoint(index: index, elapsed: elapsed)
+        }
+
+        let handoffElapsed = elapsed - lineDuration
+        guard handoffElapsed < handoffDuration else {
+            return trianglePoint(index: index, elapsed: handoffElapsed - handoffDuration)
+        }
+        return handoffPoint(index: index, elapsed: handoffElapsed)
+    }
+
+    private func waveLinePoint(index: Int, elapsed: TimeInterval) -> CGPoint {
+        let wavePeriod: TimeInterval = 1.220
+        // Independent terminal phases keep the moving line continuous with the
+        // measured first handoff keyframe. A shared phase offset made the old
+        // animation visibly jump just before it turned into the triangle.
+        let handoffPhase = [3.86, 2.32, 1.31][index]
+        let phase = handoffPhase + ((elapsed - 3.0) / wavePeriod) * .pi * 2
+        return CGPoint(
+            x: CGFloat(index - 1) * waveDotSpacing,
+            y: CGFloat(sin(phase)) * 4.55
+        )
+    }
+
+    private func handoffPoint(index: Int, elapsed: TimeInterval) -> CGPoint {
+        keyframedPoint(
             index: index,
-            progress: (progress - waveEnd) / (1 - waveEnd)
+            elapsed: elapsed,
+            duration: 0.80,
+            keyframes: Self.handoffKeyframes
         )
     }
 
-    private func waveLinePoint(index: Int, progress: Double) -> CGPoint {
-        let t = clamped(progress)
-        let handoffStart = 0.78
-        if t >= handoffStart {
-            let from = waveMotionPoint(index: index, progress: handoffStart)
-            let to = linePoint(index)
-            return interpolate(from, to, smootherstep((t - handoffStart) / (1 - handoffStart)))
-        }
-        return waveMotionPoint(index: index, progress: t)
-    }
-
-    private func waveMotionPoint(index: Int, progress: Double) -> CGPoint {
-        let t = clamped(progress)
-        let base = linePoint(index)
-        let envelope = smootherstep(t / 0.10) * (1 - smootherstep((t - 0.72) / 0.16))
-        let phase = t * .pi * 3.25 - Double(index) * 0.82
-        let lift = sin(phase) * 5.8
-        let swell = sin(.pi * t) * 1.15
+    private func trianglePoint(index: Int, elapsed: TimeInterval) -> CGPoint {
+        // The reference does not leave a visible gap between the dots at the
+        // tightest part of the cycle: they meet, turn, and reopen. The prior
+        // baseline-radius formula could never make them meet, and the extra
+        // settle delay shifted the entire triangle phase after the handoff.
+        let pulsePeriod: TimeInterval = 0.581
+        let pulsePhase = .pi * ((elapsed + 0.012) / pulsePeriod)
+        let radius = CGFloat(8.45 * abs(cos(pulsePhase)))
+        let triangleOrientation = -0.535 - 0.305 * cos(pulsePhase)
+        let angle = triangleOrientation + Double(index) * (.pi * 2 / 3)
         return CGPoint(
-            x: base.x + CGFloat(cos(phase * 0.56)) * 0.45 * CGFloat(envelope),
-            y: base.y - CGFloat((lift + swell) * envelope)
+            x: CGFloat(cos(angle)) * radius,
+            y: CGFloat(sin(angle)) * radius
         )
     }
 
-    private func orbitDropPoint(index: Int, progress: Double) -> CGPoint {
-        let t = clamped(progress)
-        if t < 0.68 {
-            return snakeOrbitPoint(index: index, progress: t / 0.68)
-        }
+    /// Per-dot positions sampled from the supplied full Gemini capture.
+    /// Catmull-Rom interpolation preserves the curved rotation between the
+    /// samples instead of drawing a single rigid triangle into place.
+    private func keyframedPoint(
+        index: Int,
+        elapsed: TimeInterval,
+        duration: TimeInterval,
+        keyframes: [[CGPoint]]
+    ) -> CGPoint {
+        let position = min(1, max(0, elapsed / duration)) * Double(keyframes.count - 1)
+        let segment = min(keyframes.count - 2, Int(position))
+        let t = CGFloat(position - Double(segment))
+        let p0 = keyframes[max(0, segment - 1)][index]
+        let p1 = keyframes[segment][index]
+        let p2 = keyframes[segment + 1][index]
+        let p3 = keyframes[min(keyframes.count - 1, segment + 2)][index]
 
-        if t < 0.76 {
-            let u = (t - 0.68) / 0.08
-            let point = raisedLinePoint(index)
-            return CGPoint(
-                x: point.x,
-                y: point.y + CGFloat(sin(.pi * u)) * 0.18
-            )
-        }
-
-        let u = clamped((t - 0.76) / 0.24)
-        let delayed = clamped((u - Double(2 - index) * 0.05) / 0.90)
-        let start = raisedLinePoint(index)
-        let end = linePoint(index)
-        let fall = delayed * delayed * (3 - 2 * delayed)
-        let rebound = sin(.pi * delayed) * (1 - delayed) * 1.35
         return CGPoint(
-            x: start.x + (end.x - start.x) * CGFloat(smootherstep(delayed)),
-            y: start.y + (end.y - start.y) * CGFloat(fall) - CGFloat(rebound)
+            x: catmullRom(p0.x, p1.x, p2.x, p3.x, progress: t),
+            y: catmullRom(p0.y, p1.y, p2.y, p3.y, progress: t)
         )
     }
 
-    private var dotSpacing: CGFloat { 9.2 }
-
-    private func linePoint(_ index: Int) -> CGPoint {
-        CGPoint(x: CGFloat(index - 1) * dotSpacing, y: 0)
+    private func catmullRom(
+        _ previous: CGFloat,
+        _ start: CGFloat,
+        _ end: CGFloat,
+        _ next: CGFloat,
+        progress: CGFloat
+    ) -> CGFloat {
+        let t2 = progress * progress
+        let t3 = t2 * progress
+        let linear = (-previous + end) * progress
+        let quadratic = (2 * previous - 5 * start + 4 * end - next) * t2
+        let cubic = (-previous + 3 * start - 3 * end + next) * t3
+        return 0.5 * (2 * start + linear + quadratic + cubic)
     }
 
-    private func raisedLinePoint(_ index: Int) -> CGPoint {
-        let point = linePoint(index)
-        return CGPoint(x: point.x, y: point.y - 5.1)
-    }
-
-    private func snakeOrbitPoint(index: Int, progress: Double) -> CGPoint {
-        let t = clamped(progress)
-        let entryEnd = 0.16
-        let orbitEnd = 0.76
-        let entryAngle = snakeEntryAngle(index)
-
-        if t < entryEnd {
-            let u = smootherstep(t / entryEnd)
-            return interpolate(linePoint(index), orbitCirclePoint(angle: entryAngle), u)
-        }
-
-        if t < orbitEnd {
-            let u = easeInOutSine((t - entryEnd) / (orbitEnd - entryEnd))
-            return orbitCirclePoint(angle: entryAngle - .pi * 2 * u)
-        }
-
-        let u = (t - orbitEnd) / (1 - orbitEnd)
-        let delayed = smootherstep(clamped((u - Double(2 - index) * 0.04) / 0.92))
-        let from = orbitCirclePoint(angle: entryAngle - .pi * 2)
-        let to = raisedLinePoint(index)
-        let point = interpolate(from, to, delayed)
-        return CGPoint(
-            x: point.x,
-            y: point.y - CGFloat(sin(.pi * delayed)) * 1.15
-        )
-    }
-
-    private func snakeEntryAngle(_ index: Int) -> Double {
-        .pi / 2 + (1 - Double(index)) * 0.52
-    }
-
-    private func orbitCirclePoint(angle: Double) -> CGPoint {
-        let radius: CGFloat = 6.9
-        let center = CGPoint(x: 0, y: -3.1)
-        return CGPoint(
-            x: center.x + CGFloat(cos(angle)) * radius,
-            y: center.y + CGFloat(sin(angle)) * radius
-        )
-    }
-
-    private func interpolate(_ from: CGPoint, _ to: CGPoint, _ progress: Double) -> CGPoint {
-        CGPoint(
-            x: from.x + (to.x - from.x) * CGFloat(progress),
-            y: from.y + (to.y - from.y) * CGFloat(progress)
-        )
-    }
-
-    private func dotScale(index: Int, progress: Double) -> CGFloat {
-        let phase = progress * .pi * 6 - Double(index) * 0.7
-        return CGFloat(0.94 + 0.08 * (0.5 + 0.5 * sin(phase)))
-    }
-
-    private func dotOpacity(index: Int, progress: Double) -> Double {
-        let phase = progress * .pi * 6 - Double(index) * 0.7
-        return 0.76 + 0.24 * (0.5 + 0.5 * sin(phase))
-    }
-
-    private func clamped(_ value: Double) -> Double {
-        min(1, max(0, value))
-    }
-
-    private func smoothstep(_ value: Double) -> Double {
-        let t = clamped(value)
-        return t * t * (3 - 2 * t)
-    }
-
-    private func smootherstep(_ value: Double) -> Double {
-        let t = clamped(value)
-        return t * t * t * (t * (t * 6 - 15) + 10)
-    }
-
-    private func easeInOutSine(_ value: Double) -> Double {
-        let t = clamped(value)
-        return -(cos(.pi * t) - 1) / 2
-    }
+    private static let handoffKeyframes: [[CGPoint]] = [
+        [CGPoint(x: -5.67, y: -3.00), CGPoint(x: 0.33, y: 3.33), CGPoint(x: 5.60, y: 4.40)],
+        [CGPoint(x: -5.81, y: -4.07), CGPoint(x: 1.00, y: 1.33), CGPoint(x: 5.60, y: 4.40)],
+        [CGPoint(x: -5.93, y: -2.19), CGPoint(x: 1.00, y: -1.67), CGPoint(x: 5.84, y: 3.49)],
+        [CGPoint(x: -4.59, y: 2.85), CGPoint(x: -1.15, y: -3.93), CGPoint(x: 5.92, y: 0.39)],
+        [CGPoint(x: 0.67, y: 6.14), CGPoint(x: -5.33, y: -2.33), CGPoint(x: 3.76, y: -4.00)],
+        [CGPoint(x: 6.43, y: 3.33), CGPoint(x: -6.07, y: 3.52), CGPoint(x: -1.26, y: -6.19)],
+        [CGPoint(x: 7.83, y: -2.25), CGPoint(x: -2.33, y: 7.33), CGPoint(x: -5.50, y: -4.92)],
+        [CGPoint(x: 6.46, y: -5.42), CGPoint(x: 1.00, y: 8.33), CGPoint(x: -7.50, y: -2.92)],
+        [CGPoint(x: 5.67, y: -6.33), CGPoint(x: 2.19, y: 8.07), CGPoint(x: -8.00, y: -1.67)]
+    ]
 
 }
 

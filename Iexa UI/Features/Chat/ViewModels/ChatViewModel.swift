@@ -14447,13 +14447,17 @@ final class ChatViewModel {
         providerType: ServerConfig.ProviderType?
     ) -> [String: Any] {
         if providerType == .anthropic {
+            var resultBlock: [String: Any] = [
+                "type": "tool_result",
+                "tool_use_id": callID,
+                "content": content
+            ]
+            if anthropicToolResultRepresentsFailure(content) {
+                resultBlock["is_error"] = true
+            }
             return [
                 "role": "user",
-                "content": [[
-                    "type": "tool_result",
-                    "tool_use_id": callID,
-                    "content": content
-                ]]
+                "content": [resultBlock]
             ]
         }
         return [
@@ -14474,11 +14478,15 @@ final class ChatViewModel {
            (last["role"] as? String) == "user",
            var blocks = last["content"] as? [[String: Any]],
            blocks.allSatisfy({ ($0["type"] as? String) == "tool_result" }) {
-            blocks.append([
+            var resultBlock: [String: Any] = [
                 "type": "tool_result",
                 "tool_use_id": callID,
                 "content": content
-            ])
+            ]
+            if anthropicToolResultRepresentsFailure(content) {
+                resultBlock["is_error"] = true
+            }
+            blocks.append(resultBlock)
             last["content"] = blocks
             messages[messages.count - 1] = last
             return
@@ -14488,6 +14496,24 @@ final class ChatViewModel {
             content: content,
             providerType: providerType
         ))
+    }
+
+    /// Native browser and device tools return structured observations.  Preserve
+    /// an explicit failure bit for Anthropic instead of relying on Claude to
+    /// infer an error from prose in `content`.
+    private static func anthropicToolResultRepresentsFailure(_ content: String) -> Bool {
+        guard let data = content.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let payload = object as? [String: Any] else {
+            return false
+        }
+        if let ok = payload["ok"] as? Bool, !ok { return true }
+        if let success = payload["success"] as? Bool, !success { return true }
+        if let error = payload["error"] as? String,
+           !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        return false
     }
 
     private static func localAlpineToolHistoryMessages(
@@ -16293,6 +16319,15 @@ final class ChatViewModel {
         return !localNativeFunctionToolsUnsupportedModels.contains(key)
     }
 
+    /// Claude receives native tool schemas, not a prose-only fallback.  Do not
+    /// hide an enabled local capability merely because the user's wording did
+    /// not happen to match one of the app's routing keywords; Claude decides
+    /// whether a declared tool is relevant.  Image generation remains excluded
+    /// because the Anthropic provider has no corresponding image endpoint.
+    private var shouldExposeAllEnabledLocalNativeToolsToAnthropic: Bool {
+        currentProviderType == .anthropic
+    }
+
     private var isLocalBrowserNativeToolsEnabled: Bool {
         isChatWebSearchAllowed && webSearchEnabled
     }
@@ -17989,21 +18024,28 @@ final class ChatViewModel {
         let nativeToolsDisabled = request.toolChoice?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() == "none"
+        let exposeAllEnabledTools = shouldExposeAllEnabledLocalNativeToolsToAnthropic
         let shouldExposeImageTools = shouldPrioritizeImageRoute
             && shouldExposeLocalImageNativeTools(for: latestUserTextForLocalNativeTools)
         let shouldExposeBrowserTools = !shouldPrioritizeImageRoute
-            && shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalNativeTools)
+            && (exposeAllEnabledTools
+                ? isLocalBrowserNativeToolsEnabled
+                : shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalNativeTools))
         let shouldExposeMemoryTools = !shouldPrioritizeImageRoute
-            && shouldExposeLocalMemoryNativeTools(for: latestUserTextForLocalNativeTools)
+            && (exposeAllEnabledTools
+                ? memoryEnabled
+                : shouldExposeLocalMemoryNativeTools(for: latestUserTextForLocalNativeTools))
         let localOfficeContextForNativeTools = localOfficeEnabled
             && !shouldPrioritizeImageRoute
             ? latestUserTextForLocalNativeTools.flatMap { localOfficeNativeSystemContext(for: $0) }
             : nil
         let shouldExposeOfficeTools = !shouldPrioritizeImageRoute
-            && shouldExposeLocalOfficeNativeTools(
-                for: latestUserTextForLocalNativeTools,
-                officeRevisionContext: localOfficeContextForNativeTools
-            )
+            && (exposeAllEnabledTools
+                ? localOfficeEnabled
+                : shouldExposeLocalOfficeNativeTools(
+                    for: latestUserTextForLocalNativeTools,
+                    officeRevisionContext: localOfficeContextForNativeTools
+                ))
         let shouldExposeShortcutsTools = shortcutsEnabled && !shouldPrioritizeImageRoute
         let shouldExposeLocalNativeTools = shouldExposeImageTools
             || shouldExposeBrowserTools
@@ -18342,6 +18384,9 @@ final class ChatViewModel {
     private func shouldUseDirectImageGeneration(modelId: String) -> Bool {
         let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
             .lowercased()
+        if Self.looksLikeXAIVideoModel(haystack) {
+            return false
+        }
         let directEndpointTokens = [
             "gpt-image", "dall-e", "dalle", "flux", "sdxl",
             "stable-diffusion", "midjourney", "mj-", "minimax-image",
@@ -18375,6 +18420,9 @@ final class ChatViewModel {
     private func shouldPreferChatNativeImageGeneration(modelId: String) -> Bool {
         let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
             .lowercased()
+        if Self.looksLikeXAIVideoModel(haystack) {
+            return false
+        }
 
         // These are usually image-only OpenAI-compatible endpoints.
         let directEndpointModels = [
@@ -18421,16 +18469,33 @@ final class ChatViewModel {
     private func shouldUseDirectVideoGeneration(modelId: String) -> Bool {
         let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
             .lowercased()
+        if Self.looksLikeXAIVideoModel(haystack) {
+            return true
+        }
         let positives = [
             "video", "videos", "veo", "sora", "wan", "kling", "hailuo",
             "runway", "luma", "pika", "vidu", "seedance", "minimax-video",
             "qwen-video", "wanx", "hunyuan-video", "cogvideo", "jimeng",
+            "grok-imagine-video", "imagine-video",
             "即梦", "可灵", "海螺", "文生视频", "图生视频",
             "text-to-video", "image-to-video", "i2v", "t2v", "生视频", "视频生成"
         ]
         let negatives = ["vision", "ocr", "vl", "video-chat", "videochat"]
         return positives.contains(where: { haystack.contains($0) })
             && !negatives.contains(where: { haystack.contains($0) })
+    }
+
+    private static func looksLikeXAIVideoModel(_ haystack: String) -> Bool {
+        let separators = CharacterSet.whitespacesAndNewlines
+            .union(CharacterSet(charactersIn: ",;|/\\:()[]{}"))
+        return haystack.components(separatedBy: separators)
+            .filter { !$0.isEmpty }
+            .contains { token in
+                token == "grok-imagine-video"
+                    || token.hasPrefix("grok-imagine-video-")
+                    || token == "imagine-video"
+                    || token.hasPrefix("imagine-video-")
+            }
     }
 
     private func validateDirectVideoInputs(
@@ -18445,7 +18510,7 @@ final class ChatViewModel {
             underlying: NSError(
                 domain: "ChatViewModel",
                 code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "grok-imagine-video-1.5 目前只支持图生视频，请先附加一张图片后再生成视频。"]
+                userInfo: [NSLocalizedDescriptionKey: "grok-imagine-video-1.5 / imagine-video-1.5 目前只支持图生视频，请先附加一张图片后再生成视频。"]
             )
         )
     }
@@ -18454,6 +18519,7 @@ final class ChatViewModel {
         let haystack = "\(modelId) \(selectedModel?.name ?? "") \(selectedModel?.description ?? "") \(selectedModel?.tags.joined(separator: " ") ?? "")"
             .lowercased()
         return haystack.contains("grok-imagine-video-1.5")
+            || haystack.contains("imagine-video-1.5")
     }
 
     private func firstEditableImage(from attachments: [ChatAttachment]) -> (data: Data, fileName: String)? {
@@ -21900,21 +21966,28 @@ final class ChatViewModel {
         let localSkillsContext = LocalSkillsService.shared.contextPrompt()
         let localNativeToolContext: String? = {
             guard let latestUserTextForLocalAlpine else { return nil }
+            let exposeAllEnabledTools = shouldExposeAllEnabledLocalNativeToolsToAnthropic
             let officeContext = localOfficeEnabled && !shouldPrioritizeImageRoute
                 ? localOfficeNativeSystemContext(for: latestUserTextForLocalAlpine)
                 : nil
             let shouldExposeBrowserTools = !shouldPrioritizeImageRoute
-                && shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalAlpine)
+                && (exposeAllEnabledTools
+                    ? isLocalBrowserNativeToolsEnabled
+                    : shouldExposeLocalBrowserNativeTools(for: latestUserTextForLocalAlpine))
             let shouldExposeImageTools = shouldPrioritizeImageRoute
                 && shouldUseLocalNativeFunctionTools(for: localAlpineModelId)
                 && shouldExposeLocalImageNativeTools(for: latestUserTextForLocalAlpine)
             let shouldExposeMemoryTools = !shouldPrioritizeImageRoute
-                && shouldExposeLocalMemoryNativeTools(for: latestUserTextForLocalAlpine)
+                && (exposeAllEnabledTools
+                    ? memoryEnabled
+                    : shouldExposeLocalMemoryNativeTools(for: latestUserTextForLocalAlpine))
             let shouldExposeOfficeTools = !shouldPrioritizeImageRoute
-                && shouldExposeLocalOfficeNativeTools(
-                    for: latestUserTextForLocalAlpine,
-                    officeRevisionContext: officeContext
-                )
+                && (exposeAllEnabledTools
+                    ? localOfficeEnabled
+                    : shouldExposeLocalOfficeNativeTools(
+                        for: latestUserTextForLocalAlpine,
+                        officeRevisionContext: officeContext
+                    ))
             let shouldExposeShortcutsTools = shortcutsEnabled && !shouldPrioritizeImageRoute
             let shouldExposeDeviceTools = !shouldPrioritizeImageRoute
                 && Self.shouldExposeLocalDeviceNativeTools(latestUserTextForLocalAlpine)

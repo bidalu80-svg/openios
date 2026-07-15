@@ -1926,12 +1926,12 @@ final class APIClient: @unchecked Sendable {
         )
 
         let usesXAIVideoShape = isXAIVideoModel(model)
+        let usesVolcengineVideoShape = isVolcengineSeedanceVideoModel(model)
+            && isVolcengineArkEndpoint()
         let paths = usesXAIVideoShape ? [
-            "/videos/generations",
-            "/videos",
-            "/video/generations",
-            "/videos/generate",
-            "/video/generate"
+            "/videos/generations"
+        ] : usesVolcengineVideoShape ? [
+            volcengineVideoCreatePath()
         ] : [
             "/videos",
             "/videos/generations",
@@ -1943,18 +1943,32 @@ final class APIClient: @unchecked Sendable {
         for path in paths {
             for requestBody in bodyVariants {
                 do {
-                    let json = try await network.requestJSON(
-                        path: path,
-                        method: .post,
-                        body: requestBody,
-                        timeout: 600
-                    )
+                    let json = usesVolcengineVideoShape
+                        ? try await requestVolcengineArkJSON(
+                            path: path,
+                            method: .post,
+                            body: requestBody,
+                            timeout: 600
+                        )
+                        : try await network.requestJSON(
+                            path: path,
+                            method: .post,
+                            body: requestBody,
+                            timeout: 600
+                        )
 
                     if let videoReference = firstVideoReference(in: json) {
                         return videoReference
                     }
-                    if let taskId = firstVideoTaskId(in: json) {
-                        return try await pollVideoGenerationTask(taskId: taskId)
+                    let taskId = usesVolcengineVideoShape
+                        ? firstVolcengineVideoTaskId(in: json)
+                        : firstVideoTaskId(in: json)
+                    if let taskId {
+                        return try await pollVideoGenerationTask(
+                            taskId: taskId,
+                            usesXAIVideoShape: usesXAIVideoShape,
+                            usesVolcengineVideoShape: usesVolcengineVideoShape
+                        )
                     }
                     lastError = APIError.responseDecoding(
                         underlying: NSError(
@@ -1976,11 +1990,14 @@ final class APIClient: @unchecked Sendable {
             }
         }
 
+        if let lastError {
+            throw lastError
+        }
         throw APIError.responseDecoding(
             underlying: NSError(
                 domain: "APIClient",
                 code: -1,
-                userInfo: [NSLocalizedDescriptionKey: lastError?.localizedDescription ?? "视频生成接口没有返回视频地址。"]
+                userInfo: [NSLocalizedDescriptionKey: "视频生成接口没有返回视频地址。"]
             ),
             data: Data()
         )
@@ -2012,9 +2029,26 @@ final class APIClient: @unchecked Sendable {
         imageFileName: String
     ) -> [[String: Any]] {
         let usesXAIVideoShape = isXAIVideoModel(model)
-        let normalizedSize = normalizedVideoSize(for: size)
+        let usesVolcengineVideoShape = isVolcengineSeedanceVideoModel(model)
+            && isVolcengineArkEndpoint()
+        if usesVolcengineVideoShape {
+            return [
+                volcengineVideoGenerationBody(
+                    prompt: prompt,
+                    model: model,
+                    size: size,
+                    duration: duration,
+                    imageData: imageData,
+                    imageFileName: imageFileName
+                )
+            ]
+        }
+        let normalizedSize = usesXAIVideoShape
+            ? normalizedXAIVideoSize(for: size)
+            : normalizedVideoSize(for: size)
+        let usesXAIImageToVideoShape = usesXAIVideoShape && imageData != nil
         var sizeValues = [normalizedSize]
-        if normalizedSize != size {
+        if !usesXAIVideoShape && normalizedSize != size {
             sizeValues.append(size)
         }
 
@@ -2024,10 +2058,11 @@ final class APIClient: @unchecked Sendable {
                 "model": model,
                 "prompt": prompt
             ]
-            if let aspectRatio = xaiAspectRatio(for: sizeValue) {
+            if usesXAIVideoShape && !usesXAIImageToVideoShape,
+               let aspectRatio = xaiAspectRatio(for: sizeValue) {
                 officialBase["aspect_ratio"] = aspectRatio
             }
-            if usesXAIVideoShape {
+            if usesXAIVideoShape && !usesXAIImageToVideoShape {
                 officialBase["resolution"] = xaiVideoResolution(for: sizeValue)
             }
 
@@ -2037,13 +2072,17 @@ final class APIClient: @unchecked Sendable {
                 "n": 1,
                 "size": sizeValue
             ]
-            if let duration {
-                let seconds = clampedVideoDuration(duration, usesXAIVideoShape: usesXAIVideoShape)
-                if usesXAIVideoShape {
-                    var officialBody = officialBase
-                    officialBody["duration"] = seconds
-                    baseVariants.append(officialBody)
+            if usesXAIVideoShape {
+                var officialBody = officialBase
+                if let duration {
+                    officialBody["duration"] = clampedVideoDuration(duration, usesXAIVideoShape: true)
                 }
+                baseVariants.append(officialBody)
+                continue
+            }
+
+            if let duration {
+                let seconds = clampedVideoDuration(duration, usesXAIVideoShape: false)
                 baseVariants.append(base.merging(["duration": seconds]) { _, new in new })
                 baseVariants.append(base.merging(["seconds": "\(seconds)"]) { _, new in new })
                 baseVariants.append(base.merging(["duration_seconds": seconds]) { _, new in new })
@@ -2057,9 +2096,6 @@ final class APIClient: @unchecked Sendable {
                     ]) { _, new in new })
                 }
             } else {
-                if usesXAIVideoShape {
-                    baseVariants.append(officialBase)
-                }
                 baseVariants.append(base)
                 if let dimensions = videoDimensions(from: sizeValue) {
                     baseVariants.append(base.merging([
@@ -2096,6 +2132,7 @@ final class APIClient: @unchecked Sendable {
                 var compactImageBody = body
                 compactImageBody["image"] = compactImageObject
                 variants.append(compactImageBody)
+                continue
             }
             variants.append(body.merging(["image": dataURL]) { _, new in new })
             variants.append(body.merging(["image_url": dataURL]) { _, new in new })
@@ -2110,9 +2147,274 @@ final class APIClient: @unchecked Sendable {
 
     private func isXAIVideoModel(_ model: String) -> Bool {
         let raw = model.lowercased()
-        return raw.contains("grok-imagine-video")
+        return hasXAIVideoModelToken(raw)
             || (raw.contains("grok") && raw.contains("video"))
-            || (raw.contains("grok") && raw.contains("imagine"))
+    }
+
+    private func hasXAIVideoModelToken(_ raw: String) -> Bool {
+        let separators = CharacterSet.whitespacesAndNewlines
+            .union(CharacterSet(charactersIn: ",;|/\\:()[]{}"))
+        return raw.components(separatedBy: separators)
+            .filter { !$0.isEmpty }
+            .contains { token in
+                token == "grok-imagine-video"
+                    || token.hasPrefix("grok-imagine-video-")
+                    || token == "imagine-video"
+                    || token.hasPrefix("imagine-video-")
+            }
+    }
+
+    private func isVolcengineSeedanceVideoModel(_ model: String) -> Bool {
+        let raw = model.lowercased()
+        return raw.contains("seedance")
+            || raw.contains("doubao-seedance")
+            || (raw.contains("doubao") && raw.contains("video"))
+    }
+
+    private func isVolcengineArkEndpoint() -> Bool {
+        guard let baseURL = network.baseURL else {
+            return false
+        }
+        let host = (baseURL.host ?? "").lowercased()
+        let path = baseURL.path.lowercased()
+        return host.contains("volces.com")
+            || host.contains("volcengine.com")
+            || path.contains("/api/v3")
+            || path.contains("/contents/generations")
+    }
+
+    private func volcengineVideoCreatePath() -> String {
+        "/contents/generations/tasks"
+    }
+
+    private func volcengineVideoTaskPath(taskId: String) -> String {
+        let id = encodedPathSegment(taskId)
+        return "/contents/generations/tasks/\(id)"
+    }
+
+    private func volcengineArkBaseURL() -> URL? {
+        guard var components = URLComponents(string: network.serverConfig.url) else {
+            return nil
+        }
+        var path = components.path
+        if path.hasSuffix("/") {
+            path = String(path.dropLast())
+        }
+
+        let lowerPath = path.lowercased()
+        if lowerPath.hasSuffix("/v1") {
+            path = String(path.dropLast(3))
+        }
+        if let range = path.lowercased().range(of: "/api/v3") {
+            path = String(path[..<range.upperBound])
+        } else {
+            path = path.isEmpty ? "/api/v3" : path + "/api/v3"
+        }
+        components.path = path
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    private func volcengineArkURL(path: String) -> URL? {
+        guard let baseURL = volcengineArkBaseURL(),
+              var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        let basePath = components.path.hasSuffix("/")
+            ? String(components.path.dropLast())
+            : components.path
+        let suffix = path.hasPrefix("/") ? path : "/" + path
+        components.path = basePath + suffix
+        return components.url
+    }
+
+    private func requestVolcengineArkJSON(
+        path: String,
+        method: HTTPMethod,
+        body: [String: Any]?,
+        timeout: TimeInterval?
+    ) async throws -> [String: Any] {
+        let payload = try await requestVolcengineArkAnyJSON(
+            path: path,
+            method: method,
+            body: body,
+            timeout: timeout
+        )
+        guard let json = payload as? [String: Any] else {
+            throw APIError.responseDecoding(
+                underlying: NSError(
+                    domain: "APIClient",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "火山视频接口没有返回 JSON 对象。"]
+                ),
+                data: nil
+            )
+        }
+        return json
+    }
+
+    private func requestVolcengineArkAnyJSON(
+        path: String,
+        method: HTTPMethod,
+        body: [String: Any]? = nil,
+        timeout: TimeInterval? = nil
+    ) async throws -> Any {
+        let bodyData: Data?
+        if let body {
+            bodyData = try JSONSerialization.data(withJSONObject: body)
+        } else {
+            bodyData = nil
+        }
+        let (data, _) = try await requestVolcengineArkRaw(
+            path: path,
+            method: method,
+            body: bodyData,
+            timeout: timeout
+        )
+        guard !data.isEmpty else { return [String: Any]() }
+        if let json = try? JSONSerialization.jsonObject(with: data) {
+            return json
+        }
+        if let text = String(data: data, encoding: .utf8),
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return text
+        }
+        throw APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "火山视频接口返回内容无法解析。"]
+            ),
+            data: data
+        )
+    }
+
+    private func requestVolcengineArkRaw(
+        path: String,
+        method: HTTPMethod,
+        body: Data? = nil,
+        timeout: TimeInterval? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
+        guard let url = volcengineArkURL(path: path) else {
+            throw APIError.invalidURL(network.serverConfig.url)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method.rawValue
+        request.httpBody = body
+        if let timeout {
+            request.timeoutInterval = timeout
+        }
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = network.authToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        for (key, value) in network.serverConfig.customHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        let (data, response) = try await network.session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.responseDecoding(
+                underlying: NSError(
+                    domain: "APIClient",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "火山视频接口没有返回 HTTP 响应。"]
+                ),
+                data: data
+            )
+        }
+        guard (200..<400).contains(httpResponse.statusCode) else {
+            let message = providerErrorMessage(from: data)
+                ?? String(data: data, encoding: .utf8)
+            throw APIError.httpError(
+                statusCode: httpResponse.statusCode,
+                message: message,
+                data: data
+            )
+        }
+        return (data, httpResponse)
+    }
+
+    private func volcengineVideoGenerationBody(
+        prompt: String,
+        model: String,
+        size: String,
+        duration: Int?,
+        imageData: Data?,
+        imageFileName: String
+    ) -> [String: Any] {
+        var content: [[String: Any]] = []
+        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty {
+            content.append([
+                "type": "text",
+                "text": text
+            ])
+        }
+        if let imageData {
+            let dataURL = "data:\(mimeType(for: imageFileName));base64,\(imageData.base64EncodedString())"
+            content.append([
+                "type": "image_url",
+                "image_url": ["url": dataURL],
+                "role": "first_frame"
+            ])
+        }
+        if content.isEmpty {
+            content.append([
+                "type": "text",
+                "text": "生成一个视频"
+            ])
+        }
+
+        var body: [String: Any] = [
+            "model": model,
+            "content": content,
+            "resolution": volcengineVideoResolution(for: size),
+            "ratio": volcengineVideoRatio(for: size),
+            "watermark": false
+        ]
+        if let duration {
+            body["duration"] = clampedVolcengineVideoDuration(duration, model: model)
+        }
+        return body
+    }
+
+    private func volcengineVideoResolution(for size: String) -> String {
+        let lowercased = size.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lowercased.contains("4k") || lowercased.contains("2160") {
+            return "4k"
+        }
+        if lowercased.contains("1080") || lowercased.contains("1080p") {
+            return "1080p"
+        }
+        if lowercased.contains("480") || lowercased.contains("480p") {
+            return "480p"
+        }
+        return "720p"
+    }
+
+    private func volcengineVideoRatio(for size: String) -> String {
+        guard let dimensions = videoDimensions(from: size) else {
+            return "16:9"
+        }
+        let ratio = Double(dimensions.width) / Double(dimensions.height)
+        if abs(ratio - 1.0) < 0.08 { return "1:1" }
+        if abs(ratio - (21.0 / 9.0)) < 0.12 { return "21:9" }
+        if abs(ratio - (16.0 / 9.0)) < 0.12 { return "16:9" }
+        if abs(ratio - (9.0 / 16.0)) < 0.12 { return "9:16" }
+        if abs(ratio - (4.0 / 3.0)) < 0.10 { return "4:3" }
+        if abs(ratio - (3.0 / 4.0)) < 0.10 { return "3:4" }
+        return ratio > 1.0 ? "16:9" : "9:16"
+    }
+
+    private func clampedVolcengineVideoDuration(_ duration: Int, model: String) -> Int {
+        let lowercased = model.lowercased()
+        if lowercased.contains("1-0") || lowercased.contains("1.0") {
+            return min(max(duration, 2), 12)
+        }
+        return min(max(duration, 4), 15)
     }
 
     private func clampedVideoDuration(_ duration: Int, usesXAIVideoShape: Bool) -> Int {
@@ -2131,13 +2433,30 @@ final class APIClient: @unchecked Sendable {
         if lowercased.contains("720") || lowercased.contains("720p") {
             return "720p"
         }
-        guard let dimensions = videoDimensions(from: lowercased) else {
-            return "720p"
-        }
-        let longestSide = max(dimensions.width, dimensions.height)
-        if longestSide >= 1600 { return "1080p" }
-        if longestSide <= 640 { return "480p" }
         return "720p"
+    }
+
+    private func normalizedXAIVideoSize(for size: String) -> String {
+        guard let dimensions = videoDimensions(from: size) else {
+            return "1280x720"
+        }
+        let ratio = Double(dimensions.width) / Double(dimensions.height)
+        if abs(ratio - 1.0) < 0.08 {
+            return "1024x1024"
+        }
+        if abs(ratio - (16.0 / 9.0)) < 0.12 {
+            return "1280x720"
+        }
+        if abs(ratio - (9.0 / 16.0)) < 0.12 {
+            return "720x1280"
+        }
+        if abs(ratio - (4.0 / 3.0)) < 0.10 {
+            return "1024x768"
+        }
+        if abs(ratio - (3.0 / 4.0)) < 0.10 {
+            return "768x1024"
+        }
+        return ratio > 1.0 ? "1280x720" : "720x1280"
     }
 
     private func normalizedVideoSize(for size: String) -> String {
@@ -2189,10 +2508,16 @@ final class APIClient: @unchecked Sendable {
 
     private func pollVideoGenerationTask(
         taskId: String,
+        usesXAIVideoShape: Bool = false,
+        usesVolcengineVideoShape: Bool = false,
         timeout: TimeInterval = 1_800
     ) async throws -> String {
         let startedAt = Date()
-        let statusPaths = videoTaskStatusPaths(taskId: taskId)
+        let statusPaths = videoTaskStatusPaths(
+            taskId: taskId,
+            usesXAIVideoShape: usesXAIVideoShape,
+            usesVolcengineVideoShape: usesVolcengineVideoShape
+        )
         var lastPayload: Any?
         var lastError: Error?
         var delay: TimeInterval = 3
@@ -2202,11 +2527,17 @@ final class APIClient: @unchecked Sendable {
 
             for path in statusPaths {
                 do {
-                    let payload = try await requestAnyJSON(
-                        path: path,
-                        method: .get,
-                        timeout: 60
-                    )
+                    let payload = usesVolcengineVideoShape
+                        ? try await requestVolcengineArkAnyJSON(
+                            path: path,
+                            method: .get,
+                            timeout: 60
+                        )
+                        : try await requestAnyJSON(
+                            path: path,
+                            method: .get,
+                            timeout: 60
+                        )
                     lastPayload = payload
 
                     if let reference = firstVideoReference(in: payload) {
@@ -2215,7 +2546,11 @@ final class APIClient: @unchecked Sendable {
 
                     switch videoTaskState(in: payload) {
                     case .completed:
-                        if let reference = try await fetchVideoTaskContent(taskId: taskId) {
+                        if let reference = try await fetchVideoTaskContent(
+                            taskId: taskId,
+                            usesXAIVideoShape: usesXAIVideoShape,
+                            usesVolcengineVideoShape: usesVolcengineVideoShape
+                        ) {
                             return reference
                         }
                     case .failed(let message):
@@ -2263,17 +2598,31 @@ final class APIClient: @unchecked Sendable {
         )
     }
 
-    private func fetchVideoTaskContent(taskId: String) async throws -> String? {
-        let contentPaths = videoTaskContentPaths(taskId: taskId)
+    private func fetchVideoTaskContent(
+        taskId: String,
+        usesXAIVideoShape: Bool = false,
+        usesVolcengineVideoShape: Bool = false
+    ) async throws -> String? {
+        let contentPaths = videoTaskContentPaths(
+            taskId: taskId,
+            usesXAIVideoShape: usesXAIVideoShape,
+            usesVolcengineVideoShape: usesVolcengineVideoShape
+        )
         var lastError: Error?
 
         for path in contentPaths {
             do {
-                let (data, response) = try await network.requestRaw(
-                    path: path,
-                    method: .get,
-                    timeout: 600
-                )
+                let (data, response) = usesVolcengineVideoShape
+                    ? try await requestVolcengineArkRaw(
+                        path: path,
+                        method: .get,
+                        timeout: 600
+                    )
+                    : try await network.requestRaw(
+                        path: path,
+                        method: .get,
+                        timeout: 600
+                    )
                 guard !data.isEmpty else { continue }
 
                 if let payload = try? JSONSerialization.jsonObject(with: data),
@@ -2862,6 +3211,34 @@ final class APIClient: @unchecked Sendable {
         return nil
     }
 
+    private func firstVolcengineVideoTaskId(in value: Any?) -> String? {
+        guard let value else { return nil }
+
+        if let dict = value as? [String: Any] {
+            for key in ["id", "task_id", "taskId", "request_id", "requestId"] {
+                if let id = trimmedNonEmptyString(dict[key]) {
+                    return id
+                }
+            }
+            for key in ["data", "output", "task", "job", "request", "result", "results"] {
+                if let id = firstVolcengineVideoTaskId(in: dict[key]) {
+                    return id
+                }
+            }
+            return nil
+        }
+
+        if let array = value as? [Any] {
+            for item in array {
+                if let id = firstVolcengineVideoTaskId(in: item) {
+                    return id
+                }
+            }
+        }
+
+        return nil
+    }
+
     private func videoTaskState(in value: Any?) -> VideoTaskState? {
         let statuses = videoStatusStrings(in: value)
             .map { $0.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -2970,8 +3347,18 @@ final class APIClient: @unchecked Sendable {
             || lower == "not_start"
     }
 
-    private func videoTaskStatusPaths(taskId: String) -> [String] {
+    private func videoTaskStatusPaths(
+        taskId: String,
+        usesXAIVideoShape: Bool = false,
+        usesVolcengineVideoShape: Bool = false
+    ) -> [String] {
         let id = encodedPathSegment(taskId)
+        if usesXAIVideoShape {
+            return ["/videos/\(id)"]
+        }
+        if usesVolcengineVideoShape {
+            return [volcengineVideoTaskPath(taskId: taskId)]
+        }
         return [
             "/videos/\(id)",
             "/video/generations/\(id)",
@@ -2981,8 +3368,18 @@ final class APIClient: @unchecked Sendable {
         ]
     }
 
-    private func videoTaskContentPaths(taskId: String) -> [String] {
+    private func videoTaskContentPaths(
+        taskId: String,
+        usesXAIVideoShape: Bool = false,
+        usesVolcengineVideoShape: Bool = false
+    ) -> [String] {
         let id = encodedPathSegment(taskId)
+        if usesXAIVideoShape {
+            return ["/videos/\(id)/content"]
+        }
+        if usesVolcengineVideoShape {
+            return [volcengineVideoTaskPath(taskId: taskId)]
+        }
         return [
             "/videos/\(id)/content",
             "/video/generations/\(id)/content",

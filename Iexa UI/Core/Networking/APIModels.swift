@@ -521,7 +521,14 @@ struct ChatCompletionRequest: Sendable {
 
         var data: [String: Any] = [
             "model": model,
-            "messages": anthropicMessages,
+            // Anthropic treats an assistant `tool_use` and the immediately
+            // following user `tool_result` blocks as one protocol turn.  A
+            // missing, duplicated, or orphaned ID makes the *next* /messages
+            // request fail, which otherwise looks in the UI like Claude simply
+            // stopped using tools.  Normalise the native message sequence here
+            // after all OpenAI-style messages have been converted to Anthropic
+            // blocks, so every caller of this serializer gets the same guard.
+            "messages": Self.normalizedAnthropicToolProtocolMessages(anthropicMessages),
             "max_tokens": 4096,
             "stream": stream
         ]
@@ -716,11 +723,15 @@ struct ChatCompletionRequest: Sendable {
             guard let toolUseId = part["tool_use_id"] as? String else {
                 return nil
             }
-            return [
+            var result: [String: Any] = [
                 "type": "tool_result",
                 "tool_use_id": toolUseId,
                 "content": renderedAnthropicText(from: part["content"])
             ]
+            if let isError = part["is_error"] as? Bool {
+                result["is_error"] = isError
+            }
+            return result
         }
         if type == "image_url",
            let imageURL = part["image_url"] as? [String: Any],
@@ -775,6 +786,127 @@ struct ChatCompletionRequest: Sendable {
         default:
             return nil
         }
+    }
+
+    /// Repairs the minimum structural invariants imposed by Anthropic's
+    /// Messages API without changing normal conversational content:
+    ///
+    /// - a `tool_use` ID is unique across the payload;
+    /// - all tool uses in one assistant turn are answered by the immediately
+    ///   following user turn;
+    /// - a tool result never refers to an unknown tool use.
+    ///
+    /// The local host normally builds valid turns itself.  This guard matters
+    /// when an interrupted/retried local tool loop or restored history leaves a
+    /// half-written turn in the next request.  In that case an explicit error
+    /// result lets Claude recover instead of rejecting the whole conversation.
+    private nonisolated static func normalizedAnthropicToolProtocolMessages(
+        _ messages: [[String: Any]]
+    ) -> [[String: Any]] {
+        var normalized: [[String: Any]] = []
+        var seenToolUseIDs = Set<String>()
+        var index = 0
+
+        while index < messages.count {
+            var message = messages[index]
+            let role = (message["role"] as? String)?.lowercased() ?? "user"
+
+            guard role == "assistant",
+                  let originalBlocks = message["content"] as? [[String: Any]] else {
+                if role == "user", let blocks = message["content"] as? [[String: Any]] {
+                    // A tool result without the assistant tool-use immediately
+                    // before it is invalid for Anthropic.  Keep normal content
+                    // from that user turn while dropping only the orphaned
+                    // protocol blocks.
+                    let retained = blocks.filter { ($0["type"] as? String) != "tool_result" }
+                    if retained.count != blocks.count {
+                        message["content"] = retained.isEmpty
+                            ? [["type": "text", "text": "[Orphaned tool result removed after an interrupted tool turn]"]]
+                            : retained
+                    }
+                }
+                normalized.append(message)
+                index += 1
+                continue
+            }
+
+            var expectedIDs: [String] = []
+            var retainedAssistantBlocks: [[String: Any]] = []
+            for block in originalBlocks {
+                guard (block["type"] as? String) == "tool_use" else {
+                    retainedAssistantBlocks.append(block)
+                    continue
+                }
+                guard let id = block["id"] as? String,
+                      !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      !seenToolUseIDs.contains(id) else {
+                    continue
+                }
+                seenToolUseIDs.insert(id)
+                expectedIDs.append(id)
+                retainedAssistantBlocks.append(block)
+            }
+
+            if retainedAssistantBlocks.isEmpty && !originalBlocks.isEmpty {
+                retainedAssistantBlocks = [[
+                    "type": "text",
+                    "text": "[Duplicate or invalid tool call removed]"
+                ]]
+            }
+            message["content"] = retainedAssistantBlocks
+            normalized.append(message)
+
+            guard !expectedIDs.isEmpty else {
+                index += 1
+                continue
+            }
+
+            let expectedSet = Set(expectedIDs)
+            var resultBlocks: [[String: Any]] = []
+            var seenResultIDs = Set<String>()
+            var nextIndex = index + 1
+
+            if nextIndex < messages.count,
+               (messages[nextIndex]["role"] as? String)?.lowercased() == "user" {
+                let nextContent = messages[nextIndex]["content"]
+                if let blocks = nextContent as? [[String: Any]] {
+                    for block in blocks {
+                        guard (block["type"] as? String) == "tool_result" else {
+                            resultBlocks.append(block)
+                            continue
+                        }
+                        guard let id = block["tool_use_id"] as? String,
+                              expectedSet.contains(id),
+                              !seenResultIDs.contains(id) else {
+                            continue
+                        }
+                        seenResultIDs.insert(id)
+                        resultBlocks.append(block)
+                    }
+                } else if let text = nextContent as? String,
+                          !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    resultBlocks.append(["type": "text", "text": text])
+                }
+                nextIndex += 1
+            }
+
+            for id in expectedIDs where !seenResultIDs.contains(id) {
+                resultBlocks.insert([
+                    "type": "tool_result",
+                    "tool_use_id": id,
+                    "content": "[Tool execution did not return a result because the previous tool turn was interrupted.]",
+                    "is_error": true
+                ], at: 0)
+            }
+
+            normalized.append([
+                "role": "user",
+                "content": resultBlocks
+            ])
+            index = nextIndex
+        }
+
+        return normalized
     }
 
     private nonisolated static func anthropicToolInput(from value: Any?) -> [String: Any] {

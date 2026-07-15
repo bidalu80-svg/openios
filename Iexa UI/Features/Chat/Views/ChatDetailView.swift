@@ -4252,6 +4252,7 @@ struct ChatDetailView: View {
     private var ambientBackgroundMode: ChatAmbientBackgroundMode {
         let isFirstTurn = viewModel.messages.count <= 2
         guard isFirstTurn else { return .normal }
+        guard !hasCompletedFirstTurn else { return .normal }
         return hasActiveFirstTurnStream ? .activeFirstTurn : .idleFirstTurn
     }
 
@@ -4259,6 +4260,17 @@ struct ChatDetailView: View {
         viewModel.isStreaming
             || viewModel.streamingStore.isActive
             || viewModel.messages.last(where: { $0.role == .assistant })?.isStreaming == true
+    }
+
+    /// The Gemini field is an entrance / first-response effect, not a permanent
+    /// first-conversation wallpaper. The complete capture fades it away as soon
+    /// as the first assistant response has finished streaming.
+    private var hasCompletedFirstTurn: Bool {
+        guard let firstAssistant = viewModel.messages.first(where: { $0.role == .assistant }) else {
+            return false
+        }
+        guard !isMessageVisuallyStreaming(firstAssistant) else { return false }
+        return !firstAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     // MARK: - Body
@@ -9445,6 +9457,8 @@ private struct ChatAmbientBackgroundView: View {
     let mode: ChatAmbientBackgroundMode
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var activeGradientStartedAt = Date()
 
     var body: some View {
         ZStack {
@@ -9462,15 +9476,44 @@ private struct ChatAmbientBackgroundView: View {
             }
         }
         .ignoresSafeArea()
-        .animation(.easeInOut(duration: 0.35), value: mode)
+        .animation(.easeInOut(duration: 0.65), value: mode)
+        .onAppear {
+            if mode == .activeFirstTurn {
+                activeGradientStartedAt = .now
+            }
+        }
+        .onChange(of: mode) { _, newMode in
+            if newMode == .activeFirstTurn {
+                activeGradientStartedAt = .now
+            }
+        }
     }
 
     private var idleGradient: some View {
-        LinearGradient(
+        Group {
+            if reduceMotion {
+                idleGradient(at: activeGradientStartedAt)
+            } else {
+                TimelineView(.animation) { timeline in
+                    idleGradient(at: timeline.date)
+                }
+            }
+        }
+    }
+
+    /// Before a first message is sent, Gemini's lower colour field stays
+    /// behind the raised composer: lime/cyan at entry, then blue while the
+    /// keyboard is open. This intentionally colours only the background; the
+    /// composer remains the existing native glass component above it.
+    private func idleGradient(at date: Date) -> some View {
+        let tint = idleTint(at: date)
+        let nextTint = idleTint(at: date.addingTimeInterval(0.45))
+
+        return LinearGradient(
             colors: [
                 Color.clear,
-                Color(red: 0.94, green: 0.98, blue: 1.00).opacity(theme.isDark ? 0.08 : 0.32),
-                Color(red: 0.60, green: 0.82, blue: 1.00).opacity(theme.isDark ? 0.18 : 0.78)
+                tint.opacity(theme.isDark ? 0.08 : 0.28),
+                tint.opacity(theme.isDark ? 0.18 : 0.78)
             ],
             startPoint: .top,
             endPoint: .bottom
@@ -9478,7 +9521,7 @@ private struct ChatAmbientBackgroundView: View {
         .overlay(alignment: .bottomLeading) {
             RadialGradient(
                 colors: [
-                    Color(red: 0.52, green: 0.77, blue: 1.00).opacity(theme.isDark ? 0.12 : 0.28),
+                    nextTint.opacity(theme.isDark ? 0.12 : 0.34),
                     Color.clear
                 ],
                 center: .bottomLeading,
@@ -9489,39 +9532,158 @@ private struct ChatAmbientBackgroundView: View {
     }
 
     private var activeGradient: some View {
-        LinearGradient(
-            colors: [
-                Color(red: 0.38, green: 0.88, blue: 0.76).opacity(theme.isDark ? 0.22 : 0.76),
-                Color(red: 0.58, green: 0.83, blue: 1.00).opacity(theme.isDark ? 0.20 : 0.70),
-                Color(red: 0.88, green: 1.00, blue: 0.82).opacity(theme.isDark ? 0.12 : 0.50),
-                Color.white.opacity(theme.isDark ? 0.00 : 0.72)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .overlay {
-            RadialGradient(
-                colors: [
-                    Color(red: 0.46, green: 0.95, blue: 0.74).opacity(theme.isDark ? 0.18 : 0.35),
-                    Color.clear
-                ],
-                center: .topLeading,
-                startRadius: 8,
-                endRadius: 360
-            )
-        }
-        .overlay {
-            RadialGradient(
-                colors: [
-                    Color(red: 0.46, green: 0.75, blue: 1.00).opacity(theme.isDark ? 0.14 : 0.30),
-                    Color.clear
-                ],
-                center: .topTrailing,
-                startRadius: 10,
-                endRadius: 420
-            )
+        Group {
+            if reduceMotion {
+                activeGradient(at: activeGradientStartedAt)
+            } else {
+                TimelineView(.animation) { timeline in
+                    activeGradient(at: timeline.date)
+                }
+            }
         }
     }
+
+    /// Gemini keeps the navigation and composer surfaces neutral while a broad,
+    /// softly blurred colour field travels through the waiting conversation.
+    /// The palette and timing below are sampled from the supplied full capture:
+    /// blue → cyan → green → yellow → coral → pink → violet.
+    private func activeGradient(at date: Date) -> some View {
+        let tint = activeTint(at: date)
+        let nextTint = activeTint(at: date.addingTimeInterval(0.75))
+        let tintOpacity = theme.isDark ? 0.20 : 0.20
+        let bloomOpacity = theme.isDark ? 0.22 : 0.58
+
+        return GeometryReader { proxy in
+            let extent = max(proxy.size.width, proxy.size.height) * 0.64
+            let centerX = 0.38 + 0.16 * sin(activePhase(at: date) * .pi * 2)
+
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        tint.opacity(tintOpacity),
+                        tint.opacity(theme.isDark ? 0.10 : 0.08),
+                        Color.clear
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+
+                RadialGradient(
+                    colors: [
+                        tint.opacity(bloomOpacity),
+                        nextTint.opacity(theme.isDark ? 0.08 : 0.22),
+                        Color.clear
+                    ],
+                    center: UnitPoint(x: centerX, y: 0.10),
+                    startRadius: 8,
+                    endRadius: extent
+                )
+
+                // The reference has a quiet, almost white centre before the
+                // colour field falls away above the composer.
+                RadialGradient(
+                    colors: [
+                        Color.white.opacity(theme.isDark ? 0.00 : 0.20),
+                        Color.clear
+                    ],
+                    center: UnitPoint(x: 0.46, y: 0.58),
+                    startRadius: 0,
+                    endRadius: extent * 0.50
+                )
+            }
+        }
+    }
+
+    private func activeTint(at date: Date) -> Color {
+        let elapsed = max(0, date.timeIntervalSince(activeGradientStartedAt))
+        let position = elapsed.truncatingRemainder(dividingBy: Self.activeGradientCycle)
+        let stops = Self.activeGradientStops
+
+        for index in 0..<(stops.count - 1) {
+            let start = stops[index]
+            let end = stops[index + 1]
+            guard position <= end.time else { continue }
+
+            let rawProgress = (position - start.time) / (end.time - start.time)
+            let progress = smoothPaletteProgress(rawProgress)
+            return Color(
+                red: start.red + (end.red - start.red) * progress,
+                green: start.green + (end.green - start.green) * progress,
+                blue: start.blue + (end.blue - start.blue) * progress
+            )
+        }
+
+        guard let finalStop = stops.last else { return .clear }
+        return Color(red: finalStop.red, green: finalStop.green, blue: finalStop.blue)
+    }
+
+    private func idleTint(at date: Date) -> Color {
+        let elapsed = max(0, date.timeIntervalSince(activeGradientStartedAt))
+        let position = elapsed.truncatingRemainder(dividingBy: Self.idleGradientCycle)
+        let stops = Self.idleGradientStops
+
+        for index in 0..<(stops.count - 1) {
+            let start = stops[index]
+            let end = stops[index + 1]
+            guard position <= end.time else { continue }
+
+            let rawProgress = (position - start.time) / (end.time - start.time)
+            let progress = smoothPaletteProgress(rawProgress)
+            return Color(
+                red: start.red + (end.red - start.red) * progress,
+                green: start.green + (end.green - start.green) * progress,
+                blue: start.blue + (end.blue - start.blue) * progress
+            )
+        }
+
+        guard let finalStop = stops.last else { return .clear }
+        return Color(red: finalStop.red, green: finalStop.green, blue: finalStop.blue)
+    }
+
+    private func activePhase(at date: Date) -> Double {
+        let elapsed = max(0, date.timeIntervalSince(activeGradientStartedAt))
+        return elapsed.truncatingRemainder(dividingBy: Self.activeGradientCycle) / Self.activeGradientCycle
+    }
+
+    private func smoothPaletteProgress(_ value: Double) -> Double {
+        let progress = min(1, max(0, value))
+        return progress * progress * (3 - 2 * progress)
+    }
+
+    private struct GeminiGradientStop {
+        let time: TimeInterval
+        let red: Double
+        let green: Double
+        let blue: Double
+    }
+
+    private static let activeGradientCycle: TimeInterval = 7.20
+
+    private static let idleGradientCycle: TimeInterval = 6.40
+
+    private static let activeGradientStops: [GeminiGradientStop] = [
+        GeminiGradientStop(time: 0.00, red: 0.66, green: 0.82, blue: 1.00),
+        GeminiGradientStop(time: 0.80, red: 0.28, green: 0.69, blue: 1.00),
+        GeminiGradientStop(time: 1.55, red: 0.31, green: 0.81, blue: 0.97),
+        GeminiGradientStop(time: 2.35, red: 0.48, green: 0.90, blue: 0.72),
+        GeminiGradientStop(time: 3.15, red: 0.80, green: 0.93, blue: 0.47),
+        GeminiGradientStop(time: 3.90, red: 1.00, green: 0.90, blue: 0.42),
+        GeminiGradientStop(time: 4.75, red: 1.00, green: 0.60, blue: 0.56),
+        GeminiGradientStop(time: 5.65, red: 0.90, green: 0.52, blue: 0.92),
+        GeminiGradientStop(time: 6.50, red: 0.53, green: 0.45, blue: 0.98),
+        GeminiGradientStop(time: 7.20, red: 0.66, green: 0.82, blue: 1.00)
+    ]
+
+    private static let idleGradientStops: [GeminiGradientStop] = [
+        GeminiGradientStop(time: 0.00, red: 0.72, green: 0.96, blue: 0.70),
+        GeminiGradientStop(time: 0.45, red: 0.48, green: 0.91, blue: 0.85),
+        GeminiGradientStop(time: 0.90, red: 0.43, green: 0.72, blue: 1.00),
+        GeminiGradientStop(time: 2.00, red: 0.48, green: 0.75, blue: 1.00),
+        GeminiGradientStop(time: 3.20, red: 0.58, green: 0.79, blue: 1.00),
+        GeminiGradientStop(time: 4.30, red: 0.48, green: 0.87, blue: 0.98),
+        GeminiGradientStop(time: 5.20, red: 0.62, green: 0.94, blue: 0.83),
+        GeminiGradientStop(time: 6.40, red: 0.72, green: 0.96, blue: 0.70)
+    ]
 }
 
 // MARK: - Image Generation Placeholder
