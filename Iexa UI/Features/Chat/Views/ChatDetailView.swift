@@ -10229,50 +10229,107 @@ private struct MediaGenerationDotsCanvas: View {
 
     var body: some View {
         Canvas(opaque: false, colorMode: .linear, rendersAsynchronously: true) { context, size in
-            guard size.width > 1, size.height > 1 else { return }
-            let period = isVideo ? 5.2 : 4.6
-            let cycle = (time.truncatingRemainder(dividingBy: period) + period) / period
-            // A four-lane serpentine path deliberately crosses the whole card,
-            // including its rounded outer perimeter.  The former focus point
-            // was confined to the central 44% x 46%, visibly trapping the
-            // scan inside a small rectangle.
-            let laneCount = 4
-            let lanePosition = min(Double(laneCount) - 0.000_1, cycle * Double(laneCount))
-            let lane = Int(lanePosition)
-            let laneProgress = lanePosition - Double(lane)
-            let horizontalProgress = lane.isMultiple(of: 2) ? laneProgress : 1 - laneProgress
-            let focusX = size.width * CGFloat(-0.08 + horizontalProgress * 1.16)
-            let focusY = size.height * CGFloat((Double(lane) + 0.5) / Double(laneCount))
-            let tint = isDark
-                ? Color(red: 0.82, green: 0.80, blue: 0.89)
-                : Color(red: 0.55, green: 0.52, blue: 0.63)
-            let spacing: CGFloat = isVideo ? 10.5 : 10.8
-            let columns = Int((size.width / spacing).rounded(.up)) + 2
-            let rows = Int((size.height / spacing).rounded(.up)) + 2
+            render(context: &context, size: size)
+        }
+    }
 
-            for row in -1...rows {
-                for column in -1...columns {
-                    let x = CGFloat(column) * spacing
-                        + CGFloat(dotNoise(row: row, column: column, salt: 0.11) - 0.5) * spacing * 0.42
-                    let y = CGFloat(row) * spacing
-                        + CGFloat(dotNoise(row: row, column: column, salt: 0.69) - 0.5) * spacing * 0.42
-                    let dx = Double((x - focusX) / max(size.width, 1))
-                    let dy = Double((y - focusY) / max(size.height, 1))
-                    let distanceSquared = dx * dx + dy * dy
-                    let scan = exp(-distanceSquared * 22)
-                    let wave = 0.5 + 0.5 * sin(time * 2.3 + Double(row) * 0.38 + Double(column) * 0.51)
-                    let base = 0.06 + wave * 0.08
-                    let intensity = base + scan * (0.66 + wave * 0.34)
-                    guard intensity > 0.075 else { continue }
-                    let radius = CGFloat(0.40 + intensity * 0.82)
-                    let dot = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
-                    context.fill(
-                        Path(ellipseIn: dot),
-                        with: .color(tint.opacity((isDark ? 0.055 : 0.045) + intensity * (isDark ? 0.29 : 0.24)))
-                    )
-                }
+    private struct ScanState {
+        let focus: CGPoint
+        let tint: Color
+        let spacing: CGFloat
+        let columns: Int
+        let rows: Int
+    }
+
+    private func render(context: inout GraphicsContext, size: CGSize) {
+        guard size.width > 1, size.height > 1 else { return }
+        let state = scanState(for: size)
+        for row in -1...state.rows {
+            for column in -1...state.columns {
+                drawDot(
+                    context: &context,
+                    size: size,
+                    state: state,
+                    row: row,
+                    column: column
+                )
             }
         }
+    }
+
+    private func scanState(for size: CGSize) -> ScanState {
+        let period = isVideo ? 5.2 : 4.6
+        let cycle = (time.truncatingRemainder(dividingBy: period) + period) / period
+        // A four-lane serpentine path deliberately crosses the whole card,
+        // including its rounded outer perimeter.  The former focus point was
+        // confined to the central 44% x 46%, visibly trapping the scan inside
+        // a small rectangle.
+        let laneCount = 4
+        let lanePosition = min(Double(laneCount) - 0.000_1, cycle * Double(laneCount))
+        let lane = Int(lanePosition)
+        let laneProgress = lanePosition - Double(lane)
+        let horizontalProgress = lane.isMultiple(of: 2) ? laneProgress : 1 - laneProgress
+        let focus = CGPoint(
+            x: size.width * CGFloat(-0.08 + horizontalProgress * 1.16),
+            y: size.height * CGFloat((Double(lane) + 0.5) / Double(laneCount))
+        )
+        let tint = isDark
+            ? Color(red: 0.82, green: 0.80, blue: 0.89)
+            : Color(red: 0.55, green: 0.52, blue: 0.63)
+        let spacing: CGFloat = isVideo ? 10.5 : 10.8
+        return ScanState(
+            focus: focus,
+            tint: tint,
+            spacing: spacing,
+            columns: Int((size.width / spacing).rounded(.up)) + 2,
+            rows: Int((size.height / spacing).rounded(.up)) + 2
+        )
+    }
+
+    private func drawDot(
+        context: inout GraphicsContext,
+        size: CGSize,
+        state: ScanState,
+        row: Int,
+        column: Int
+    ) {
+        let point = dotPosition(row: row, column: column, spacing: state.spacing)
+        let intensity = dotIntensity(point: point, size: size, focus: state.focus, row: row, column: column)
+        guard intensity > 0.075 else { return }
+        let radius = CGFloat(0.40 + intensity * 0.82)
+        let rect = CGRect(
+            x: point.x - radius,
+            y: point.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        let baseOpacity = isDark ? 0.055 : 0.045
+        let scanOpacity = isDark ? 0.29 : 0.24
+        let color = state.tint.opacity(baseOpacity + intensity * scanOpacity)
+        context.fill(Path(ellipseIn: rect), with: .color(color))
+    }
+
+    private func dotPosition(row: Int, column: Int, spacing: CGFloat) -> CGPoint {
+        let xJitter = CGFloat(dotNoise(row: row, column: column, salt: 0.11) - 0.5) * spacing * 0.42
+        let yJitter = CGFloat(dotNoise(row: row, column: column, salt: 0.69) - 0.5) * spacing * 0.42
+        return CGPoint(
+            x: CGFloat(column) * spacing + xJitter,
+            y: CGFloat(row) * spacing + yJitter
+        )
+    }
+
+    private func dotIntensity(
+        point: CGPoint,
+        size: CGSize,
+        focus: CGPoint,
+        row: Int,
+        column: Int
+    ) -> Double {
+        let dx = Double((point.x - focus.x) / max(size.width, 1))
+        let dy = Double((point.y - focus.y) / max(size.height, 1))
+        let scan = exp(-(dx * dx + dy * dy) * 22)
+        let wave = 0.5 + 0.5 * sin(time * 2.3 + Double(row) * 0.38 + Double(column) * 0.51)
+        return 0.06 + wave * 0.08 + scan * (0.66 + wave * 0.34)
     }
 
     private func dotNoise(row: Int, column: Int, salt: Double) -> Double {
