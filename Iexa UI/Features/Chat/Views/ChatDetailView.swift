@@ -4313,6 +4313,7 @@ struct ChatDetailView: View {
                     assistantMessageId: firstAssistant.id,
                     fallbackContent: firstAssistant.content,
                     hasVisibleMediaPlaceholder: firstAssistant.metadata?["iexa_image_generation_placeholder"] == "true"
+                        && !shouldDelayWaitingUI(for: firstAssistant)
                 ) { messageId in
                     guard self.firstTurnVisibleAssistantMessageId != messageId else { return }
                     self.firstTurnVisibleAssistantMessageId = messageId
@@ -5609,20 +5610,43 @@ struct ChatDetailView: View {
 
     private func beginPostSendWaitingUIDelayIfNeeded() {
         postSendWaitingUIDelayGeneration += 1
-        isPostSendWaitingUIDelayed = false
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            // Keep the empty assistant row (including a direct-media card)
+            // hidden as soon as Send is tapped. It must not race the user
+            // bubble and the keyboard's closing layout transaction.
+            isPostSendWaitingUIDelayed = true
+        }
         if keyboard.isVisible {
             pendingNewAgentFloatingSnapshotAfterKeyboard = nil
             suppressStaleAgentFloatingBarAfterKeyboard = true
             agentFloatingActivitySnapshot = nil
             setAgentFloatingBarHiddenForKeyboard(true)
+        } else {
+            // Hardware keyboards and already-dismissed software keyboards do
+            // not emit a later visibility change. Preserve the same one-second
+            // post-send gap in that case.
+            schedulePostSendWaitingUIReveal(afterKeyboardAnimation: false)
         }
     }
 
     private func releasePostSendWaitingUIDelayAfterKeyboardSettles() {
         guard isPostSendWaitingUIDelayed else { return }
+        schedulePostSendWaitingUIReveal(afterKeyboardAnimation: true)
+    }
+
+    private func schedulePostSendWaitingUIReveal(afterKeyboardAnimation: Bool) {
         postSendWaitingUIDelayGeneration += 1
         let generation = postSendWaitingUIDelayGeneration
-        let delay = max(0.08, min(keyboard.animationDuration + 0.04, 0.45))
+        // KeyboardTracker receives `keyboardWillHide`; account for the actual
+        // system animation first, then retain the deliberate one-second quiet
+        // interval that keeps the new rendering block from fighting the send
+        // bubble, composer and scroll anchor.
+        let keyboardSettlingDuration = afterKeyboardAnimation
+            ? max(0, keyboard.animationDuration)
+            : 0
+        let delay = keyboardSettlingDuration + 1.0
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             guard postSendWaitingUIDelayGeneration == generation else { return }
             var transaction = Transaction(animation: nil)
@@ -5693,6 +5717,7 @@ struct ChatDetailView: View {
     }
 
     private func shouldDelayWaitingUI(for message: ChatMessage) -> Bool {
+        let isMediaGenerationPlaceholder = message.metadata?["iexa_image_generation_placeholder"] == "true"
         guard isPostSendWaitingUIDelayed,
               message.role == .assistant,
               message.isStreaming,
@@ -5700,7 +5725,7 @@ struct ChatDetailView: View {
               message.error == nil,
               message.files.isEmpty,
               message.sources.isEmpty,
-              message.statusHistory.isEmpty else {
+              (isMediaGenerationPlaceholder || message.statusHistory.isEmpty) else {
             return false
         }
         guard let messageIndex = viewModel.messages.firstIndex(where: { $0.id == message.id }),
