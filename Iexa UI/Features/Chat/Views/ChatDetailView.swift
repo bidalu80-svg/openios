@@ -9640,20 +9640,26 @@ private struct ChatAmbientBackgroundView: View {
     private func activeGradient(at date: Date) -> some View {
         let tint = activeTint(at: date)
         let nextTint = activeTint(at: date.addingTimeInterval(0.75))
-        let tintOpacity = theme.isDark ? 0.20 : 0.20
-        let bloomOpacity = theme.isDark ? 0.22 : 0.58
+        let topOpacity = theme.isDark ? 0.28 : 0.52
+        let middleOpacity = theme.isDark ? 0.20 : 0.34
+        let bloomOpacity = theme.isDark ? 0.26 : 0.52
 
         return GeometryReader { proxy in
-            let extent = max(proxy.size.width, proxy.size.height) * 0.64
+            let extent = max(proxy.size.width, proxy.size.height)
             let phase = activePhase(at: date)
-            let centerX = 0.38 + 0.16 * sin(phase * .pi * 2)
+            let centerX = 0.42 + 0.14 * sin(phase * .pi * 2)
 
             ZStack {
+                // The reference field occupies the chat canvas, rather than
+                // being a glow that is confined behind the composer.  Keep the
+                // lower edge lighter, but establish its colour from the top of
+                // the transcript as soon as the first response is waiting.
                 LinearGradient(
                     colors: [
-                        Color.clear,
-                        tint.opacity(tintOpacity),
-                        tint.opacity(theme.isDark ? 0.28 : 0.60)
+                        tint.opacity(topOpacity),
+                        tint.opacity(middleOpacity),
+                        nextTint.opacity(theme.isDark ? 0.16 : 0.22),
+                        Color.white.opacity(theme.isDark ? 0.02 : 0.78)
                     ],
                     startPoint: .top,
                     endPoint: .bottom
@@ -9662,26 +9668,34 @@ private struct ChatAmbientBackgroundView: View {
                 RadialGradient(
                     colors: [
                         tint.opacity(bloomOpacity),
-                        nextTint.opacity(theme.isDark ? 0.08 : 0.22),
+                        nextTint.opacity(theme.isDark ? 0.10 : 0.25),
                         Color.clear
                     ],
-                    center: UnitPoint(x: centerX, y: 0.82),
+                    center: UnitPoint(x: centerX, y: 0.28),
                     startRadius: 8,
-                    endRadius: extent
+                    endRadius: extent * 0.82
                 )
 
-                // The reference has a quiet, almost white centre before the
-                // colour field falls away above the composer.
                 RadialGradient(
                     colors: [
-                        Color.white.opacity(theme.isDark ? 0.00 : 0.20),
+                        nextTint.opacity(theme.isDark ? 0.10 : 0.18),
                         Color.clear
                     ],
-                    center: UnitPoint(x: 0.46, y: 0.58),
+                    center: UnitPoint(x: 0.72, y: 0.62),
                     startRadius: 0,
-                    endRadius: extent * 0.50
+                    endRadius: extent * 0.62
                 )
 
+                // Gemini retains a soft white breathing space above the
+                // composer, not a hard horizontal cutoff to the colour field.
+                LinearGradient(
+                    colors: [
+                        Color.clear,
+                        Color.white.opacity(theme.isDark ? 0.00 : 0.42)
+                    ],
+                    startPoint: UnitPoint(x: 0.5, y: 0.58),
+                    endPoint: .bottom
+                )
             }
         }
     }
@@ -9738,12 +9752,15 @@ private struct ChatAmbientBackgroundView: View {
     }
 
     /// The colour-scale lattice belongs to the first idle/keyboard transition,
-    /// not to the full waiting response.  From the capture: it grows in lime at
-    /// ~0.45 s, shifts to cyan/blue by ~0.9 s, then contracts and disappears
-    /// before the message is sent.
+    /// not to the full waiting response. Start after the keyboard has settled:
+    /// the capture keeps it visible through the completed keyboard rise, then
+    /// grows in lime, shifts to cyan/blue, and only then contracts.
     private func idleFieldProgress(at date: Date) -> Double {
         guard let idleFieldStartedAt else { return 1 }
-        return max(0, date.timeIntervalSince(idleFieldStartedAt)) / 1.75
+        let elapsed = date.timeIntervalSince(idleFieldStartedAt)
+        let keyboardSettleDelay: TimeInterval = 0.30
+        guard elapsed >= keyboardSettleDelay else { return -1 }
+        return (elapsed - keyboardSettleDelay) / 1.50
     }
 
     private func beginIdleFieldIfNeeded() {
@@ -9819,14 +9836,17 @@ private struct GeminiScaleField: View {
     private func render(context: inout GraphicsContext, size: CGSize) {
         guard size.width > 1, size.height > 1 else { return }
 
-        let grow = smoothStep(progress / 0.075)
-        let contract = smoothStep((progress - 0.145) / 0.125)
+        // `progress` is deliberately negative until the keyboard's opening
+        // motion has finished. Do not draw a tiny early field below it.
+        guard progress >= 0 else { return }
+        let grow = smoothStep(progress / 0.36)
+        let contract = smoothStep((progress - 0.68) / 0.32)
         let visibility = max(0, 1 - contract)
         guard visibility > 0.001 else { return }
-        let fieldTop = size.height * (0.69 - grow * 0.25 + contract * 0.16)
+        let fieldTop = size.height * (0.74 - grow * 0.37 + contract * 0.20)
         let fieldHeight = max(1, size.height - fieldTop)
-        let rowSpacing: CGFloat = 7.1
-        let columnSpacing: CGFloat = 7.4
+        let rowSpacing: CGFloat = 8.2
+        let columnSpacing: CGFloat = 8.6
         let rowCount = Int((fieldHeight / rowSpacing).rounded(.up)) + 1
         let columnCount = Int((size.width / columnSpacing).rounded(.up)) + 2
         let shimmer = 0.5 + 0.5 * sin(time * 1.45)
@@ -9846,7 +9866,7 @@ private struct GeminiScaleField: View {
                 let hue = scaleHue(vertical: verticalProgress, horizontal: horizontalProgress)
                 let stagger = 0.5 + 0.5 * sin(Double(row) * 0.61 + Double(column) * 0.38 + time * 1.3)
                 let intensity = visibility * (0.30 + verticalProgress * 0.70) * (0.76 + stagger * 0.24)
-                let dotRadius = CGFloat(0.82 + intensity * 1.15)
+                let dotRadius = CGFloat(1.08 + intensity * 1.34)
                 let rect = CGRect(x: x - dotRadius, y: y - dotRadius, width: dotRadius * 2, height: dotRadius * 2)
                 context.fill(Path(ellipseIn: rect), with: .color(scaleColour(hue: hue, intensity: intensity, shimmer: shimmer)))
             }
@@ -9854,7 +9874,7 @@ private struct GeminiScaleField: View {
     }
 
     private func scaleHue(vertical: Double, horizontal: Double) -> Double {
-        let colourShift = min(1, max(0, progress / 0.15))
+        let colourShift = min(1, max(0, progress / 0.58))
         return 0.25 + colourShift * 0.30 + vertical * 0.06 + horizontal * 0.035
     }
 
@@ -9877,16 +9897,18 @@ private struct GeminiScaleField: View {
 // MARK: - Image Generation Placeholder
 
 /// A media placeholder is driven by the generation protocol's persisted
-/// metadata, not by elapsed time.  Its moving dot field is visual feedback;
-/// the text only advances when the request, poll, or media result actually
-/// advances.
+/// metadata, not by elapsed time. Its moving dot field and image-waiting copy
+/// are indeterminate visual feedback; real completion still depends on a media
+/// reference being returned and successfully attached to this message.
 private struct MediaGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let kind: String
+    let phase: String
     let title: String
     @State private var isActive = false
+    @State private var isExpanded = false
 
     private var isVideo: Bool { kind == "video" }
 
@@ -9898,17 +9920,47 @@ private struct MediaGenerationPlaceholderView: View {
     /// used inside the very large chat message renderer; keeping it monolithic
     /// makes Swift's View-builder type solver exceed its reasonable-time limit.
     private var lifecycleConfiguredCard: some View {
-        layoutConfiguredCard
+        entranceConfiguredCard
             .animation(.easeInOut(duration: 0.22), value: title)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(title)
             .onAppear {
                 isActive = scenePhase == .active
+                beginCardEntrance()
             }
-            .onDisappear { isActive = false }
+            .onDisappear {
+                isActive = false
+                isExpanded = false
+            }
             .onChange(of: scenePhase) { _, phase in
                 isActive = phase == .active
             }
+    }
+
+    private var entranceConfiguredCard: some View {
+        layoutConfiguredCard
+            // The reference begins as a small, rounded seed at the assistant
+            // card's top-leading corner, then grows down/right into the full
+            // rendering surface. Scaling the card itself keeps the transcript
+            // and its scroll anchors independent from this visual entrance.
+            .scaleEffect(isExpanded ? 1 : 0.055, anchor: .topLeading)
+            .opacity(isExpanded ? 1 : 0.90)
+    }
+
+    private func beginCardEntrance() {
+        guard !reduceMotion else {
+            isExpanded = true
+            return
+        }
+        isExpanded = false
+        DispatchQueue.main.async {
+            // Gemini/ChatGPT-style entrance: a continuous, no-bounce scale
+            // curve. `.smooth` is available on the app's iOS 18.1 target and
+            // avoids the small terminal recoil a damped spring can still show.
+            withAnimation(.smooth(duration: 0.40, extraBounce: 0)) {
+                isExpanded = true
+            }
+        }
     }
 
     private var layoutConfiguredCard: some View {
@@ -9972,14 +10024,81 @@ private struct MediaGenerationPlaceholderView: View {
     }
 
     private var cardTitle: some View {
-        Text(title)
-            .id(title)
+        MediaGenerationProgressTitle(
+            kind: kind,
+            phase: phase,
+            actualTitle: title
+        )
             .scaledFont(size: 14, weight: .semibold)
             .foregroundStyle(theme.isDark ? Color.white.opacity(0.88) : Color.black.opacity(0.72))
             .lineLimit(1)
             .padding(.horizontal, 17)
             .padding(.top, 16)
             .transition(.opacity.combined(with: .move(edge: .top)))
+    }
+}
+
+/// Transport state remains truthful in `phase`. While a one-shot image API is
+/// genuinely waiting, this mirrors the reference's indeterminate ChatGPT
+/// status cadence: every segment types in, then holds until the next segment.
+/// It does not decide completion; the placeholder is still removed only when a
+/// real image reference has been attached to the assistant message.
+private struct MediaGenerationProgressTitle: View {
+    let kind: String
+    let phase: String
+    let actualTitle: String
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var phaseStartedAt = Date()
+
+    private static let imageWaitingStages = [
+        "正在构思画面",
+        "正在构想",
+        "正在生成初稿",
+        "正在设置场景",
+        "润色细节",
+        "即将完成",
+        "正在进行最终润色"
+    ]
+
+    private var usesImageWaitingStoryboard: Bool {
+        kind == "image" && phase == "waitingForResult"
+    }
+
+    var body: some View {
+        Group {
+            if usesImageWaitingStoryboard && !reduceMotion {
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                    Text(storyboardText(at: timeline.date))
+                }
+            } else if usesImageWaitingStoryboard {
+                Text(Self.imageWaitingStages[0])
+            } else {
+                Text(actualTitle)
+            }
+        }
+        .onAppear { phaseStartedAt = .now }
+        .onChange(of: phase) { _, _ in
+            phaseStartedAt = .now
+        }
+    }
+
+    private func storyboardText(at date: Date) -> String {
+        let elapsed = max(0, date.timeIntervalSince(phaseStartedAt))
+        let stageDuration: TimeInterval = 4.05
+        let stageIndex = min(
+            Int(elapsed / stageDuration),
+            Self.imageWaitingStages.count - 1
+        )
+        let stageElapsed = elapsed - Double(stageIndex) * stageDuration
+        let text = Self.imageWaitingStages[stageIndex]
+        let characters = Array(text)
+        let revealDuration = max(0.30, min(0.58, Double(characters.count) * 0.075))
+        let visibleCount = min(
+            characters.count,
+            max(1, Int((stageElapsed / revealDuration) * Double(characters.count)))
+        )
+        return String(characters.prefix(visibleCount))
     }
 }
 
@@ -10445,6 +10564,7 @@ private struct IsolatedAssistantMessage: View {
             } else if message.metadata?["iexa_image_generation_placeholder"] == "true" {
                 MediaGenerationPlaceholderView(
                     kind: message.metadata?["iexa_media_generation_kind"] ?? "image",
+                    phase: message.metadata?["iexa_media_generation_phase"] ?? "waitingForResult",
                     title: message.metadata?["iexa_media_generation_title"] ?? "正在等待图片服务返回"
                 )
             } else if showEmptyThinkingCapsule {
