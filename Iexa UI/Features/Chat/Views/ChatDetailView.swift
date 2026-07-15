@@ -5889,16 +5889,14 @@ struct ChatDetailView: View {
         )
         let isLatestUserMessage = message.role == .user
             && message.id == latestUserMessageId
-        let isDirectMediaPlaceholder = message.metadata?["iexa_image_generation_placeholder"] == "true"
 
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 0) {
 
             // ── Assistant header (avatar + model name) ──
-            // A direct media card is its own rendering surface.  ChatGPT's
-            // reference does not prepend the regular assistant identity row
-            // to that surface; normal text/tool replies still show it as soon
-            // as their assistant row mounts.
-            if message.role == .assistant && !isDirectMediaPlaceholder {
+            // Identity is independent from the delayed media rendering block.
+            // Every assistant row keeps its normal avatar/model header; only
+            // the empty direct-media card itself observes the post-send gate.
+            if message.role == .assistant {
                 assistantHeader(for: message, animated: isLastAssistant || message.isStreaming)
             }
 
