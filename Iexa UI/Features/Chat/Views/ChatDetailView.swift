@@ -4304,7 +4304,9 @@ struct ChatDetailView: View {
         let baseView = ZStack {
             ChatAmbientBackgroundView(
                 mode: ambientBackgroundMode,
-                keyboardIsVisible: keyboard.isVisible
+                keyboardIsVisible: keyboard.isVisible,
+                keyboardHeight: keyboard.height,
+                keyboardAnimation: keyboard.matchedAnimation
             )
             messageListArea
             if let firstAssistant = viewModel.messages.first(where: { $0.role == .assistant }) {
@@ -9556,6 +9558,10 @@ private struct FirstAssistantVisibleTokenProbe: View {
 private struct ChatAmbientBackgroundView: View {
     let mode: ChatAmbientBackgroundMode
     let keyboardIsVisible: Bool
+    /// `KeyboardTracker.height` is the docked keyboard lift above the home
+    /// indicator. The idle Gemini field uses the same lift as the composer.
+    let keyboardHeight: CGFloat
+    let keyboardAnimation: Animation
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -9651,6 +9657,12 @@ private struct ChatAmbientBackgroundView: View {
                 time: date.timeIntervalSinceReferenceDate
             )
         }
+        // The reference's scale field is tied to the composer/keyboard rather
+        // than the static screen bottom. Moving the entire idle field by the
+        // tracked keyboard lift keeps both its lower edge and colour density
+        // seated behind the input as it rises.
+        .offset(y: -keyboardHeight)
+        .animation(keyboardAnimation, value: keyboardHeight)
     }
 
     private var activeGradient: some View {
