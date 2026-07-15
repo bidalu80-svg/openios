@@ -4614,6 +4614,7 @@ struct ChatDetailView: View {
         .onReceive(NotificationCenter.default.publisher(for: .vizSendPrompt)) { notification in
             guard let text = notification.userInfo?["text"] as? String, !text.isEmpty else { return }
             viewModel.inputText = text
+            beginPostSendMediaPlaceholderDelayIfNeeded(for: text)
             Task { await viewModel.sendMessage() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .textSelectionActionRequested)) { notification in
@@ -5006,7 +5007,7 @@ struct ChatDetailView: View {
                     pinCurrentTurnStartForLatestTurn = true
                     pinnedCurrentTurnStartMessageId = nil
                     userRequestedBottomFollowDuringStreaming = false
-                    beginPostSendWaitingUIDelayIfNeeded()
+                    beginPostSendMediaPlaceholderDelayIfNeeded(for: vm.inputText)
                     Task { await viewModel.sendMessage() }
                 },
                 onStopGenerating: vm.isStreaming ? { viewModel.stopStreaming() } : nil,
@@ -5610,7 +5611,13 @@ struct ChatDetailView: View {
         return UInt64(delay * 1_000_000_000)
     }
 
-    private func beginPostSendWaitingUIDelayIfNeeded() {
+    private func beginPostSendMediaPlaceholderDelayIfNeeded(for prompt: String) {
+        // The quiet interval belongs only to the direct media placeholder.  A
+        // normal assistant row (model avatar, typing indicator and text
+        // stream) must mount immediately after Send.
+        guard viewModel.willStartIndependentDirectMediaGeneration(for: prompt) else {
+            return
+        }
         postSendWaitingUIDelayGeneration += 1
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
@@ -5720,14 +5727,14 @@ struct ChatDetailView: View {
 
     private func shouldDelayWaitingUI(for message: ChatMessage) -> Bool {
         let isMediaGenerationPlaceholder = message.metadata?["iexa_image_generation_placeholder"] == "true"
-        guard isPostSendWaitingUIDelayed,
+        guard isMediaGenerationPlaceholder,
+              isPostSendWaitingUIDelayed,
               message.role == .assistant,
               message.isStreaming,
               message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               message.error == nil,
               message.files.isEmpty,
-              message.sources.isEmpty,
-              (isMediaGenerationPlaceholder || message.statusHistory.isEmpty) else {
+              message.sources.isEmpty else {
             return false
         }
         guard let messageIndex = viewModel.messages.firstIndex(where: { $0.id == message.id }),
@@ -5886,7 +5893,10 @@ struct ChatDetailView: View {
         VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 0) {
 
             // ── Assistant header (avatar + model name) ──
-            if message.role == .assistant && !waitingUIIsDelayed {
+            // The model identity belongs to the assistant row, not to the
+            // render card. Keep it immediate even when only a direct-media
+            // card is intentionally held for the keyboard-settle interval.
+            if message.role == .assistant {
                 assistantHeader(for: message, animated: isLastAssistant || message.isStreaming)
             }
 
@@ -6768,6 +6778,7 @@ struct ChatDetailView: View {
     private func promptCard(_ prompt: SuggestedPrompt) -> some View {
         Button {
             viewModel.inputText = prompt.fullText
+            beginPostSendMediaPlaceholderDelayIfNeeded(for: prompt.fullText)
             Task { await viewModel.sendMessage() }
             Haptics.play(.light)
         } label: {
@@ -9856,9 +9867,10 @@ private struct ChatAmbientBackgroundView: View {
     ]
 }
 
-/// A short-lived, staggered scale lattice that follows the captured idle
+/// A short-lived, irregular colour-scale field that follows the captured idle
 /// timeline: grow in lime, sweep to cyan/blue, then contract and vanish before
-/// the active first-response gradient begins.
+/// the active first-response gradient begins.  Gemini's field is dense and
+/// organic; it must not read as a fixed graph-paper lattice.
 private struct GeminiScaleField: View {
     let isDark: Bool
     let progress: Double
@@ -9888,28 +9900,43 @@ private struct GeminiScaleField: View {
         guard visibility > 0.001 else { return }
         let fieldTop = size.height * (0.74 - grow * 0.37 + contract * 0.20)
         let fieldHeight = max(1, size.height - fieldTop)
-        let rowSpacing: CGFloat = 8.2
-        let columnSpacing: CGFloat = 8.6
-        let rowCount = Int((fieldHeight / rowSpacing).rounded(.up)) + 1
+        // A dense, jittered point cloud removes the regular rows and oversized
+        // cells produced by the earlier 8pt lattice.  It keeps the colour
+        // field readable as tiny Gemini-like scales instead of a large net.
+        let rowSpacing: CGFloat = 4.8
+        let columnSpacing: CGFloat = 5.0
+        let rowCount = Int((fieldHeight / rowSpacing).rounded(.up)) + 2
         let columnCount = Int((size.width / columnSpacing).rounded(.up)) + 2
         let shimmer = 0.5 + 0.5 * sin(time * 1.45)
 
-        for row in 0..<rowCount {
-            let y = fieldTop + CGFloat(row) * rowSpacing
+        for row in -1...rowCount {
+            let rowJitter = CGFloat(scaleNoise(row: row, column: 0, salt: 0.31) - 0.5) * rowSpacing * 0.62
+            let y = fieldTop + CGFloat(row) * rowSpacing + rowJitter
+            guard y >= fieldTop - rowSpacing, y <= size.height + rowSpacing else { continue }
             let verticalProgress = Double(min(1, max(0, (y - fieldTop) / fieldHeight)))
-            let rowOffset = row.isMultiple(of: 2) ? 0.0 : columnSpacing * 0.5
+            let topEdge = smoothStep((verticalProgress + 0.05) / 0.22)
 
-            for column in 0..<columnCount {
-                let x = CGFloat(column) * columnSpacing + rowOffset
+            for column in -1...columnCount {
+                let pointNoise = scaleNoise(row: row, column: column, salt: 0.73)
+                // A small deterministic positional jitter breaks the visual
+                // ruler-lines without producing per-frame noise or shimmer.
+                let xJitter = CGFloat(scaleNoise(row: row, column: column, salt: 0.17) - 0.5) * columnSpacing * 0.64
+                let x = CGFloat(column) * columnSpacing + xJitter
                 guard x >= -columnSpacing, x <= size.width + columnSpacing else { continue }
+                guard pointNoise > 0.08 else { continue }
 
-                    // A diagonal hue sweep creates the yellow/green → cyan →
-                    // blue/purple scales visible in Gemini's composer field.
+                // A diagonal hue sweep creates the yellow/green → cyan →
+                // blue/purple scales visible in Gemini's composer field.
                 let horizontalProgress = Double(min(1, max(0, x / max(size.width, 1))))
                 let hue = scaleHue(vertical: verticalProgress, horizontal: horizontalProgress)
-                let stagger = 0.5 + 0.5 * sin(Double(row) * 0.61 + Double(column) * 0.38 + time * 1.3)
-                let intensity = visibility * (0.30 + verticalProgress * 0.70) * (0.76 + stagger * 0.24)
-                let dotRadius = CGFloat(1.08 + intensity * 1.34)
+                let flow = 0.5 + 0.5 * sin(
+                    Double(row) * 0.29 + Double(column) * 0.41 + time * 1.95
+                )
+                let density = (0.26 + verticalProgress * 0.74)
+                    * (0.70 + pointNoise * 0.30)
+                    * (0.72 + flow * 0.28)
+                let intensity = visibility * topEdge * density
+                let dotRadius = CGFloat(0.28 + intensity * 0.56)
                 let rect = CGRect(x: x - dotRadius, y: y - dotRadius, width: dotRadius * 2, height: dotRadius * 2)
                 context.fill(Path(ellipseIn: rect), with: .color(scaleColour(hue: hue, intensity: intensity, shimmer: shimmer)))
             }
@@ -9922,7 +9949,7 @@ private struct GeminiScaleField: View {
     }
 
     private func scaleColour(hue: Double, intensity: Double, shimmer: Double) -> Color {
-        let alpha = (isDark ? 0.14 : 0.22) + intensity * (isDark ? 0.30 : 0.54)
+        let alpha = (isDark ? 0.055 : 0.09) + intensity * (isDark ? 0.27 : 0.40)
         return Color(
             hue: hue,
             saturation: isDark ? 0.55 : 0.68,
@@ -9934,6 +9961,13 @@ private struct GeminiScaleField: View {
     private func smoothStep(_ value: Double) -> Double {
         let clamped = min(1, max(0, value))
         return clamped * clamped * (3 - 2 * clamped)
+    }
+
+    private func scaleNoise(row: Int, column: Int, salt: Double) -> Double {
+        let value = sin(
+            Double(row) * 12.9898 + Double(column) * 78.233 + salt * 37.719
+        ) * 43_758.5453
+        return value - floor(value)
     }
 }
 
@@ -10054,7 +10088,7 @@ private struct MediaGenerationPlaceholderView: View {
     @ViewBuilder
     private var animatedDots: some View {
         if isActive && !reduceMotion {
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
                 MediaGenerationDotsCanvas(
                     isDark: theme.isDark,
                     isVideo: isVideo,
@@ -10105,14 +10139,21 @@ private struct MediaGenerationProgressTitle: View {
     ]
 
     private var usesImageWaitingStoryboard: Bool {
-        kind == "image" && phase == "waitingForResult"
+        // Direct image requests first pass through submitting/polling states.
+        // The visual process must start when the card appears, not several
+        // seconds later after a particular transport label is received.
+        kind == "image"
     }
 
     var body: some View {
         Group {
             if usesImageWaitingStoryboard && !reduceMotion {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-                    Text(storyboardText(at: timeline.date))
+                TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+                    let state = storyboardState(at: timeline.date)
+                    MediaGenerationStoryboardTitle(
+                        text: state.text,
+                        characterProgress: state.characterProgress
+                    )
                 }
             } else if usesImageWaitingStoryboard {
                 Text(Self.imageWaitingStages[0])
@@ -10126,7 +10167,7 @@ private struct MediaGenerationProgressTitle: View {
         }
     }
 
-    private func storyboardText(at date: Date) -> String {
+    private func storyboardState(at date: Date) -> (text: String, characterProgress: Double) {
         let elapsed = max(0, date.timeIntervalSince(phaseStartedAt))
         let stageDuration: TimeInterval = 4.05
         let stageIndex = min(
@@ -10135,13 +10176,34 @@ private struct MediaGenerationProgressTitle: View {
         )
         let stageElapsed = elapsed - Double(stageIndex) * stageDuration
         let text = Self.imageWaitingStages[stageIndex]
-        let characters = Array(text)
-        let revealDuration = max(0.30, min(0.58, Double(characters.count) * 0.075))
-        let visibleCount = min(
-            characters.count,
-            max(1, Int((stageElapsed / revealDuration) * Double(characters.count)))
-        )
-        return String(characters.prefix(visibleCount))
+        // Each glyph fades/slides in across several display frames instead of
+        // replacing a whole Text value at a 30 Hz cadence.
+        let characterProgress = 0.14 + stageElapsed / 0.095
+        return (text, characterProgress)
+    }
+}
+
+private struct MediaGenerationStoryboardTitle: View {
+    let text: String
+    let characterProgress: Double
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(text.enumerated()), id: \.offset) { index, character in
+                let progress = smoothStep(characterProgress - Double(index))
+                Text(String(character))
+                    .opacity(progress)
+                    .offset(y: (1 - progress) * 2.2)
+                    .scaleEffect(0.94 + progress * 0.06, anchor: .bottom)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(text)
+    }
+
+    private func smoothStep(_ value: Double) -> Double {
+        let clamped = min(1, max(0, value))
+        return clamped * clamped * (3 - 2 * clamped)
     }
 }
 
@@ -10153,39 +10215,56 @@ private struct MediaGenerationDotsCanvas: View {
     var body: some View {
         Canvas(opaque: false, colorMode: .linear, rendersAsynchronously: true) { context, size in
             guard size.width > 1, size.height > 1 else { return }
-            let period = isVideo ? 4.8 : 4.2
+            let period = isVideo ? 5.2 : 4.6
             let cycle = (time.truncatingRemainder(dividingBy: period) + period) / period
-            let focusX = size.width * (0.50 + 0.22 * sin(cycle * .pi * 2.0))
-            let focusY = size.height * (0.51 + 0.23 * cos(cycle * .pi * 2.0))
+            // A four-lane serpentine path deliberately crosses the whole card,
+            // including its rounded outer perimeter.  The former focus point
+            // was confined to the central 44% x 46%, visibly trapping the
+            // scan inside a small rectangle.
+            let laneCount = 4
+            let lanePosition = min(Double(laneCount) - 0.000_1, cycle * Double(laneCount))
+            let lane = Int(lanePosition)
+            let laneProgress = lanePosition - Double(lane)
+            let horizontalProgress = lane.isMultiple(of: 2) ? laneProgress : 1 - laneProgress
+            let focusX = size.width * CGFloat(-0.08 + horizontalProgress * 1.16)
+            let focusY = size.height * CGFloat((Double(lane) + 0.5) / Double(laneCount))
             let tint = isDark
                 ? Color(red: 0.82, green: 0.80, blue: 0.89)
                 : Color(red: 0.55, green: 0.52, blue: 0.63)
-            let columns = isVideo ? 24 : 20
-            let rows = isVideo ? 11 : 19
-            let horizontalInset = size.width * 0.12
-            let verticalInset = size.height * 0.21
-            let usableWidth = size.width - horizontalInset * 2
-            let usableHeight = size.height - verticalInset * 2
+            let spacing: CGFloat = isVideo ? 10.5 : 10.8
+            let columns = Int((size.width / spacing).rounded(.up)) + 2
+            let rows = Int((size.height / spacing).rounded(.up)) + 2
 
-            for row in 0..<rows {
-                for column in 0..<columns {
-                    let x = horizontalInset + usableWidth * CGFloat(column) / CGFloat(max(columns - 1, 1))
-                    let y = verticalInset + usableHeight * CGFloat(row) / CGFloat(max(rows - 1, 1))
+            for row in -1...rows {
+                for column in -1...columns {
+                    let x = CGFloat(column) * spacing
+                        + CGFloat(dotNoise(row: row, column: column, salt: 0.11) - 0.5) * spacing * 0.42
+                    let y = CGFloat(row) * spacing
+                        + CGFloat(dotNoise(row: row, column: column, salt: 0.69) - 0.5) * spacing * 0.42
                     let dx = Double((x - focusX) / max(size.width, 1))
                     let dy = Double((y - focusY) / max(size.height, 1))
-                    let distance = sqrt(dx * dx + dy * dy)
-                    let wave = 0.5 + 0.5 * sin(cycle * .pi * 2.0 + Double(row + column) * 0.44)
-                    let intensity = max(0, 1 - distance * 3.25) * (0.58 + wave * 0.42)
-                    guard intensity > 0.08 else { continue }
-                    let radius = CGFloat(0.55 + intensity * 0.95)
+                    let distanceSquared = dx * dx + dy * dy
+                    let scan = exp(-distanceSquared * 22)
+                    let wave = 0.5 + 0.5 * sin(time * 2.3 + Double(row) * 0.38 + Double(column) * 0.51)
+                    let base = 0.06 + wave * 0.08
+                    let intensity = base + scan * (0.66 + wave * 0.34)
+                    guard intensity > 0.075 else { continue }
+                    let radius = CGFloat(0.40 + intensity * 0.82)
                     let dot = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
                     context.fill(
                         Path(ellipseIn: dot),
-                        with: .color(tint.opacity((isDark ? 0.11 : 0.08) + intensity * (isDark ? 0.32 : 0.28)))
+                        with: .color(tint.opacity((isDark ? 0.055 : 0.045) + intensity * (isDark ? 0.29 : 0.24)))
                     )
                 }
             }
         }
+    }
+
+    private func dotNoise(row: Int, column: Int, salt: Double) -> Double {
+        let value = sin(
+            Double(row) * 12.9898 + Double(column) * 78.233 + salt * 37.719
+        ) * 43_758.5453
+        return value - floor(value)
     }
 }
 
@@ -10196,7 +10275,7 @@ private struct DynamicImageGenerationGradient: View {
     var body: some View {
         Group {
             if isActive {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
                     ImageGenerationGradientCanvas(
                         isDark: isDark,
                         time: Self.animationTime(for: timeline.date)

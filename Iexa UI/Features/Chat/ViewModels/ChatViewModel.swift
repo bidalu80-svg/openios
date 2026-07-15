@@ -18673,6 +18673,17 @@ final class ChatViewModel {
         return providerType != .iexa && providerType != .anthropic
     }
 
+    /// The chat surface needs this before the async send task creates its empty
+    /// assistant message.  It is deliberately limited to app-owned, direct
+    /// image/video requests: a regular model reply must never inherit the
+    /// rendering-card's post-send delay.
+    func willStartIndependentDirectMediaGeneration(for prompt: String) -> Bool {
+        guard let modelId = mentionedModelId ?? selectedModelId ?? conversation?.model else {
+            return false
+        }
+        return canStartIndependentDirectMediaGeneration(modelId: modelId, text: prompt)
+    }
+
     private func canStartIndependentDirectMediaGeneration(modelId: String, text: String? = nil) -> Bool {
         if canUseDirectVideoEndpointProvider && shouldUseDirectVideoGeneration(modelId: modelId) {
             return true
