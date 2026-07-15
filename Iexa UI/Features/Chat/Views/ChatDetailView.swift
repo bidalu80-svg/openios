@@ -9891,41 +9891,63 @@ private struct MediaGenerationPlaceholderView: View {
     private var isVideo: Bool { kind == "video" }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 23, style: .continuous)
+        lifecycleConfiguredCard
+    }
+
+    /// Keep the modifiers in deliberately small opaque subtrees. This card is
+    /// used inside the very large chat message renderer; keeping it monolithic
+    /// makes Swift's View-builder type solver exceed its reasonable-time limit.
+    private var lifecycleConfiguredCard: some View {
+        layoutConfiguredCard
+            .animation(.easeInOut(duration: 0.22), value: title)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(title)
+            .onAppear {
+                isActive = scenePhase == .active
+            }
+            .onDisappear { isActive = false }
+            .onChange(of: scenePhase) { _, phase in
+                isActive = phase == .active
+            }
+    }
+
+    private var layoutConfiguredCard: some View {
+        decoratedCard
+            .aspectRatio(isVideo ? 16.0 / 9.0 : 1.0, contentMode: .fit)
+            .frame(maxWidth: 340)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 2)
+    }
+
+    private var decoratedCard: some View {
+        cardLayers
+            .overlay {
+                cardShape.strokeBorder(
+                    Color.white.opacity(theme.isDark ? 0.09 : 0.58),
+                    lineWidth: 0.75
+                )
+            }
+            .background {
+                cardShape
+                    .fill(Color.black.opacity(theme.isDark ? 0.18 : 0.06))
+                    .offset(y: 6)
+                    .blur(radius: 11)
+            }
+    }
+
+    private var cardLayers: some View {
         ZStack(alignment: .topLeading) {
             cardBackground
             animatedDots
                 .allowsHitTesting(false)
-                .clipShape(shape)
+                .clipShape(cardShape)
             cardTitle
         }
-        .clipShape(shape)
-        .overlay {
-            shape.strokeBorder(
-                Color.white.opacity(theme.isDark ? 0.09 : 0.58),
-                lineWidth: 0.75
-            )
-        }
-        .background {
-            shape
-                .fill(Color.black.opacity(theme.isDark ? 0.18 : 0.06))
-                .offset(y: 6)
-                .blur(radius: 11)
-        }
-        .aspectRatio(isVideo ? 16.0 / 9.0 : 1.0, contentMode: .fit)
-        .frame(maxWidth: 340)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 2)
-        .animation(.easeInOut(duration: 0.22), value: title)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(title)
-        .onAppear {
-            isActive = scenePhase == .active
-        }
-        .onDisappear { isActive = false }
-        .onChange(of: scenePhase) { _, phase in
-            isActive = phase == .active
-        }
+        .clipShape(cardShape)
+    }
+
+    private var cardShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 23, style: .continuous)
     }
 
     private var cardBackground: some View {
