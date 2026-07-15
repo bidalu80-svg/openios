@@ -9985,7 +9985,11 @@ private struct MediaGenerationPlaceholderView: View {
     let phase: String
     let title: String
     @State private var isActive = false
-    @State private var isExpanded = false
+    /// Kept as a clock origin rather than an implicit-animation flag.  The
+    /// enclosing message row intentionally disables its default transaction
+    /// to protect scroll anchoring, which previously made `withAnimation`
+    /// resolve as a direct full-size appearance.
+    @State private var entranceStartedAt: Date?
 
     private var isVideo: Bool { kind == "video" }
 
@@ -10007,37 +10011,48 @@ private struct MediaGenerationPlaceholderView: View {
             }
             .onDisappear {
                 isActive = false
-                isExpanded = false
+                entranceStartedAt = nil
             }
             .onChange(of: scenePhase) { _, phase in
                 isActive = phase == .active
             }
     }
 
+    @ViewBuilder
     private var entranceConfiguredCard: some View {
-        layoutConfiguredCard
-            // The reference begins as a small, rounded seed at the assistant
-            // card's top-leading corner, then grows down/right into the full
-            // rendering surface. Scaling the card itself keeps the transcript
-            // and its scroll anchors independent from this visual entrance.
-            .scaleEffect(isExpanded ? 1 : 0.055, anchor: .topLeading)
-            .opacity(isExpanded ? 1 : 0.90)
+        if reduceMotion {
+            entranceCard(progress: 1)
+        } else {
+            // Drive every expansion frame directly from display time.  This is
+            // intentionally independent of the parent message row's disabled
+            // animation transaction, so the initial small seed cannot be
+            // skipped when the delayed media row is inserted.
+            TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+                entranceCard(progress: entranceProgress(at: timeline.date))
+            }
+        }
     }
 
     private func beginCardEntrance() {
-        guard !reduceMotion else {
-            isExpanded = true
-            return
-        }
-        isExpanded = false
-        DispatchQueue.main.async {
-            // Gemini/ChatGPT-style entrance: a continuous, no-bounce scale
-            // curve. `.smooth` is available on the app's iOS 18.1 target and
-            // avoids the small terminal recoil a damped spring can still show.
-            withAnimation(.smooth(duration: 0.40, extraBounce: 0)) {
-                isExpanded = true
-            }
-        }
+        entranceStartedAt = .now
+    }
+
+    private func entranceCard(progress: Double) -> some View {
+        // The reference begins as a small, rounded seed at the assistant
+        // card's top-leading corner, then grows down/right into the full
+        // rendering surface. Scaling the visual only keeps transcript layout
+        // and its scroll anchors independent from this entrance.
+        layoutConfiguredCard
+            .scaleEffect(0.055 + progress * 0.945, anchor: .topLeading)
+            .opacity(0.90 + progress * 0.10)
+    }
+
+    private func entranceProgress(at date: Date) -> Double {
+        guard let entranceStartedAt else { return 0 }
+        let raw = min(1, max(0, date.timeIntervalSince(entranceStartedAt) / 0.40))
+        // Smooth, monotonic, and explicitly no-bounce: close to ChatGPT's
+        // seeded expansion rather than a spring or an instant resize.
+        return raw * raw * (3 - 2 * raw)
     }
 
     private var layoutConfiguredCard: some View {
