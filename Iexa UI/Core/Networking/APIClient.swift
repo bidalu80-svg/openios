@@ -6,6 +6,17 @@ struct ImageEditSource: Sendable {
     let fileName: String
 }
 
+/// Milestones observed from the actual video-generation protocol.  These are
+/// deliberately transport-level states: providers that expose no render
+/// progress must not be represented as if they did.
+enum VideoGenerationProgress: Sendable {
+    case submitting
+    case taskAccepted
+    case polling
+    case fetchingResult
+    case resultReceived
+}
+
 /// High-level client for the Iexa native server REST API, built on top of `NetworkManager`.
 final class APIClient: @unchecked Sendable {
     let network: NetworkManager
@@ -1914,7 +1925,8 @@ final class APIClient: @unchecked Sendable {
         size: String = "1024x1024",
         duration: Int? = nil,
         imageData: Data? = nil,
-        imageFileName: String = "image.png"
+        imageFileName: String = "image.png",
+        progress: ((VideoGenerationProgress) async -> Void)? = nil
     ) async throws -> String {
         let bodyVariants = videoGenerationBodyVariants(
             prompt: prompt,
@@ -1943,6 +1955,9 @@ final class APIClient: @unchecked Sendable {
         for path in paths {
             for requestBody in bodyVariants {
                 do {
+                    if let progress {
+                        await progress(.submitting)
+                    }
                     let json = usesVolcengineVideoShape
                         ? try await requestVolcengineArkJSON(
                             path: path,
@@ -1958,16 +1973,23 @@ final class APIClient: @unchecked Sendable {
                         )
 
                     if let videoReference = firstVideoReference(in: json) {
+                        if let progress {
+                            await progress(.resultReceived)
+                        }
                         return videoReference
                     }
                     let taskId = usesVolcengineVideoShape
                         ? firstVolcengineVideoTaskId(in: json)
                         : firstVideoTaskId(in: json)
                     if let taskId {
+                        if let progress {
+                            await progress(.taskAccepted)
+                        }
                         return try await pollVideoGenerationTask(
                             taskId: taskId,
                             usesXAIVideoShape: usesXAIVideoShape,
-                            usesVolcengineVideoShape: usesVolcengineVideoShape
+                            usesVolcengineVideoShape: usesVolcengineVideoShape,
+                            progress: progress
                         )
                     }
                     lastError = APIError.responseDecoding(
@@ -2510,7 +2532,8 @@ final class APIClient: @unchecked Sendable {
         taskId: String,
         usesXAIVideoShape: Bool = false,
         usesVolcengineVideoShape: Bool = false,
-        timeout: TimeInterval = 1_800
+        timeout: TimeInterval = 1_800,
+        progress: ((VideoGenerationProgress) async -> Void)? = nil
     ) async throws -> String {
         let startedAt = Date()
         let statusPaths = videoTaskStatusPaths(
@@ -2524,6 +2547,9 @@ final class APIClient: @unchecked Sendable {
 
         while Date().timeIntervalSince(startedAt) < timeout {
             try Task.checkCancellation()
+            if let progress {
+                await progress(.polling)
+            }
 
             for path in statusPaths {
                 do {
@@ -2541,16 +2567,25 @@ final class APIClient: @unchecked Sendable {
                     lastPayload = payload
 
                     if let reference = firstVideoReference(in: payload) {
+                        if let progress {
+                            await progress(.resultReceived)
+                        }
                         return reference
                     }
 
                     switch videoTaskState(in: payload) {
                     case .completed:
+                        if let progress {
+                            await progress(.fetchingResult)
+                        }
                         if let reference = try await fetchVideoTaskContent(
                             taskId: taskId,
                             usesXAIVideoShape: usesXAIVideoShape,
                             usesVolcengineVideoShape: usesVolcengineVideoShape
                         ) {
+                            if let progress {
+                                await progress(.resultReceived)
+                            }
                             return reference
                         }
                     case .failed(let message):

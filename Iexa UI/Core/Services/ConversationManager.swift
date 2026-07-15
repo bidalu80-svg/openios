@@ -229,7 +229,8 @@ final class ConversationManager: @unchecked Sendable {
         size: String = "1024x1024",
         duration: Int? = nil,
         imageData: Data? = nil,
-        imageFileName: String = "image.png"
+        imageFileName: String = "image.png",
+        progress: ((VideoGenerationProgress) async -> Void)? = nil
     ) async throws -> String {
         try await apiClient.generateVideo(
             prompt: prompt,
@@ -237,7 +238,8 @@ final class ConversationManager: @unchecked Sendable {
             size: size,
             duration: duration,
             imageData: imageData,
-            imageFileName: imageFileName
+            imageFileName: imageFileName,
+            progress: progress
         )
     }
 

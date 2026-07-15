@@ -9529,6 +9529,17 @@ private struct ChatAmbientBackgroundView: View {
                 endRadius: 420
             )
         }
+        // Gemini's first-screen field is not a flat wash.  A dense layer of
+        // coloured scales rises from behind the composer, fading into the
+        // quieter cyan/white area above it.
+        .overlay {
+            GeminiScaleField(
+                isDark: theme.isDark,
+                palettePhase: 0.0,
+                isIdle: true,
+                time: date.timeIntervalSinceReferenceDate
+            )
+        }
     }
 
     private var activeGradient: some View {
@@ -9544,7 +9555,8 @@ private struct ChatAmbientBackgroundView: View {
     }
 
     /// Gemini keeps the navigation and composer surfaces neutral while a broad,
-    /// softly blurred colour field travels through the waiting conversation.
+    /// softly blurred colour field and a coloured scale lattice travel through
+    /// the waiting conversation.
     /// The palette and timing below are sampled from the supplied full capture:
     /// blue → cyan → green → yellow → coral → pink → violet.
     private func activeGradient(at date: Date) -> some View {
@@ -9555,14 +9567,15 @@ private struct ChatAmbientBackgroundView: View {
 
         return GeometryReader { proxy in
             let extent = max(proxy.size.width, proxy.size.height) * 0.64
-            let centerX = 0.38 + 0.16 * sin(activePhase(at: date) * .pi * 2)
+            let phase = activePhase(at: date)
+            let centerX = 0.38 + 0.16 * sin(phase * .pi * 2)
 
             ZStack {
                 LinearGradient(
                     colors: [
+                        Color.clear,
                         tint.opacity(tintOpacity),
-                        tint.opacity(theme.isDark ? 0.10 : 0.08),
-                        Color.clear
+                        tint.opacity(theme.isDark ? 0.28 : 0.60)
                     ],
                     startPoint: .top,
                     endPoint: .bottom
@@ -9574,7 +9587,7 @@ private struct ChatAmbientBackgroundView: View {
                         nextTint.opacity(theme.isDark ? 0.08 : 0.22),
                         Color.clear
                     ],
-                    center: UnitPoint(x: centerX, y: 0.10),
+                    center: UnitPoint(x: centerX, y: 0.82),
                     startRadius: 8,
                     endRadius: extent
                 )
@@ -9589,6 +9602,13 @@ private struct ChatAmbientBackgroundView: View {
                     center: UnitPoint(x: 0.46, y: 0.58),
                     startRadius: 0,
                     endRadius: extent * 0.50
+                )
+
+                GeminiScaleField(
+                    isDark: theme.isDark,
+                    palettePhase: phase,
+                    isIdle: false,
+                    time: date.timeIntervalSinceReferenceDate
                 )
             }
         }
@@ -9686,54 +9706,149 @@ private struct ChatAmbientBackgroundView: View {
     ]
 }
 
+/// The distinctive lower Gemini field is a staggered, coloured scale lattice:
+/// amber/lime at its upper edge, then cyan/blue and violet closer to the
+/// keyboard.  It is rendered directly in Canvas so it stays behind the existing
+/// composer rather than becoming a texture inside the input component.
+private struct GeminiScaleField: View {
+    let isDark: Bool
+    /// The current waiting-cycle position.  It changes the palette only while
+    /// the first response is actively running; idle keeps Gemini's blue/lime
+    /// launch appearance.
+    let palettePhase: Double
+    let isIdle: Bool
+    let time: TimeInterval
+
+    var body: some View {
+        Canvas(opaque: false, colorMode: .linear, rendersAsynchronously: true) { context, size in
+            guard size.width > 1, size.height > 1 else { return }
+
+            let fieldTop = size.height * (isIdle ? 0.47 : 0.43)
+            let fieldHeight = max(1, size.height - fieldTop)
+            let rowSpacing: CGFloat = 7.1
+            let columnSpacing: CGFloat = 7.4
+            let rowCount = Int((fieldHeight / rowSpacing).rounded(.up)) + 1
+            let columnCount = Int((size.width / columnSpacing).rounded(.up)) + 2
+            let shimmer = 0.5 + 0.5 * sin(time * 1.45)
+
+            for row in 0..<rowCount {
+                let y = fieldTop + CGFloat(row) * rowSpacing
+                let verticalProgress = Double(min(1, max(0, (y - fieldTop) / fieldHeight)))
+                let rowOffset = row.isMultiple(of: 2) ? 0.0 : columnSpacing * 0.5
+
+                for column in 0..<columnCount {
+                    let x = CGFloat(column) * columnSpacing + rowOffset
+                    guard x >= -columnSpacing, x <= size.width + columnSpacing else { continue }
+
+                    // A diagonal hue sweep creates the yellow/green → cyan →
+                    // blue/purple scales visible in Gemini's composer field.
+                    let horizontalProgress = Double(min(1, max(0, x / max(size.width, 1))))
+                    let hue: Double
+                    if isIdle {
+                        hue = 0.16 + verticalProgress * 0.54 + horizontalProgress * 0.035
+                    } else {
+                        hue = (0.13 + palettePhase * 0.54 + verticalProgress * 0.48 + horizontalProgress * 0.055)
+                            .truncatingRemainder(dividingBy: 1)
+                    }
+                    let stagger = 0.5 + 0.5 * sin(Double(row) * 0.61 + Double(column) * 0.38 + time * 1.3)
+                    let intensity = (0.30 + verticalProgress * 0.70) * (0.76 + stagger * 0.24)
+                    let alpha = (isDark ? 0.14 : 0.22) + intensity * (isDark ? 0.30 : 0.54)
+                    let dotRadius = CGFloat(0.82 + intensity * (isIdle ? 1.15 : 1.32))
+                    let colour = Color(
+                        hue: hue,
+                        saturation: isDark ? 0.55 : 0.68,
+                        brightness: isDark ? 0.88 : 0.95,
+                        opacity: alpha * (0.88 + shimmer * 0.12)
+                    )
+                    let rect = CGRect(
+                        x: x - dotRadius,
+                        y: y - dotRadius,
+                        width: dotRadius * 2,
+                        height: dotRadius * 2
+                    )
+                    context.fill(Path(ellipseIn: rect), with: .color(colour))
+                }
+            }
+        }
+        .mask {
+            LinearGradient(
+                colors: [.clear, .white.opacity(0.62), .white],
+                startPoint: .top,
+                endPoint: UnitPoint(x: 0.5, y: 0.70)
+            )
+        }
+    }
+}
+
 // MARK: - Image Generation Placeholder
 
-private struct ImageGenerationPlaceholderView: View {
+/// A media placeholder is driven by the generation protocol's persisted
+/// metadata, not by elapsed time.  Its moving dot field is visual feedback;
+/// the text only advances when the request, poll, or media result actually
+/// advances.
+private struct MediaGenerationPlaceholderView: View {
     @Environment(\.theme) private var theme
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let kind: String
+    let title: String
     @State private var isActive = false
-    @State private var hasEntered = false
-    @State private var entranceTaskStarted = false
+
+    private var isVideo: Bool { kind == "video" }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        return Group {
-            if hasEntered {
-                DynamicImageGenerationGradient(
-                    isDark: theme.isDark,
-                    isActive: isActive && !reduceMotion
-                )
-                .allowsHitTesting(false)
-                .clipShape(shape)
-                .overlay {
-                    shape
-                        .strokeBorder(Color.white.opacity(theme.isDark ? 0.08 : 0.16), lineWidth: 0.75)
+        let shape = RoundedRectangle(cornerRadius: 23, style: .continuous)
+        ZStack(alignment: .topLeading) {
+            shape
+                .fill(theme.isDark
+                    ? Color.white.opacity(0.075)
+                    : Color(red: 0.955, green: 0.946, blue: 0.962))
+
+            Group {
+                if isActive && !reduceMotion {
+                    TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                        MediaGenerationDotsCanvas(
+                            isDark: theme.isDark,
+                            isVideo: isVideo,
+                            time: timeline.date.timeIntervalSinceReferenceDate
+                        )
+                    }
+                } else {
+                    MediaGenerationDotsCanvas(isDark: theme.isDark, isVideo: isVideo, time: 0.4)
                 }
-                .background {
-                    shape
-                        .fill(Color.black.opacity(theme.isDark ? 0.16 : 0.05))
-                        .offset(y: 6)
-                        .blur(radius: 10)
-                }
-                .aspectRatio(1, contentMode: .fit)
-                .frame(maxWidth: 340)
-                .padding(.top, 2)
-                .transition(
-                    .asymmetric(
-                        insertion: .opacity
-                            .combined(with: .scale(scale: 0.965, anchor: .topLeading))
-                            .combined(with: .move(edge: .top)),
-                        removal: .opacity
-                    )
-                )
-            } else {
-                Color.clear
-                    .frame(width: 1, height: 1)
-                    .accessibilityHidden(true)
             }
+            .allowsHitTesting(false)
+            .clipShape(shape)
+
+            Text(title)
+                .id(title)
+                .scaledFont(size: 14, weight: .semibold)
+                .foregroundStyle(theme.isDark ? Color.white.opacity(0.88) : Color.black.opacity(0.72))
+                .lineLimit(1)
+                .padding(.horizontal, 17)
+                .padding(.top, 16)
+                .transition(.opacity.combined(with: .move(edge: .top)))
         }
+        .clipShape(shape)
+        .overlay {
+            shape.strokeBorder(
+                Color.white.opacity(theme.isDark ? 0.09 : 0.58),
+                lineWidth: 0.75
+            )
+        }
+        .background {
+            shape
+                .fill(Color.black.opacity(theme.isDark ? 0.18 : 0.06))
+                .offset(y: 6)
+                .blur(radius: 11)
+        }
+        .aspectRatio(isVideo ? 16.0 / 9.0 : 1.0, contentMode: .fit)
+        .frame(maxWidth: 340)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, 2)
+        .animation(.easeInOut(duration: 0.22), value: title)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
         .onAppear {
             isActive = scenePhase == .active
         }
@@ -9741,26 +9856,49 @@ private struct ImageGenerationPlaceholderView: View {
         .onChange(of: scenePhase) { _, phase in
             isActive = phase == .active
         }
-        .task {
-            await beginEntranceIfNeeded()
-        }
     }
+}
 
-    @MainActor
-    private func beginEntranceIfNeeded() async {
-        guard !hasEntered, !entranceTaskStarted else { return }
-        entranceTaskStarted = true
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        guard !Task.isCancelled else {
-            entranceTaskStarted = false
-            return
-        }
-        if reduceMotion {
-            hasEntered = true
-            return
-        }
-        withAnimation(.interactiveSpring(response: 0.56, dampingFraction: 0.9, blendDuration: 0.08)) {
-            hasEntered = true
+private struct MediaGenerationDotsCanvas: View {
+    let isDark: Bool
+    let isVideo: Bool
+    let time: TimeInterval
+
+    var body: some View {
+        Canvas(opaque: false, colorMode: .linear, rendersAsynchronously: true) { context, size in
+            guard size.width > 1, size.height > 1 else { return }
+            let period = isVideo ? 4.8 : 4.2
+            let cycle = (time.truncatingRemainder(dividingBy: period) + period) / period
+            let focusX = size.width * (0.50 + 0.22 * sin(cycle * .pi * 2.0))
+            let focusY = size.height * (0.51 + 0.23 * cos(cycle * .pi * 2.0))
+            let tint = isDark
+                ? Color(red: 0.82, green: 0.80, blue: 0.89)
+                : Color(red: 0.55, green: 0.52, blue: 0.63)
+            let columns = isVideo ? 24 : 20
+            let rows = isVideo ? 11 : 19
+            let horizontalInset = size.width * 0.12
+            let verticalInset = size.height * 0.21
+            let usableWidth = size.width - horizontalInset * 2
+            let usableHeight = size.height - verticalInset * 2
+
+            for row in 0..<rows {
+                for column in 0..<columns {
+                    let x = horizontalInset + usableWidth * CGFloat(column) / CGFloat(max(columns - 1, 1))
+                    let y = verticalInset + usableHeight * CGFloat(row) / CGFloat(max(rows - 1, 1))
+                    let dx = Double((x - focusX) / max(size.width, 1))
+                    let dy = Double((y - focusY) / max(size.height, 1))
+                    let distance = sqrt(dx * dx + dy * dy)
+                    let wave = 0.5 + 0.5 * sin(cycle * .pi * 2.0 + Double(row + column) * 0.44)
+                    let intensity = max(0, 1 - distance * 3.25) * (0.58 + wave * 0.42)
+                    guard intensity > 0.08 else { continue }
+                    let radius = CGFloat(0.55 + intensity * 0.95)
+                    let dot = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
+                    context.fill(
+                        Path(ellipseIn: dot),
+                        with: .color(tint.opacity((isDark ? 0.11 : 0.08) + intensity * (isDark ? 0.32 : 0.28)))
+                    )
+                }
+            }
         }
     }
 }
@@ -10181,7 +10319,10 @@ private struct IsolatedAssistantMessage: View {
                     EmptyView()
                 }
             } else if message.metadata?["iexa_image_generation_placeholder"] == "true" {
-                ImageGenerationPlaceholderView()
+                MediaGenerationPlaceholderView(
+                    kind: message.metadata?["iexa_media_generation_kind"] ?? "image",
+                    title: message.metadata?["iexa_media_generation_title"] ?? "正在等待图片服务返回"
+                )
             } else if showEmptyThinkingCapsule {
                 TypingIndicator()
             } else {

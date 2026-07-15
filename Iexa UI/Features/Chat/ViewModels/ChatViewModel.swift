@@ -64,6 +64,34 @@ private enum GeneratedImageSlot {
     }
 }
 
+/// UI states are emitted only when their matching transport/media event has
+/// happened.  In particular, image APIs that return a single final response do
+/// not invent provider-side "draft" or "retouching" phases.
+private enum GeneratedMediaPresentationKind: String, Equatable {
+    case image
+    case video
+
+    var displayName: String {
+        switch self {
+        case .image: return "图片"
+        case .video: return "视频"
+        }
+    }
+}
+
+private enum GeneratedMediaPresentationPhase: String {
+    case submitting
+    case waitingForResult
+    case taskAccepted
+    case polling
+    case fetchingResult
+    case resultReceived
+    case attaching
+    case ready
+    case failed
+    case stopped
+}
+
 struct ChatContextBudgetStatus: Sendable, Equatable {
     var modelId: String = ""
     var usedTokens: Int = 0
@@ -7056,15 +7084,24 @@ final class ChatViewModel {
 
         // Assistant placeholder
         let assistantMessageId = UUID().uuidString
-        let isDirectImageGenerationPlaceholder = canStartIndependentDirectImageGeneration(
+        let isDirectMediaGenerationPlaceholder = canStartIndependentDirectMediaGeneration(
             modelId: modelId,
             text: modelPromptText
         )
+        let initialDirectMediaKind = shouldUseDirectVideoGeneration(modelId: modelId) ? "video" : "image"
+        let initialDirectMediaTitle = initialDirectMediaKind == "video"
+            ? "正在提交视频请求"
+            : "正在提交图片请求"
         conversation?.messages.append(ChatMessage(
             id: assistantMessageId, role: .assistant, content: "",
             timestamp: .now, model: modelId, isStreaming: true,
-            metadata: isDirectImageGenerationPlaceholder
-                ? ["iexa_image_generation_placeholder": "true"]
+            metadata: isDirectMediaGenerationPlaceholder
+                ? [
+                    "iexa_image_generation_placeholder": "true",
+                    "iexa_media_generation_kind": initialDirectMediaKind,
+                    "iexa_media_generation_phase": "submitting",
+                    "iexa_media_generation_title": initialDirectMediaTitle
+                ]
                 : nil))
 
         // ── Build / update the history tree ─────────────────────────────────
@@ -7213,6 +7250,11 @@ final class ChatViewModel {
                             modelId: modelId,
                             seedImage: videoSeedImage
                         )
+                        self.updateGeneratedMediaPresentation(
+                            messageId: assistantMessageId,
+                            kind: .video,
+                            phase: .waitingForResult
+                        )
                         await RunLiveActivityService.shared.update(
                             id: assistantMessageId,
                             title: "正在生成视频",
@@ -7229,17 +7271,42 @@ final class ChatViewModel {
                                 size: requestedVideoSize,
                                 duration: Self.requestedVideoDuration(from: videoPrompt),
                                 imageData: videoSeedImage?.data,
-                                imageFileName: videoSeedImage?.fileName ?? "image.png"
+                                imageFileName: videoSeedImage?.fileName ?? "image.png",
+                                progress: { [weak self] progress in
+                                    await self?.updateGeneratedVideoPresentation(
+                                        messageId: assistantMessageId,
+                                        progress: progress
+                                    )
+                                }
                             )
                         }
+                        self.updateGeneratedMediaPresentation(
+                            messageId: assistantMessageId,
+                            kind: .video,
+                            phase: .attaching
+                        )
+                        guard self.attachGeneratedVideoFile(
+                            messageId: assistantMessageId,
+                            videoReference: videoReference
+                        ) else {
+                            throw APIError.responseDecoding(
+                                underlying: NSError(
+                                    domain: "ChatViewModel",
+                                    code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "视频结果已返回，但未能加入当前对话。"]
+                                ),
+                                data: nil
+                            )
+                        }
+                        self.updateGeneratedMediaPresentation(
+                            messageId: assistantMessageId,
+                            kind: .video,
+                            phase: .ready
+                        )
                         self.updateAssistantMessage(
                             id: assistantMessageId,
                             content: "已生成视频",
                             isStreaming: false
-                        )
-                        self.attachGeneratedVideoFile(
-                            messageId: assistantMessageId,
-                            videoReference: videoReference
                         )
                         self.recordTokenUsageForCompletedTurn(
                             assistantMessageId: assistantMessageId,
@@ -7311,6 +7378,12 @@ final class ChatViewModel {
                                 isIndeterminate: true,
                                 force: true
                             )
+                            self.updateGeneratedMediaPresentation(
+                                messageId: assistantMessageId,
+                                kind: .image,
+                                phase: .waitingForResult,
+                                expectedCount: requestedImageCount
+                            )
                             let generatedImageSlots = try await self.generateDirectImageSlots(
                                 prompts: imagePrompts,
                                 modelId: modelId,
@@ -7319,7 +7392,16 @@ final class ChatViewModel {
                                 editImages: editImages,
                                 manager: manager,
                                 originalPromptWasEmpty: imagePrompt.isEmpty,
-                                requiresEditImages: requiresEditImages
+                                requiresEditImages: requiresEditImages,
+                                onResultReceived: { [weak self] receivedCount, expectedCount in
+                                    self?.updateGeneratedMediaPresentation(
+                                        messageId: assistantMessageId,
+                                        kind: .image,
+                                        phase: .resultReceived,
+                                        receivedCount: receivedCount,
+                                        expectedCount: expectedCount
+                                    )
+                                }
                             )
                             if generatedImageSlots.isEmpty {
                                 throw APIError.unknown(
@@ -7330,19 +7412,28 @@ final class ChatViewModel {
                                     )
                                 )
                             }
-                            self.updateAssistantMessage(
-                                id: assistantMessageId,
-                                content: "",
-                                isStreaming: false
+                            self.updateGeneratedMediaPresentation(
+                                messageId: assistantMessageId,
+                                kind: .image,
+                                phase: .attaching,
+                                expectedCount: requestedImageCount
                             )
+                            var attachedImageCount = 0
                             for (slotIndex, slot) in generatedImageSlots.enumerated() {
                                 switch slot {
                                 case .image(let imageReference, let displayReference):
-                                    self.attachGeneratedImageFile(
+                                    if self.attachGeneratedImageFile(
                                         messageId: assistantMessageId,
                                         imageReference: imageReference,
                                         displayReference: displayReference
-                                    )
+                                    ) {
+                                        attachedImageCount += 1
+                                    } else {
+                                        self.attachGeneratedImageFailurePlaceholder(
+                                            messageId: assistantMessageId,
+                                            index: slotIndex + 1
+                                        )
+                                    }
                                 case .failure:
                                     self.attachGeneratedImageFailurePlaceholder(
                                         messageId: assistantMessageId,
@@ -7350,6 +7441,28 @@ final class ChatViewModel {
                                     )
                                 }
                             }
+                            guard attachedImageCount > 0 else {
+                                throw APIError.responseDecoding(
+                                    underlying: NSError(
+                                        domain: "ChatViewModel",
+                                        code: -1,
+                                        userInfo: [NSLocalizedDescriptionKey: "图片结果已返回，但未能加入当前对话。"]
+                                    ),
+                                    data: nil
+                                )
+                            }
+                            self.updateGeneratedMediaPresentation(
+                                messageId: assistantMessageId,
+                                kind: .image,
+                                phase: .ready,
+                                receivedCount: attachedImageCount,
+                                expectedCount: requestedImageCount
+                            )
+                            self.updateAssistantMessage(
+                                id: assistantMessageId,
+                                content: "",
+                                isStreaming: false
+                            )
                             self.recordTokenUsageForCompletedTurn(
                                 assistantMessageId: assistantMessageId,
                                 userText: messageText,
@@ -9854,6 +9967,15 @@ final class ChatViewModel {
             }
         }
 
+        let directMediaKind: GeneratedMediaPresentationKind = shouldUseDirectVideoGeneration(modelId: modelId)
+            ? .video
+            : .image
+        updateGeneratedMediaPresentation(
+            messageId: assistantMessageId,
+            kind: directMediaKind,
+            phase: .submitting
+        )
+
         let task = Task { [weak self] in
             guard let self else { return }
             await self.startRunLiveActivity(id: assistantMessageId, modelId: modelId, prompt: modelPromptText)
@@ -9885,6 +10007,11 @@ final class ChatViewModel {
                         isIndeterminate: true,
                         force: true
                     )
+                    self.updateGeneratedMediaPresentation(
+                        messageId: assistantMessageId,
+                        kind: .video,
+                        phase: .waitingForResult
+                    )
                     let videoReference = try await self.runMediaRequestWithRetry {
                         try await manager.generateVideo(
                             prompt: videoPrompt,
@@ -9892,18 +10019,43 @@ final class ChatViewModel {
                             size: requestedVideoSize,
                             duration: Self.requestedVideoDuration(from: videoPrompt),
                             imageData: videoSeedImage?.data,
-                            imageFileName: videoSeedImage?.fileName ?? "image.png"
+                            imageFileName: videoSeedImage?.fileName ?? "image.png",
+                            progress: { [weak self] progress in
+                                await self?.updateGeneratedVideoPresentation(
+                                    messageId: assistantMessageId,
+                                    progress: progress
+                                )
+                            }
                         )
                     }
                     try Task.checkCancellation()
+                    self.updateGeneratedMediaPresentation(
+                        messageId: assistantMessageId,
+                        kind: .video,
+                        phase: .attaching
+                    )
+                    guard self.attachGeneratedVideoFile(
+                        messageId: assistantMessageId,
+                        videoReference: videoReference
+                    ) else {
+                        throw APIError.responseDecoding(
+                            underlying: NSError(
+                                domain: "ChatViewModel",
+                                code: -1,
+                                userInfo: [NSLocalizedDescriptionKey: "视频结果已返回，但未能加入当前对话。"]
+                            ),
+                            data: nil
+                        )
+                    }
+                    self.updateGeneratedMediaPresentation(
+                        messageId: assistantMessageId,
+                        kind: .video,
+                        phase: .ready
+                    )
                     self.updateAssistantMessage(
                         id: assistantMessageId,
                         content: "已生成视频",
                         isStreaming: false
-                    )
-                    self.attachGeneratedVideoFile(
-                        messageId: assistantMessageId,
-                        videoReference: videoReference
                     )
                     self.recordTokenUsageForCompletedTurn(
                         assistantMessageId: assistantMessageId,
@@ -9973,6 +10125,12 @@ final class ChatViewModel {
                     isIndeterminate: true,
                     force: true
                 )
+                self.updateGeneratedMediaPresentation(
+                    messageId: assistantMessageId,
+                    kind: .image,
+                    phase: .waitingForResult,
+                    expectedCount: requestedImageCount
+                )
                 let generatedImageSlots = try await self.generateDirectImageSlots(
                     prompts: imagePrompts,
                     modelId: modelId,
@@ -9982,7 +10140,16 @@ final class ChatViewModel {
                     manager: manager,
                     originalPromptWasEmpty: imagePrompt.isEmpty,
                     requiresEditImages: requiresEditImages,
-                    preferServerDefaultModel: preferServerDefaultImageModel
+                    preferServerDefaultModel: preferServerDefaultImageModel,
+                    onResultReceived: { [weak self] receivedCount, expectedCount in
+                        self?.updateGeneratedMediaPresentation(
+                            messageId: assistantMessageId,
+                            kind: .image,
+                            phase: .resultReceived,
+                            receivedCount: receivedCount,
+                            expectedCount: expectedCount
+                        )
+                    }
                 )
                 try Task.checkCancellation()
                 if generatedImageSlots.isEmpty {
@@ -9994,19 +10161,28 @@ final class ChatViewModel {
                         )
                     )
                 }
-                self.updateAssistantMessage(
-                    id: assistantMessageId,
-                    content: "",
-                    isStreaming: false
+                self.updateGeneratedMediaPresentation(
+                    messageId: assistantMessageId,
+                    kind: .image,
+                    phase: .attaching,
+                    expectedCount: requestedImageCount
                 )
+                var attachedImageCount = 0
                 for (slotIndex, slot) in generatedImageSlots.enumerated() {
                     switch slot {
                     case .image(let imageReference, let displayReference):
-                        self.attachGeneratedImageFile(
+                        if self.attachGeneratedImageFile(
                             messageId: assistantMessageId,
                             imageReference: imageReference,
                             displayReference: displayReference
-                        )
+                        ) {
+                            attachedImageCount += 1
+                        } else {
+                            self.attachGeneratedImageFailurePlaceholder(
+                                messageId: assistantMessageId,
+                                index: slotIndex + 1
+                            )
+                        }
                     case .failure:
                         self.attachGeneratedImageFailurePlaceholder(
                             messageId: assistantMessageId,
@@ -10014,6 +10190,28 @@ final class ChatViewModel {
                         )
                     }
                 }
+                guard attachedImageCount > 0 else {
+                    throw APIError.responseDecoding(
+                        underlying: NSError(
+                            domain: "ChatViewModel",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "图片结果已返回，但未能加入当前对话。"]
+                        ),
+                        data: nil
+                    )
+                }
+                self.updateGeneratedMediaPresentation(
+                    messageId: assistantMessageId,
+                    kind: .image,
+                    phase: .ready,
+                    receivedCount: attachedImageCount,
+                    expectedCount: requestedImageCount
+                )
+                self.updateAssistantMessage(
+                    id: assistantMessageId,
+                    content: "",
+                    isStreaming: false
+                )
                 self.recordTokenUsageForCompletedTurn(
                     assistantMessageId: assistantMessageId,
                     userText: messageText,
@@ -10031,6 +10229,11 @@ final class ChatViewModel {
                     self.finishDirectMediaGenerationTask(messageId: assistantMessageId)
                     return
                 }
+                self.updateGeneratedMediaPresentation(
+                    messageId: assistantMessageId,
+                    kind: directMediaKind,
+                    phase: .failed
+                )
                 self.updateAssistantMessage(
                     id: assistantMessageId,
                     content: "",
@@ -10224,7 +10427,97 @@ final class ChatViewModel {
         }
     }
 
+    /// Persists a media-generation milestone on the same assistant message that
+    /// will later own the generated file.  The placeholder reads these values,
+    /// while the history node preserves a truthful final state after relaunch.
+    private func updateGeneratedMediaPresentation(
+        messageId: String,
+        kind: GeneratedMediaPresentationKind,
+        phase: GeneratedMediaPresentationPhase,
+        receivedCount: Int? = nil,
+        expectedCount: Int? = nil
+    ) {
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+
+        let title: String
+        switch phase {
+        case .submitting:
+            title = "正在提交\(kind.displayName)请求"
+        case .waitingForResult:
+            title = "正在等待\(kind.displayName)服务返回"
+        case .taskAccepted:
+            title = "\(kind.displayName)任务已创建"
+        case .polling:
+            title = "正在查询视频生成进度"
+        case .fetchingResult:
+            title = "正在读取视频生成结果"
+        case .resultReceived:
+            if kind == .image, let receivedCount, let expectedCount, expectedCount > 1 {
+                title = "已收到 \(receivedCount)/\(expectedCount) 张图片"
+            } else {
+                title = "\(kind.displayName)已返回，正在准备显示"
+            }
+        case .attaching:
+            title = "正在将\(kind.displayName)加入对话"
+        case .ready:
+            title = "\(kind.displayName)已就绪"
+        case .failed:
+            title = "\(kind.displayName)生成失败"
+        case .stopped:
+            title = "已停止生成\(kind.displayName)"
+        }
+
+        var metadata = conversation?.messages[index].metadata ?? [:]
+        // Preserve this existing key for image extraction/failure handling; it
+        // now also identifies a video placeholder rather than a fake image.
+        metadata["iexa_image_generation_placeholder"] = "true"
+        metadata["iexa_media_generation_kind"] = kind.rawValue
+        metadata["iexa_media_generation_phase"] = phase.rawValue
+        metadata["iexa_media_generation_title"] = title
+        if let receivedCount {
+            metadata["iexa_media_generation_received_count"] = String(receivedCount)
+        }
+        if let expectedCount {
+            metadata["iexa_media_generation_expected_count"] = String(expectedCount)
+        }
+        conversation?.messages[index].metadata = metadata
+        conversation?.history.updateNode(id: messageId) { node in
+            var nodeMetadata = node.metadata ?? [:]
+            nodeMetadata["iexa_image_generation_placeholder"] = "true"
+            nodeMetadata["iexa_media_generation_kind"] = kind.rawValue
+            nodeMetadata["iexa_media_generation_phase"] = phase.rawValue
+            nodeMetadata["iexa_media_generation_title"] = title
+            if let receivedCount {
+                nodeMetadata["iexa_media_generation_received_count"] = String(receivedCount)
+            }
+            if let expectedCount {
+                nodeMetadata["iexa_media_generation_expected_count"] = String(expectedCount)
+            }
+            node.metadata = nodeMetadata
+        }
+    }
+
+    private func updateGeneratedVideoPresentation(
+        messageId: String,
+        progress: VideoGenerationProgress
+    ) {
+        let phase: GeneratedMediaPresentationPhase
+        switch progress {
+        case .submitting: phase = .submitting
+        case .taskAccepted: phase = .taskAccepted
+        case .polling: phase = .polling
+        case .fetchingResult: phase = .fetchingResult
+        case .resultReceived: phase = .resultReceived
+        }
+        updateGeneratedMediaPresentation(messageId: messageId, kind: .video, phase: phase)
+    }
+
     private func markDirectMediaGenerationStopped(messageId: String) {
+        let kind: GeneratedMediaPresentationKind = conversation?.messages
+            .first(where: { $0.id == messageId })?.metadata?["iexa_media_generation_kind"] == "video"
+            ? .video
+            : .image
+        updateGeneratedMediaPresentation(messageId: messageId, kind: kind, phase: .stopped)
         let status = ChatStatusUpdate(
             action: "image_generation",
             description: "已停止生成",
@@ -13034,6 +13327,12 @@ final class ChatViewModel {
             basePrompt: promptForAPI,
             requestedCount: requestedCount
         )
+        updateGeneratedMediaPresentation(
+            messageId: assistantMessageId,
+            kind: .image,
+            phase: .submitting,
+            expectedCount: requestedCount
+        )
         await RunLiveActivityService.shared.update(
             id: assistantMessageId,
             title: "正在创建图片",
@@ -13057,6 +13356,12 @@ final class ChatViewModel {
             content: "",
             isStreaming: true
         )
+        updateGeneratedMediaPresentation(
+            messageId: assistantMessageId,
+            kind: .image,
+            phase: .waitingForResult,
+            expectedCount: requestedCount
+        )
 
         do {
             let slots = try await generateDirectImageSlots(
@@ -13068,7 +13373,16 @@ final class ChatViewModel {
                 manager: manager,
                 originalPromptWasEmpty: false,
                 requiresEditImages: requiresEditImages,
-                preferServerDefaultModel: true
+                preferServerDefaultModel: true,
+                onResultReceived: { [weak self] receivedCount, expectedCount in
+                    self?.updateGeneratedMediaPresentation(
+                        messageId: assistantMessageId,
+                        kind: .image,
+                        phase: .resultReceived,
+                        receivedCount: receivedCount,
+                        expectedCount: expectedCount
+                    )
+                }
             )
             guard !slots.isEmpty else {
                 throw APIError.unknown(
@@ -13079,16 +13393,28 @@ final class ChatViewModel {
                     )
                 )
             }
+            updateGeneratedMediaPresentation(
+                messageId: assistantMessageId,
+                kind: .image,
+                phase: .attaching,
+                expectedCount: requestedCount
+            )
             var successCount = 0
             for (slotIndex, slot) in slots.enumerated() {
                 switch slot {
                 case .image(let imageReference, let displayReference):
-                    successCount += 1
-                    attachGeneratedImageFile(
+                    if attachGeneratedImageFile(
                         messageId: assistantMessageId,
                         imageReference: imageReference,
                         displayReference: displayReference
-                    )
+                    ) {
+                        successCount += 1
+                    } else {
+                        attachGeneratedImageFailurePlaceholder(
+                            messageId: assistantMessageId,
+                            index: slotIndex + 1
+                        )
+                    }
                 case .failure:
                     attachGeneratedImageFailurePlaceholder(
                         messageId: assistantMessageId,
@@ -13098,6 +13424,12 @@ final class ChatViewModel {
             }
             guard successCount > 0 else {
                 let message = "图片生成接口没有返回可用图片数据。"
+                updateGeneratedMediaPresentation(
+                    messageId: assistantMessageId,
+                    kind: .image,
+                    phase: .failed,
+                    expectedCount: requestedCount
+                )
                 appendStatusUpdate(
                     id: assistantMessageId,
                     status: ChatStatusUpdate(
@@ -13128,6 +13460,13 @@ final class ChatViewModel {
                     visibleContent: nil
                 )
             }
+            updateGeneratedMediaPresentation(
+                messageId: assistantMessageId,
+                kind: .image,
+                phase: .ready,
+                receivedCount: successCount,
+                expectedCount: requestedCount
+            )
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
@@ -13160,6 +13499,12 @@ final class ChatViewModel {
             )
         } catch {
             let message = Self.localizedGenerationError(error)
+            updateGeneratedMediaPresentation(
+                messageId: assistantMessageId,
+                kind: .image,
+                phase: .failed,
+                expectedCount: requestedCount
+            )
             appendStatusUpdate(
                 id: assistantMessageId,
                 status: ChatStatusUpdate(
@@ -19141,7 +19486,8 @@ final class ChatViewModel {
         manager: ConversationManager,
         originalPromptWasEmpty: Bool,
         requiresEditImages: Bool = false,
-        preferServerDefaultModel: Bool = false
+        preferServerDefaultModel: Bool = false,
+        onResultReceived: ((Int, Int) -> Void)? = nil
     ) async throws -> [GeneratedImageSlot] {
         guard !prompts.isEmpty else { return [] }
         if requiresEditImages && editImages.isEmpty {
@@ -19166,6 +19512,7 @@ final class ChatViewModel {
         let maxConcurrent = min(Self.directImageGenerationMaxConcurrency, prompts.count)
         var iterator = prompts.enumerated().makeIterator()
         var slots = Array(repeating: GeneratedImageSlot.failure, count: prompts.count)
+        var receivedResultCount = 0
 
         try await withThrowingTaskGroup(of: (Int, Result<String, Error>).self) { group in
             for _ in 0..<maxConcurrent {
@@ -19193,6 +19540,8 @@ final class ChatViewModel {
                         canvasSize: requestedCanvasSize
                     ) ?? imageReference
                     slots[index] = .image(imageReference: imageReference, displayReference: displayReference)
+                    receivedResultCount += 1
+                    onResultReceived?(receivedResultCount, prompts.count)
                 case .failure(let error):
                     if Task.isCancelled || error is CancellationError {
                         throw error
@@ -19448,11 +19797,12 @@ final class ChatViewModel {
         return CGSize(width: CGFloat(parts[0]), height: CGFloat(parts[1]))
     }
 
+    @discardableResult
     private func attachGeneratedImageFile(
         messageId: String,
         imageReference: String,
         displayReference: String
-    ) {
+    ) -> Bool {
         let normalizedImageData = Self.normalizedImageDataURI(imageReference)
         let normalizedDisplayData = Self.normalizedImageDataURI(displayReference)
         let localDisplayReference = (normalizedDisplayData ?? normalizedImageData).flatMap {
@@ -19471,8 +19821,8 @@ final class ChatViewModel {
             contentType: contentType,
             displayURL: resolvedDisplayReference
         )
-        guard let file = Self.sanitizedMessageFile(rawFile) else { return }
-        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        guard let file = Self.sanitizedMessageFile(rawFile) else { return false }
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return false }
         if conversation?.messages[index].files.contains(where: {
             $0.url == file.url || $0.displayURL == file.displayURL
         }) != true {
@@ -19483,6 +19833,9 @@ final class ChatViewModel {
                 node.files.append(file)
             }
         }
+        return conversation?.messages[index].files.contains(where: {
+            $0.url == file.url || $0.displayURL == file.displayURL
+        }) == true
     }
 
     private func attachGeneratedImageFailurePlaceholder(messageId: String, index: Int) {
@@ -19561,14 +19914,15 @@ final class ChatViewModel {
         }
     }
 
+    @discardableResult
     private func attachGeneratedVideoFile(
         messageId: String,
         videoReference: String
-    ) {
+    ) -> Bool {
         let isInlineVideoData = videoReference.prefix(11).lowercased() == "data:video/"
         guard let resolvedReference = Self.safeMessageFileReference(videoReference, isImage: false, isVideo: true)
                 ?? (isInlineVideoData ? nil : videoReference) else {
-            return
+            return false
         }
         let contentType = Self.videoContentType(for: videoReference)
         let fileName: String = {
@@ -19585,7 +19939,7 @@ final class ChatViewModel {
             contentType: contentType,
             displayURL: nil
         )
-        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return false }
         if conversation?.messages[index].files.contains(where: { $0.url == file.url }) != true {
             conversation?.messages[index].files.append(file)
         }
@@ -19594,6 +19948,7 @@ final class ChatViewModel {
                 node.files.append(file)
             }
         }
+        return conversation?.messages[index].files.contains(where: { $0.url == file.url }) == true
     }
 
     private enum GeneratedMediaKind {
