@@ -4294,7 +4294,10 @@ struct ChatDetailView: View {
         }
 
         let baseView = ZStack {
-            ChatAmbientBackgroundView(mode: ambientBackgroundMode)
+            ChatAmbientBackgroundView(
+                mode: ambientBackgroundMode,
+                keyboardIsVisible: keyboard.isVisible
+            )
             messageListArea
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -9455,10 +9458,12 @@ private enum ChatAmbientBackgroundMode: Equatable {
 
 private struct ChatAmbientBackgroundView: View {
     let mode: ChatAmbientBackgroundMode
+    let keyboardIsVisible: Bool
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var activeGradientStartedAt = Date()
+    @State private var idleFieldStartedAt: Date?
 
     var body: some View {
         ZStack {
@@ -9481,11 +9486,20 @@ private struct ChatAmbientBackgroundView: View {
             if mode == .activeFirstTurn {
                 activeGradientStartedAt = .now
             }
+            beginIdleFieldIfNeeded()
         }
         .onChange(of: mode) { _, newMode in
             if newMode == .activeFirstTurn {
                 activeGradientStartedAt = .now
             }
+            if newMode != .idleFirstTurn {
+                idleFieldStartedAt = nil
+            } else {
+                beginIdleFieldIfNeeded()
+            }
+        }
+        .onChange(of: keyboardIsVisible) { _, _ in
+            beginIdleFieldIfNeeded()
         }
     }
 
@@ -9508,6 +9522,7 @@ private struct ChatAmbientBackgroundView: View {
     private func idleGradient(at date: Date) -> some View {
         let tint = idleTint(at: date)
         let nextTint = idleTint(at: date.addingTimeInterval(0.45))
+        let fieldProgress = idleFieldProgress(at: date)
 
         return LinearGradient(
             colors: [
@@ -9535,8 +9550,7 @@ private struct ChatAmbientBackgroundView: View {
         .overlay {
             GeminiScaleField(
                 isDark: theme.isDark,
-                palettePhase: 0.0,
-                isIdle: true,
+                progress: fieldProgress,
                 time: date.timeIntervalSinceReferenceDate
             )
         }
@@ -9555,8 +9569,7 @@ private struct ChatAmbientBackgroundView: View {
     }
 
     /// Gemini keeps the navigation and composer surfaces neutral while a broad,
-    /// softly blurred colour field and a coloured scale lattice travel through
-    /// the waiting conversation.
+    /// softly blurred colour field travels through the waiting conversation.
     /// The palette and timing below are sampled from the supplied full capture:
     /// blue → cyan → green → yellow → coral → pink → violet.
     private func activeGradient(at date: Date) -> some View {
@@ -9604,12 +9617,6 @@ private struct ChatAmbientBackgroundView: View {
                     endRadius: extent * 0.50
                 )
 
-                GeminiScaleField(
-                    isDark: theme.isDark,
-                    palettePhase: phase,
-                    isIdle: false,
-                    time: date.timeIntervalSinceReferenceDate
-                )
             }
         }
     }
@@ -9665,6 +9672,21 @@ private struct ChatAmbientBackgroundView: View {
         return elapsed.truncatingRemainder(dividingBy: Self.activeGradientCycle) / Self.activeGradientCycle
     }
 
+    /// The colour-scale lattice belongs to the first idle/keyboard transition,
+    /// not to the full waiting response.  From the capture: it grows in lime at
+    /// ~0.45 s, shifts to cyan/blue by ~0.9 s, then contracts and disappears
+    /// before the message is sent.
+    private func idleFieldProgress(at date: Date) -> Double {
+        guard let idleFieldStartedAt else { return 1 }
+        return max(0, date.timeIntervalSince(idleFieldStartedAt)) / 1.75
+    }
+
+    private func beginIdleFieldIfNeeded() {
+        guard mode == .idleFirstTurn, keyboardIsVisible else { return }
+        guard idleFieldStartedAt == nil else { return }
+        idleFieldStartedAt = .now
+    }
+
     private func smoothPaletteProgress(_ value: Double) -> Double {
         let progress = min(1, max(0, value))
         return progress * progress * (3 - 2 * progress)
@@ -9706,77 +9728,85 @@ private struct ChatAmbientBackgroundView: View {
     ]
 }
 
-/// The distinctive lower Gemini field is a staggered, coloured scale lattice:
-/// amber/lime at its upper edge, then cyan/blue and violet closer to the
-/// keyboard.  It is rendered directly in Canvas so it stays behind the existing
-/// composer rather than becoming a texture inside the input component.
+/// A short-lived, staggered scale lattice that follows the captured idle
+/// timeline: grow in lime, sweep to cyan/blue, then contract and vanish before
+/// the active first-response gradient begins.
 private struct GeminiScaleField: View {
     let isDark: Bool
-    /// The current waiting-cycle position.  It changes the palette only while
-    /// the first response is actively running; idle keeps Gemini's blue/lime
-    /// launch appearance.
-    let palettePhase: Double
-    let isIdle: Bool
+    let progress: Double
     let time: TimeInterval
 
     var body: some View {
         Canvas(opaque: false, colorMode: .linear, rendersAsynchronously: true) { context, size in
-            guard size.width > 1, size.height > 1 else { return }
+            render(context: &context, size: size)
+        }
+        .mask(scaleMask)
+    }
 
-            let fieldTop = size.height * (isIdle ? 0.47 : 0.43)
-            let fieldHeight = max(1, size.height - fieldTop)
-            let rowSpacing: CGFloat = 7.1
-            let columnSpacing: CGFloat = 7.4
-            let rowCount = Int((fieldHeight / rowSpacing).rounded(.up)) + 1
-            let columnCount = Int((size.width / columnSpacing).rounded(.up)) + 2
-            let shimmer = 0.5 + 0.5 * sin(time * 1.45)
+    private var scaleMask: some View {
+        LinearGradient(
+            colors: [.clear, .white.opacity(0.62), .white],
+            startPoint: .top,
+            endPoint: UnitPoint(x: 0.5, y: 0.70)
+        )
+    }
 
-            for row in 0..<rowCount {
-                let y = fieldTop + CGFloat(row) * rowSpacing
-                let verticalProgress = Double(min(1, max(0, (y - fieldTop) / fieldHeight)))
-                let rowOffset = row.isMultiple(of: 2) ? 0.0 : columnSpacing * 0.5
+    private func render(context: inout GraphicsContext, size: CGSize) {
+        guard size.width > 1, size.height > 1 else { return }
 
-                for column in 0..<columnCount {
-                    let x = CGFloat(column) * columnSpacing + rowOffset
-                    guard x >= -columnSpacing, x <= size.width + columnSpacing else { continue }
+        let grow = smoothStep(progress / 0.075)
+        let contract = smoothStep((progress - 0.145) / 0.125)
+        let visibility = max(0, 1 - contract)
+        guard visibility > 0.001 else { return }
+        let fieldTop = size.height * (0.69 - grow * 0.25 + contract * 0.16)
+        let fieldHeight = max(1, size.height - fieldTop)
+        let rowSpacing: CGFloat = 7.1
+        let columnSpacing: CGFloat = 7.4
+        let rowCount = Int((fieldHeight / rowSpacing).rounded(.up)) + 1
+        let columnCount = Int((size.width / columnSpacing).rounded(.up)) + 2
+        let shimmer = 0.5 + 0.5 * sin(time * 1.45)
+
+        for row in 0..<rowCount {
+            let y = fieldTop + CGFloat(row) * rowSpacing
+            let verticalProgress = Double(min(1, max(0, (y - fieldTop) / fieldHeight)))
+            let rowOffset = row.isMultiple(of: 2) ? 0.0 : columnSpacing * 0.5
+
+            for column in 0..<columnCount {
+                let x = CGFloat(column) * columnSpacing + rowOffset
+                guard x >= -columnSpacing, x <= size.width + columnSpacing else { continue }
 
                     // A diagonal hue sweep creates the yellow/green → cyan →
                     // blue/purple scales visible in Gemini's composer field.
-                    let horizontalProgress = Double(min(1, max(0, x / max(size.width, 1))))
-                    let hue: Double
-                    if isIdle {
-                        hue = 0.16 + verticalProgress * 0.54 + horizontalProgress * 0.035
-                    } else {
-                        hue = (0.13 + palettePhase * 0.54 + verticalProgress * 0.48 + horizontalProgress * 0.055)
-                            .truncatingRemainder(dividingBy: 1)
-                    }
-                    let stagger = 0.5 + 0.5 * sin(Double(row) * 0.61 + Double(column) * 0.38 + time * 1.3)
-                    let intensity = (0.30 + verticalProgress * 0.70) * (0.76 + stagger * 0.24)
-                    let alpha = (isDark ? 0.14 : 0.22) + intensity * (isDark ? 0.30 : 0.54)
-                    let dotRadius = CGFloat(0.82 + intensity * (isIdle ? 1.15 : 1.32))
-                    let colour = Color(
-                        hue: hue,
-                        saturation: isDark ? 0.55 : 0.68,
-                        brightness: isDark ? 0.88 : 0.95,
-                        opacity: alpha * (0.88 + shimmer * 0.12)
-                    )
-                    let rect = CGRect(
-                        x: x - dotRadius,
-                        y: y - dotRadius,
-                        width: dotRadius * 2,
-                        height: dotRadius * 2
-                    )
-                    context.fill(Path(ellipseIn: rect), with: .color(colour))
+                let horizontalProgress = Double(min(1, max(0, x / max(size.width, 1))))
+                let hue = scaleHue(vertical: verticalProgress, horizontal: horizontalProgress)
+                let stagger = 0.5 + 0.5 * sin(Double(row) * 0.61 + Double(column) * 0.38 + time * 1.3)
+                let intensity = visibility * (0.30 + verticalProgress * 0.70) * (0.76 + stagger * 0.24)
+                let dotRadius = CGFloat(0.82 + intensity * 1.15)
+                let rect = CGRect(x: x - dotRadius, y: y - dotRadius, width: dotRadius * 2, height: dotRadius * 2)
+                context.fill(Path(ellipseIn: rect), with: .color(scaleColour(hue: hue, intensity: intensity, shimmer: shimmer)))
                 }
             }
         }
-        .mask {
-            LinearGradient(
-                colors: [.clear, .white.opacity(0.62), .white],
-                startPoint: .top,
-                endPoint: UnitPoint(x: 0.5, y: 0.70)
-            )
-        }
+    }
+
+    private func scaleHue(vertical: Double, horizontal: Double) -> Double {
+        let colourShift = min(1, max(0, progress / 0.15))
+        return 0.25 + colourShift * 0.30 + vertical * 0.06 + horizontal * 0.035
+    }
+
+    private func scaleColour(hue: Double, intensity: Double, shimmer: Double) -> Color {
+        let alpha = (isDark ? 0.14 : 0.22) + intensity * (isDark ? 0.30 : 0.54)
+        return Color(
+            hue: hue,
+            saturation: isDark ? 0.55 : 0.68,
+            brightness: isDark ? 0.88 : 0.95,
+            opacity: alpha * (0.88 + shimmer * 0.12)
+        )
+    }
+
+    private func smoothStep(_ value: Double) -> Double {
+        let clamped = min(1, max(0, value))
+        return clamped * clamped * (3 - 2 * clamped)
     }
 }
 
@@ -9799,35 +9829,11 @@ private struct MediaGenerationPlaceholderView: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 23, style: .continuous)
         ZStack(alignment: .topLeading) {
-            shape
-                .fill(theme.isDark
-                    ? Color.white.opacity(0.075)
-                    : Color(red: 0.955, green: 0.946, blue: 0.962))
-
-            Group {
-                if isActive && !reduceMotion {
-                    TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-                        MediaGenerationDotsCanvas(
-                            isDark: theme.isDark,
-                            isVideo: isVideo,
-                            time: timeline.date.timeIntervalSinceReferenceDate
-                        )
-                    }
-                } else {
-                    MediaGenerationDotsCanvas(isDark: theme.isDark, isVideo: isVideo, time: 0.4)
-                }
-            }
-            .allowsHitTesting(false)
-            .clipShape(shape)
-
-            Text(title)
-                .id(title)
-                .scaledFont(size: 14, weight: .semibold)
-                .foregroundStyle(theme.isDark ? Color.white.opacity(0.88) : Color.black.opacity(0.72))
-                .lineLimit(1)
-                .padding(.horizontal, 17)
-                .padding(.top, 16)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+            cardBackground
+            animatedDots
+                .allowsHitTesting(false)
+                .clipShape(shape)
+            cardTitle
         }
         .clipShape(shape)
         .overlay {
@@ -9856,6 +9862,38 @@ private struct MediaGenerationPlaceholderView: View {
         .onChange(of: scenePhase) { _, phase in
             isActive = phase == .active
         }
+    }
+
+    private var cardBackground: some View {
+        theme.isDark
+            ? Color.white.opacity(0.075)
+            : Color(red: 0.955, green: 0.946, blue: 0.962)
+    }
+
+    @ViewBuilder
+    private var animatedDots: some View {
+        if isActive && !reduceMotion {
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                MediaGenerationDotsCanvas(
+                    isDark: theme.isDark,
+                    isVideo: isVideo,
+                    time: timeline.date.timeIntervalSinceReferenceDate
+                )
+            }
+        } else {
+            MediaGenerationDotsCanvas(isDark: theme.isDark, isVideo: isVideo, time: 0.4)
+        }
+    }
+
+    private var cardTitle: some View {
+        Text(title)
+            .id(title)
+            .scaledFont(size: 14, weight: .semibold)
+            .foregroundStyle(theme.isDark ? Color.white.opacity(0.88) : Color.black.opacity(0.72))
+            .lineLimit(1)
+            .padding(.horizontal, 17)
+            .padding(.top, 16)
+            .transition(.opacity.combined(with: .move(edge: .top)))
     }
 }
 
