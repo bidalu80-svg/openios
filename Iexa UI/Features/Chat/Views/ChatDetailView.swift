@@ -6180,9 +6180,19 @@ struct ChatDetailView: View {
         .padding(.bottom, 4)
 
         if animated {
-            header.assistantHeaderReveal()
+            // A direct-media placeholder deliberately withholds its card while
+            // the keyboard settles.  During that gap this header used to be
+            // the row's only intrinsic-width child, so the parent VStack
+            // centred the whole row; when the card arrived and widened the
+            // row, the avatar visibly slid from the centre to the left.  Give
+            // the header its final transcript width from its very first frame
+            // so the card can appear independently without moving identity.
+            header
+                .assistantHeaderReveal()
+                .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             header
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
