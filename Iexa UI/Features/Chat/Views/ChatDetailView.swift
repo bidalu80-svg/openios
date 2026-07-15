@@ -9784,7 +9784,6 @@ private struct GeminiScaleField: View {
                 let dotRadius = CGFloat(0.82 + intensity * 1.15)
                 let rect = CGRect(x: x - dotRadius, y: y - dotRadius, width: dotRadius * 2, height: dotRadius * 2)
                 context.fill(Path(ellipseIn: rect), with: .color(scaleColour(hue: hue, intensity: intensity, shimmer: shimmer)))
-                }
             }
         }
     }
