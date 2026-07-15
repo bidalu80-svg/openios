@@ -9647,9 +9647,14 @@ private struct ChatAmbientBackgroundView: View {
     private func activeGradient(at date: Date) -> some View {
         let tint = activeTint(at: date)
         let nextTint = activeTint(at: date.addingTimeInterval(0.75))
-        let topOpacity = theme.isDark ? 0.28 : 0.52
-        let middleOpacity = theme.isDark ? 0.20 : 0.34
-        let bloomOpacity = theme.isDark ? 0.26 : 0.52
+        let elapsed = max(0, date.timeIntervalSince(activeGradientStartedAt))
+        // Frames f84...f103 show the full-canvas field arriving from a nearly
+        // white top, over about 0.65 seconds. Without this entrance ramp the
+        // top of the transcript becomes saturated a frame too early.
+        let entrance = reduceMotion ? 1 : smoothPaletteProgress(elapsed / 0.65)
+        let topOpacity = (theme.isDark ? 0.28 : 0.52) * entrance
+        let middleOpacity = (theme.isDark ? 0.20 : 0.34) * entrance
+        let bloomOpacity = (theme.isDark ? 0.26 : 0.52) * entrance
 
         return GeometryReader { proxy in
             let extent = max(proxy.size.width, proxy.size.height)
@@ -9759,15 +9764,12 @@ private struct ChatAmbientBackgroundView: View {
     }
 
     /// The colour-scale lattice belongs to the first idle/keyboard transition,
-    /// not to the full waiting response. Start after the keyboard has settled:
-    /// the capture keeps it visible through the completed keyboard rise, then
-    /// grows in lime, shifts to cyan/blue, and only then contracts.
+    /// not to the full waiting response. In the capture it begins on the same
+    /// frame as the keyboard appears, grows in lime, shifts to cyan/blue, and
+    /// remains visible until roughly 2.05 seconds into the first keyboard run.
     private func idleFieldProgress(at date: Date) -> Double {
         guard let idleFieldStartedAt else { return 1 }
-        let elapsed = date.timeIntervalSince(idleFieldStartedAt)
-        let keyboardSettleDelay: TimeInterval = 0.30
-        guard elapsed >= keyboardSettleDelay else { return -1 }
-        return (elapsed - keyboardSettleDelay) / 1.50
+        return max(0, date.timeIntervalSince(idleFieldStartedAt)) / 1.65
     }
 
     private func beginIdleFieldIfNeeded() {
@@ -9843,11 +9845,8 @@ private struct GeminiScaleField: View {
     private func render(context: inout GraphicsContext, size: CGSize) {
         guard size.width > 1, size.height > 1 else { return }
 
-        // `progress` is deliberately negative until the keyboard's opening
-        // motion has finished. Do not draw a tiny early field below it.
-        guard progress >= 0 else { return }
         let grow = smoothStep(progress / 0.36)
-        let contract = smoothStep((progress - 0.68) / 0.32)
+        let contract = smoothStep((progress - 0.70) / 0.30)
         let visibility = max(0, 1 - contract)
         guard visibility > 0.001 else { return }
         let fieldTop = size.height * (0.74 - grow * 0.37 + contract * 0.20)
