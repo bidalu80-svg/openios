@@ -8,16 +8,14 @@ import SwiftUI
 /// ## Design
 /// - **User messages**: Right-aligned glassy accent capsule that wraps its
 ///   content without stretching to the full row.
-/// - **Assistant messages**: Full-width and unframed by default, with an
-///   optional local reading glass when a user wallpaper needs contrast.
+/// - **Assistant messages**: Full-width and unframed. Assistant prose applies
+///   its optional reading glass inside the content parser, after tool and
+///   media segments have been separated.
 /// - **System messages**: Center-aligned muted label.
 struct ChatMessageBubble<Content: View>: View {
     let role: MessageRole
     let showTimestamp: Bool
     let timestamp: Date?
-    /// Opt-in local backdrop for assistant prose when a detailed user
-    /// wallpaper would otherwise make the text hard to read.
-    let useAssistantReadingGlass: Bool
     @ViewBuilder let content: () -> Content
 
     @Environment(\.theme) private var theme
@@ -27,13 +25,11 @@ struct ChatMessageBubble<Content: View>: View {
         role: MessageRole,
         showTimestamp: Bool = false,
         timestamp: Date? = nil,
-        useAssistantReadingGlass: Bool = false,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.role = role
         self.showTimestamp = showTimestamp
         self.timestamp = timestamp
-        self.useAssistantReadingGlass = useAssistantReadingGlass
         self.content = content
     }
 
@@ -120,34 +116,10 @@ struct ChatMessageBubble<Content: View>: View {
         .padding(.vertical, 2)
     }
 
-    @ViewBuilder
     private var assistantMainContent: some View {
-        if useAssistantReadingGlass {
-            content()
-                .foregroundStyle(theme.chatBubbleAssistantText)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .background {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(theme.isDark ? Color.black.opacity(0.52) : Color.white.opacity(0.68))
-                }
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(Color.white.opacity(theme.isDark ? 0.14 : 0.42), lineWidth: 0.6)
-                }
-                .shadow(
-                    color: theme.isDark ? Color.black.opacity(0.34) : Color.black.opacity(0.10),
-                    radius: 8,
-                    x: 0,
-                    y: 3
-                )
-        } else {
-            content()
-                .foregroundStyle(theme.chatBubbleAssistantText)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        content()
+            .foregroundStyle(theme.chatBubbleAssistantText)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - System Content
@@ -167,6 +139,48 @@ struct ChatMessageBubble<Content: View>: View {
         }
         .padding(.horizontal, Spacing.screenPadding)
         .padding(.vertical, Spacing.xs)
+    }
+}
+
+/// A local contrast surface used only around parsed assistant prose. It lives
+/// below the Markdown renderer so tool cards, media, and code blocks retain
+/// their own visual treatment.
+struct AssistantReadingGlassModifier: ViewModifier {
+    let enabled: Bool
+
+    @Environment(\.theme) private var theme
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(theme.isDark ? Color.black.opacity(0.52) : Color.white.opacity(0.68))
+                }
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(Color.white.opacity(theme.isDark ? 0.14 : 0.42), lineWidth: 0.6)
+                }
+                .shadow(
+                    color: theme.isDark ? Color.black.opacity(0.34) : Color.black.opacity(0.10),
+                    radius: 8,
+                    x: 0,
+                    y: 3
+                )
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func assistantReadingGlass(enabled: Bool) -> some View {
+        modifier(AssistantReadingGlassModifier(enabled: enabled))
     }
 }
 

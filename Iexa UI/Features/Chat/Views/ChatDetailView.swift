@@ -6243,8 +6243,7 @@ struct ChatDetailView: View {
         ChatMessageBubble(
             role: .assistant,
             showTimestamp: activeActionMessageId == message.id,
-            timestamp: message.timestamp,
-            useAssistantReadingGlass: shouldUseAssistantReadingGlass(for: content)
+            timestamp: message.timestamp
         ) {
             AssistantMessageContent(
                 content: content,
@@ -6255,7 +6254,8 @@ struct ChatDetailView: View {
                 localStructuredPartsJSON: includeMessagePayload ? message.metadata?["iexa_local_content_parts"] : nil,
                 authToken: viewModel.serverAuthToken,
                 serverBaseURL: viewModel.serverBaseURL,
-                apiClient: dependencies.apiClient
+                apiClient: dependencies.apiClient,
+                useAssistantReadingGlass: shouldUseAssistantReadingGlass
             )
         }
     }
@@ -6268,8 +6268,7 @@ struct ChatDetailView: View {
                 ChatMessageBubble(
                     role: .assistant,
                     showTimestamp: activeActionMessageId == message.id,
-                    timestamp: message.timestamp,
-                    useAssistantReadingGlass: shouldUseAssistantReadingGlass(for: fallbackContent)
+                    timestamp: message.timestamp
                 ) {
                     AssistantMessageContent(
                         content: fallbackContent,
@@ -6280,15 +6279,15 @@ struct ChatDetailView: View {
                         localStructuredPartsJSON: message.metadata?["iexa_local_content_parts"],
                         authToken: viewModel.serverAuthToken,
                         serverBaseURL: viewModel.serverBaseURL,
-                        apiClient: dependencies.apiClient
+                        apiClient: dependencies.apiClient,
+                        useAssistantReadingGlass: shouldUseAssistantReadingGlass
                     )
                 }
             } else if isMessageVisuallyStreaming(message) {
                 ChatMessageBubble(
                     role: .assistant,
                     showTimestamp: activeActionMessageId == message.id,
-                    timestamp: message.timestamp,
-                    useAssistantReadingGlass: false
+                    timestamp: message.timestamp
                 ) {
                     TypingIndicator()
                 }
@@ -6297,8 +6296,7 @@ struct ChatDetailView: View {
             ChatMessageBubble(
                 role: message.role,
                 showTimestamp: activeActionMessageId == message.id,
-                timestamp: message.timestamp,
-                useAssistantReadingGlass: shouldUseAssistantReadingGlass(for: message)
+                timestamp: message.timestamp
             ) {
                 messageContent(for: message, activityItem: activityItem)
             }
@@ -6322,35 +6320,6 @@ struct ChatDetailView: View {
     private var shouldUseAssistantReadingGlass: Bool {
         dependencies.appearanceManager.hasChatBackground
             && dependencies.appearanceManager.useChatReadingGlass
-    }
-
-    private func shouldUseAssistantReadingGlass(for message: ChatMessage) -> Bool {
-        guard message.role == .assistant else { return false }
-
-        let content: String
-        if isMessageVisuallyStreaming(message),
-           viewModel.streamingStore.streamingMessageId == message.id {
-            content = viewModel.streamingStore.displayContent
-        } else {
-            content = message.content
-        }
-        return shouldUseAssistantReadingGlass(for: content)
-    }
-
-    private func shouldUseAssistantReadingGlass(for content: String) -> Bool {
-        guard shouldUseAssistantReadingGlass else { return false }
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-
-        // These render through dedicated components. Keep them independent so
-        // the local prose surface never changes the geometry or material of a
-        // tool step, media payload, visualization, or code block.
-        let lowercased = trimmed.lowercased()
-        guard !lowercased.contains("<details"),
-              !lowercased.contains("@@@viz-start"),
-              !trimmed.contains("```"),
-              !trimmed.contains("![") else { return false }
-        return true
     }
 
     private func isLocalAlpineResultMessage(_ message: ChatMessage) -> Bool {
@@ -6489,7 +6458,8 @@ struct ChatDetailView: View {
                 visualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds,
                 serverBaseURL: viewModel.serverBaseURL,
                 authToken: viewModel.serverAuthToken,
-                apiClient: dependencies.apiClient
+                apiClient: dependencies.apiClient,
+                useAssistantReadingGlass: shouldUseAssistantReadingGlass
             )
         }
     }
@@ -10893,6 +10863,9 @@ private struct IsolatedAssistantMessage: View {
     var authToken: String? = nil
     /// APIClient for rendering inline images via AuthenticatedImageView.
     var apiClient: APIClient? = nil
+    /// Opt-in local contrast surface, applied only after the content parser
+    /// separates prose from tool, reasoning, media, and code segments.
+    var useAssistantReadingGlass: Bool = false
 
     var body: some View {
         let isActivelyStreaming = streamingStore.streamingMessageId == message.id
@@ -11015,7 +10988,8 @@ private struct IsolatedAssistantMessage: View {
                             localStructuredPartsJSON: message.metadata?["iexa_local_content_parts"],
                             authToken: authToken,
                             serverBaseURL: serverBaseURL,
-                            apiClient: apiClient
+                            apiClient: apiClient,
+                            useAssistantReadingGlass: useAssistantReadingGlass
                         )
                     }
                     // Live tail — split further at the prose freeze boundary if available,
@@ -11024,32 +10998,37 @@ private struct IsolatedAssistantMessage: View {
                         let proseBoundaryAbs = streamingStore.frozenProseBoundaryOffset
                         let relProseBoundary = proseBoundaryAbs > frozenBoundary
                             ? proseBoundaryAbs - frozenBoundary : 0
-                        if relProseBoundary > 0 && liveTail.count >= relProseBoundary {
-                            let splitIdx = liveTail.index(liveTail.startIndex, offsetBy: relProseBoundary)
-                            let frozenTailProse = String(liveTail[..<splitIdx])
-                            let liveProsTail   = String(liveTail[splitIdx...])
-                            StreamingMarkdownView(
-                                content: frozenTailProse,
-                                isStreaming: false,
-                                authToken: authToken,
-                                serverBaseURL: serverBaseURL,
-                                deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
-                                deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
-                            )
-                            if !liveProsTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        VStack(alignment: .leading, spacing: 0) {
+                            if relProseBoundary > 0 && liveTail.count >= relProseBoundary {
+                                let splitIdx = liveTail.index(liveTail.startIndex, offsetBy: relProseBoundary)
+                                let frozenTailProse = String(liveTail[..<splitIdx])
+                                let liveProsTail   = String(liveTail[splitIdx...])
+                                StreamingMarkdownView(
+                                    content: frozenTailProse,
+                                    isStreaming: false,
+                                    authToken: authToken,
+                                    serverBaseURL: serverBaseURL,
+                                    deferVisualizationRevealUntilKeyboardDismissed: keyboardIsVisible,
+                                    deferVisualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds
+                                )
+                                if !liveProsTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    streamingLiveTextView(
+                                        content: liveProsTail,
+                                        authToken: authToken,
+                                        serverBaseURL: serverBaseURL
+                                    )
+                                }
+                            } else {
                                 streamingLiveTextView(
-                                    content: liveProsTail,
+                                    content: liveTail,
                                     authToken: authToken,
                                     serverBaseURL: serverBaseURL
                                 )
                             }
-                        } else {
-                            streamingLiveTextView(
-                                content: liveTail,
-                                authToken: authToken,
-                                serverBaseURL: serverBaseURL
-                            )
                         }
+                        .assistantReadingGlass(
+                            enabled: useAssistantReadingGlass && !Self.containsCodeFence(liveTail)
+                        )
                     }
                 }
                 .transaction { $0.animation = nil }
@@ -11114,6 +11093,7 @@ private struct IsolatedAssistantMessage: View {
                             )
                         }
                     }
+                    .assistantReadingGlass(enabled: useAssistantReadingGlass)
                     .transaction { $0.animation = nil }
                 } else {
                     AssistantMessageContent(
@@ -11125,7 +11105,8 @@ private struct IsolatedAssistantMessage: View {
                         localStructuredPartsJSON: message.metadata?["iexa_local_content_parts"],
                         authToken: authToken,
                         serverBaseURL: serverBaseURL,
-                        apiClient: apiClient
+                        apiClient: apiClient,
+                        useAssistantReadingGlass: useAssistantReadingGlass
                     )
                 }
             }

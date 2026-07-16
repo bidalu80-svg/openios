@@ -3138,6 +3138,10 @@ struct AssistantMessageContent: View {
     var serverBaseURL: String? = nil
     /// APIClient for rendering inline images via AuthenticatedImageView.
     var apiClient: APIClient? = nil
+    /// Enabled only for normal assistant prose over a user-selected wallpaper.
+    /// Tool, reasoning, media, and code segments decide independently whether
+    /// they can use the surface.
+    var useAssistantReadingGlass: Bool = false
 
     @State private var parseCache = ParseCache()
 
@@ -3308,6 +3312,10 @@ struct AssistantMessageContent: View {
                                     isLoading: isLastText,
                                     authToken: authToken,
                                     serverBaseURL: serverBaseURL
+                                )
+                                .assistantReadingGlass(
+                                    enabled: useAssistantReadingGlass
+                                        && !effectiveStr.contains("```")
                                 )
                             } else {
                                 // Interleave text and images
