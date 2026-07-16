@@ -10170,16 +10170,31 @@ private struct MediaGenerationProgressTitle: View {
         "正在进行最终润色"
     ]
 
-    private var usesImageWaitingStoryboard: Bool {
-        // Direct image requests first pass through submitting/polling states.
-        // The visual process must start when the card appears, not several
-        // seconds later after a particular transport label is received.
-        kind == "image"
+    private static let videoWaitingStages = [
+        "正在构思镜头",
+        "正在规划动态",
+        "正在生成视频草稿",
+        "正在设置场景",
+        "正在渲染运动",
+        "即将完成",
+        "正在进行最终润色"
+    ]
+
+    private var waitingStages: [String] {
+        kind == "video" ? Self.videoWaitingStages : Self.imageWaitingStages
+    }
+
+    private var usesMediaWaitingStoryboard: Bool {
+        // Direct image and video requests both begin as an asynchronous
+        // submit/poll operation.  The visual progress starts when their card
+        // mounts, while transport `phase` remains responsible for real
+        // completion and card removal.
+        kind == "image" || kind == "video"
     }
 
     var body: some View {
         Group {
-            if usesImageWaitingStoryboard && !reduceMotion {
+            if usesMediaWaitingStoryboard && !reduceMotion {
                 TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
                     let state = storyboardState(at: timeline.date)
                     MediaGenerationStoryboardTitle(
@@ -10187,8 +10202,8 @@ private struct MediaGenerationProgressTitle: View {
                         characterProgress: state.characterProgress
                     )
                 }
-            } else if usesImageWaitingStoryboard {
-                Text(Self.imageWaitingStages[0])
+            } else if usesMediaWaitingStoryboard {
+                Text(waitingStages[0])
             } else {
                 Text(actualTitle)
             }
@@ -10204,10 +10219,10 @@ private struct MediaGenerationProgressTitle: View {
         let stageDuration: TimeInterval = 4.05
         let stageIndex = min(
             Int(elapsed / stageDuration),
-            Self.imageWaitingStages.count - 1
+            waitingStages.count - 1
         )
         let stageElapsed = elapsed - Double(stageIndex) * stageDuration
-        let text = Self.imageWaitingStages[stageIndex]
+        let text = waitingStages[stageIndex]
         // Each glyph fades/slides in across several display frames instead of
         // replacing a whole Text value at a 30 Hz cadence.
         let characterProgress = 0.14 + stageElapsed / 0.095
