@@ -67,44 +67,54 @@ struct SettingsCell: View {
 
     @Environment(\.theme) private var theme
 
+    @ViewBuilder
     var body: some View {
-        Button(action: { action?() }) {
-            VStack(spacing: 0) {
-                HStack(spacing: Spacing.md) {
-                    // Icon
-                    iconView
-
-                    // Title & subtitle
-                    VStack(alignment: .leading, spacing: Spacing.xxs) {
-                        Text(LocalizedStringKey(title))
-                            .scaledFont(size: 16)
-                            .foregroundStyle(theme.textPrimary)
-
-                        if let subtitle {
-                            Text(LocalizedStringKey(subtitle))
-                                .scaledFont(size: 12, weight: .medium)
-                                .foregroundStyle(theme.textTertiary)
-                        }
-                    }
-
-                    Spacer()
-
-                    // Accessory
-                    accessoryView
-                }
-                .padding(.horizontal, Spacing.md)
-                .padding(.vertical, Spacing.chatBubblePadding)
-                .contentShape(Rectangle())
-
-                if showDivider {
-                    Divider()
-                        .padding(.leading, Spacing.md + IconSize.lg + Spacing.md)
-                }
+        if let action {
+            Button(action: action) {
+                rowContent
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+        } else {
+            rowContent
+                .accessibilityLabel(title)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
+    }
+
+    private var rowContent: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: Spacing.md) {
+                // Icon
+                iconView
+
+                // Title & subtitle
+                VStack(alignment: .leading, spacing: Spacing.xxs) {
+                    Text(LocalizedStringKey(title))
+                        .scaledFont(size: 16)
+                        .foregroundStyle(theme.textPrimary)
+
+                    if let subtitle {
+                        Text(LocalizedStringKey(subtitle))
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                }
+
+                Spacer()
+
+                // Accessory
+                accessoryView
+            }
+            .padding(.horizontal, Spacing.md)
+            .padding(.vertical, Spacing.chatBubblePadding)
+            .contentShape(Rectangle())
+
+            if showDivider {
+                Divider()
+                    .padding(.leading, Spacing.md + IconSize.lg + Spacing.md)
+            }
+        }
+        .contentShape(Rectangle())
     }
 
     private var iconView: some View {
