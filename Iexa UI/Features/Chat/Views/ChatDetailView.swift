@@ -758,6 +758,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 || action.hasPrefix("browser.")
                 || action.contains("code_interpreter")
                 || action.contains("image_generation")
+                || action.contains("video_generation")
                 || action.contains("get_readable")
                 || action.contains("readable")
                 || action.contains("local_native_tool")
@@ -1063,6 +1064,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 || action.hasPrefix("browser.")
                 || action.contains("code_interpreter")
                 || action.contains("image_generation")
+                || action.contains("video_generation")
                 || action.contains("get_readable")
                 || action.contains("readable")
                 || action.contains("local_native_tool")
@@ -1463,6 +1465,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             }
             return status.query?.isEmpty == false ? "搜索 \(status.query!)" : "搜索网页"
         }
+        if action.contains("video_generation") { return "生成视频" }
         if action.contains("image_generation") { return "生成图片" }
         if action.contains("code_interpreter") { return "运行代码" }
         return description.isEmpty ? "运行工具" : description
@@ -2151,6 +2154,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 || action.hasPrefix("browser.")
                 || action.contains("code_interpreter")
                 || action.contains("image_generation")
+                || action.contains("video_generation")
                 || action.contains("get_readable")
                 || action.contains("readable")
                 || action.contains("local_native_tool")
@@ -4314,6 +4318,7 @@ struct ChatDetailView: View {
                     streamingStore: viewModel.streamingStore,
                     assistantMessageId: firstAssistant.id,
                     fallbackContent: firstAssistant.content,
+                    fallbackStatusHistory: firstAssistant.statusHistory,
                     hasVisibleMediaPlaceholder: firstAssistant.metadata?["iexa_image_generation_placeholder"] == "true"
                         && !shouldDelayWaitingUI(for: firstAssistant)
                 ) { messageId in
@@ -9526,11 +9531,13 @@ private enum ChatAmbientBackgroundMode: Equatable {
 /// Keeps first-output observation isolated from ChatDetailView's large body.
 /// The ambient background only needs one transition, so this reports once when
 /// actual visible assistant prose begins to drain into the transcript, or when
-/// the first direct-media rendering card is presented in place of prose.
+/// the first direct-media rendering card or visible tool status is presented
+/// in place of prose.
 private struct FirstAssistantVisibleTokenProbe: View {
     let streamingStore: StreamingContentStore
     let assistantMessageId: String
     let fallbackContent: String
+    let fallbackStatusHistory: [ChatStatusUpdate]
     let hasVisibleMediaPlaceholder: Bool
     let onVisibleBodyToken: @MainActor (String) -> Void
 
@@ -9540,22 +9547,67 @@ private struct FirstAssistantVisibleTokenProbe: View {
         return isActiveMessage ? streamingStore.displayContent : fallbackContent
     }
 
+    private var visibleStatusHistory: [ChatStatusUpdate] {
+        let isActiveMessage = streamingStore.isActive
+            && streamingStore.streamingMessageId == assistantMessageId
+        return isActiveMessage ? streamingStore.streamingStatusHistory : fallbackStatusHistory
+    }
+
+    /// A stable, Equatable observation key that makes the probe react as soon
+    /// as the first inline tool/status capsule mounts, without observing
+    /// unrelated visual state in ChatDetailView's large body.
+    private var visibleToolStatusSignature: String {
+        visibleStatusHistory.map { status in
+            let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let state = status.status?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return "\(action)|\(state)|\(status.done == true ? \"1\" : \"0\")|\(status.hidden == true ? \"1\" : \"0\")"
+        }.joined(separator: "\\n")
+    }
+
     var body: some View {
         let content = visibleContent
+        let hasVisibleToolStatus = Self.containsVisibleAssistantToolStatus(visibleStatusHistory)
         Color.clear
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
-            .onAppear { reportIfVisible(content, mediaPlaceholderIsVisible: hasVisibleMediaPlaceholder) }
+            .onAppear {
+                reportIfVisible(
+                    content,
+                    mediaPlaceholderIsVisible: hasVisibleMediaPlaceholder,
+                    toolStatusIsVisible: hasVisibleToolStatus
+                )
+            }
             .onChange(of: content) { _, updatedContent in
-                reportIfVisible(updatedContent, mediaPlaceholderIsVisible: hasVisibleMediaPlaceholder)
+                reportIfVisible(
+                    updatedContent,
+                    mediaPlaceholderIsVisible: hasVisibleMediaPlaceholder,
+                    toolStatusIsVisible: hasVisibleToolStatus
+                )
             }
             .onChange(of: hasVisibleMediaPlaceholder) { _, isVisible in
-                reportIfVisible(content, mediaPlaceholderIsVisible: isVisible)
+                reportIfVisible(
+                    content,
+                    mediaPlaceholderIsVisible: isVisible,
+                    toolStatusIsVisible: hasVisibleToolStatus
+                )
+            }
+            .onChange(of: visibleToolStatusSignature) { _, _ in
+                reportIfVisible(
+                    content,
+                    mediaPlaceholderIsVisible: hasVisibleMediaPlaceholder,
+                    toolStatusIsVisible: Self.containsVisibleAssistantToolStatus(visibleStatusHistory)
+                )
             }
     }
 
-    private func reportIfVisible(_ content: String, mediaPlaceholderIsVisible: Bool) {
-        guard mediaPlaceholderIsVisible || Self.containsVisibleAssistantBodyToken(content) else { return }
+    private func reportIfVisible(
+        _ content: String,
+        mediaPlaceholderIsVisible: Bool,
+        toolStatusIsVisible: Bool
+    ) {
+        guard mediaPlaceholderIsVisible
+                || toolStatusIsVisible
+                || Self.containsVisibleAssistantBodyToken(content) else { return }
         Task { @MainActor in
             onVisibleBodyToken(assistantMessageId)
         }
@@ -9574,6 +9626,21 @@ private struct FirstAssistantVisibleTokenProbe: View {
         }
         return true
     }
+
+    private static func containsVisibleAssistantToolStatus(_ statuses: [ChatStatusUpdate]) -> Bool {
+        statuses.contains { status in
+            guard status.hidden != true else { return false }
+            let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            guard !action.isEmpty else { return false }
+            // Match the inline status surface: local-internal bookkeeping is
+            // intentionally not a visible capsule, while an actual browser,
+            // media, code, search, or office action is visible output.
+            return action != "local_alpine"
+                && action != "local_alpine_agent"
+                && action != "local_alpine_tool"
+                && action != "local_native_tool"
+        }
+    }
 }
 
 private struct ChatAmbientBackgroundView: View {
@@ -9588,31 +9655,31 @@ private struct ChatAmbientBackgroundView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var activeGradientStartedAt = Date()
     @State private var idleFieldStartedAt: Date?
+    /// Keep the last visible field mounted while it exits. Switching straight
+    /// from `.activeFirstTurn` to `.normal` removes the TimelineView in the
+    /// same transaction, which makes an `.opacity` transition look like an
+    /// instant clear on-device.
+    @State private var renderedFieldMode: ChatAmbientBackgroundMode = .normal
+    @State private var renderedFieldOpacity = 0.0
+    @State private var fieldFadeGeneration = 0
 
     var body: some View {
         ZStack {
             theme.background
-
-            switch mode {
-            case .normal:
-                Color.clear
-            case .idleFirstTurn:
-                idleGradient
-                    .transition(.opacity)
-            case .activeFirstTurn:
-                activeGradient
-                    .transition(.opacity)
-            }
+            renderedAmbientField
+                .opacity(renderedFieldOpacity)
         }
         .ignoresSafeArea()
-        .animation(.easeInOut(duration: 0.65), value: mode)
         .onAppear {
+            renderedFieldMode = mode
+            renderedFieldOpacity = mode == .normal ? 0 : 1
             if mode == .activeFirstTurn {
                 activeGradientStartedAt = .now
             }
             beginIdleFieldIfNeeded()
         }
         .onChange(of: mode) { _, newMode in
+            transitionRenderedField(to: newMode)
             if newMode == .activeFirstTurn {
                 activeGradientStartedAt = .now
             }
@@ -9624,6 +9691,61 @@ private struct ChatAmbientBackgroundView: View {
         }
         .onChange(of: keyboardIsVisible) { _, _ in
             beginIdleFieldIfNeeded()
+        }
+    }
+
+    @ViewBuilder
+    private var renderedAmbientField: some View {
+        switch renderedFieldMode {
+        case .normal:
+            Color.clear
+        case .idleFirstTurn:
+            idleGradient
+        case .activeFirstTurn:
+            activeGradient
+        }
+    }
+
+    private func transitionRenderedField(to newMode: ChatAmbientBackgroundMode) {
+        fieldFadeGeneration += 1
+        let generation = fieldFadeGeneration
+
+        guard newMode == .normal else {
+            // A new first-turn state supersedes any pending fade-out. Keep the
+            // field continuous rather than clearing it for one frame.
+            renderedFieldMode = newMode
+            if reduceMotion {
+                renderedFieldOpacity = 1
+            } else {
+                withAnimation(.easeInOut(duration: 0.34)) {
+                    renderedFieldOpacity = 1
+                }
+            }
+            return
+        }
+
+        guard renderedFieldMode != .normal else { return }
+        guard !reduceMotion else {
+            renderedFieldOpacity = 0
+            renderedFieldMode = .normal
+            return
+        }
+
+        // Gemini keeps the colour field on screen while the first visible
+        // assistant output establishes itself, then eases it away over a
+        // clearly perceptible interval.  Do not unmount the field until that
+        // fade has completed.
+        let fadeDuration = 1.15
+        withAnimation(.easeInOut(duration: fadeDuration)) {
+            renderedFieldOpacity = 0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + fadeDuration) {
+            guard generation == fieldFadeGeneration, mode == .normal else { return }
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                renderedFieldMode = .normal
+            }
         }
     }
 

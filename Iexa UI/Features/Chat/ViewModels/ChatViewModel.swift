@@ -10519,7 +10519,10 @@ final class ChatViewModel {
             : .image
         updateGeneratedMediaPresentation(messageId: messageId, kind: kind, phase: .stopped)
         let status = ChatStatusUpdate(
-            action: "image_generation",
+            // The status action is rendered as the completed tool row.  Keep
+            // video distinct from the legacy image-generation action so a
+            // user-stopped video cannot receive the green "生成图片" label.
+            action: kind == .video ? "video_generation" : "image_generation",
             description: "已停止生成",
             done: true,
             occurredAt: .now
