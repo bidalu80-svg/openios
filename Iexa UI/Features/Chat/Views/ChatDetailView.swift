@@ -4310,7 +4310,8 @@ struct ChatDetailView: View {
                 mode: ambientBackgroundMode,
                 keyboardIsVisible: keyboard.isVisible,
                 keyboardHeight: keyboard.height,
-                keyboardAnimation: keyboard.matchedAnimation
+                keyboardAnimation: keyboard.matchedAnimation,
+                customBackgroundImage: dependencies.appearanceManager.chatBackgroundImage
             )
             messageListArea
             if let firstAssistant = viewModel.messages.first(where: { $0.role == .assistant }) {
@@ -9652,6 +9653,9 @@ private struct ChatAmbientBackgroundView: View {
     /// indicator. The idle Gemini field uses the same lift as the composer.
     let keyboardHeight: CGFloat
     let keyboardAnimation: Animation
+    /// User-selected wallpaper. It is deliberately composed beneath the
+    /// Gemini field so the existing entrance/response animation stays visible.
+    let customBackgroundImage: UIImage?
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -9667,7 +9671,11 @@ private struct ChatAmbientBackgroundView: View {
 
     var body: some View {
         ZStack {
-            theme.background
+            if customBackgroundImage == nil {
+                theme.background
+            } else {
+                ChatBackgroundImageView(image: customBackgroundImage)
+            }
             renderedAmbientField
                 .opacity(renderedFieldOpacity)
         }

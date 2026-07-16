@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Manages user appearance preferences (color scheme, accent color, theme) with persistence.
 @Observable
@@ -212,6 +213,18 @@ final class AppearanceManager {
         didSet { save() }
     }
 
+    /// Identifier for the locally persisted, user-selected chat wallpaper.
+    /// The image bytes stay in Application Support rather than UserDefaults.
+    private(set) var chatBackgroundIdentifier: String? {
+        didSet { save() }
+    }
+
+    /// Kept in memory after loading/saving so active streaming chat views do
+    /// not repeatedly decode the wallpaper from disk on every body update.
+    private(set) var chatBackgroundImage: UIImage?
+
+    var hasChatBackground: Bool { chatBackgroundImage != nil }
+
     /// The resolved custom color from the stored HSB string.
     var customColor: Color {
         let parts = customColorHSB.components(separatedBy: ",").compactMap { Double($0) }
@@ -248,6 +261,9 @@ final class AppearanceManager {
     private static let tintedBgKey = "openui.appearance.tintedBg"
     private static let useCustomColorKey = "openui.appearance.useCustomColor"
     private static let customColorHSBKey = "openui.appearance.customColorHSB"
+    private static let chatBackgroundIdentifierKey = "openui.appearance.chatBackgroundIdentifier"
+    private static let chatBackgroundDirectoryName = "ChatBackground"
+    private static let chatBackgroundFileName = "wallpaper.jpg"
 
     init() {
         let storedMode = UserDefaults.standard.string(forKey: Self.modeKey) ?? "system"
@@ -262,6 +278,84 @@ final class AppearanceManager {
         self.useTintedBackgrounds = UserDefaults.standard.object(forKey: Self.tintedBgKey) as? Bool ?? false
         self.useCustomColor = UserDefaults.standard.object(forKey: Self.useCustomColorKey) as? Bool ?? false
         self.customColorHSB = UserDefaults.standard.string(forKey: Self.customColorHSBKey) ?? "0.6,0.8,0.9"
+        self.chatBackgroundIdentifier = UserDefaults.standard.string(forKey: Self.chatBackgroundIdentifierKey)
+        self.chatBackgroundImage = Self.loadChatBackgroundImage()
+
+        // Do not advertise a background whose sandbox file has already been
+        // removed by storage cleanup or a restored backup.
+        if self.chatBackgroundIdentifier != nil, self.chatBackgroundImage == nil {
+            self.chatBackgroundIdentifier = nil
+            UserDefaults.standard.removeObject(forKey: Self.chatBackgroundIdentifierKey)
+        }
+    }
+
+    // MARK: - Chat Background
+
+    /// Saves a user-selected photo as the global chat wallpaper. The image is
+    /// normalized and bounded before persistence so a very large HEIC/RAW
+    /// source cannot bloat the app container or cause repeated decode spikes.
+    func saveChatBackground(from imageData: Data) throws {
+        guard let inputImage = UIImage(data: imageData),
+              let prepared = Self.preparedChatBackground(from: inputImage),
+              let encoded = prepared.jpegData(compressionQuality: 0.88) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+
+        let directory = Self.chatBackgroundDirectoryURL
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try encoded.write(to: Self.chatBackgroundFileURL, options: .atomic)
+
+        // Change the observable image and identifier only after the atomic
+        // write succeeds, so an interrupted save keeps the prior wallpaper.
+        chatBackgroundImage = prepared
+        chatBackgroundIdentifier = UUID().uuidString
+    }
+
+    /// Removes the wallpaper file and restores the default theme background.
+    func restoreDefaultChatBackground() {
+        try? FileManager.default.removeItem(at: Self.chatBackgroundFileURL)
+        chatBackgroundImage = nil
+        chatBackgroundIdentifier = nil
+    }
+
+    private static var chatBackgroundDirectoryURL: URL {
+        let fileManager = FileManager.default
+        let base = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent(chatBackgroundDirectoryName, isDirectory: true)
+    }
+
+    private static var chatBackgroundFileURL: URL {
+        chatBackgroundDirectoryURL.appendingPathComponent(chatBackgroundFileName)
+    }
+
+    private static func loadChatBackgroundImage() -> UIImage? {
+        UIImage(contentsOfFile: chatBackgroundFileURL.path)
+    }
+
+    private static func preparedChatBackground(from image: UIImage) -> UIImage? {
+        let sourceSize = image.size
+        guard sourceSize.width > 0, sourceSize.height > 0 else { return nil }
+
+        let maximumDimension: CGFloat = 2_880
+        let scale = min(1, maximumDimension / max(sourceSize.width, sourceSize.height))
+        let targetSize = CGSize(
+            width: max(1, (sourceSize.width * scale).rounded()),
+            height: max(1, (sourceSize.height * scale).rounded())
+        )
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
+            // Drawing through the renderer also applies a selected photo's
+            // EXIF orientation before it becomes a reusable wallpaper.
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
     }
 
     private func save() {
@@ -273,5 +367,28 @@ final class AppearanceManager {
         UserDefaults.standard.set(useTintedBackgrounds, forKey: Self.tintedBgKey)
         UserDefaults.standard.set(useCustomColor, forKey: Self.useCustomColorKey)
         UserDefaults.standard.set(customColorHSB, forKey: Self.customColorHSBKey)
+        UserDefaults.standard.set(chatBackgroundIdentifier, forKey: Self.chatBackgroundIdentifierKey)
+    }
+}
+
+/// Full-bleed, aspect-fill renderer shared by the chat canvas and the
+/// appearance preview. The caller chooses the layer order; it never adds an
+/// opaque overlay of its own.
+struct ChatBackgroundImageView: View {
+    let image: UIImage?
+
+    var body: some View {
+        GeometryReader { proxy in
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+            } else {
+                Color.clear
+            }
+        }
+        .accessibilityHidden(true)
     }
 }

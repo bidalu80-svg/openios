@@ -1,4 +1,6 @@
 import SwiftUI
+import PhotosUI
+import UIKit
 
 /// Settings screen for appearance preferences: color scheme, accent color, theme options.
 struct AppearanceSettingsView: View {
@@ -8,6 +10,12 @@ struct AppearanceSettingsView: View {
     @State private var previewColorScheme: ColorScheme?
     @State private var showColorWheel = false
     @State private var wheelColor: Color = .blue
+    @State private var selectedChatBackgroundItem: PhotosPickerItem?
+    @State private var pendingChatBackgroundData: Data?
+    @State private var pendingChatBackgroundImage: UIImage?
+    @State private var showChatBackgroundPreview = false
+    @State private var isLoadingChatBackground = false
+    @State private var chatBackgroundErrorMessage: String?
     @Namespace private var accentAnimation
     @AppStorage("streamingBlurAnimation") private var streamingBlurEnabled: Bool = true
 
@@ -58,12 +66,160 @@ struct AppearanceSettingsView: View {
 
                 }
 
+                chatBackgroundSettingsSection
+
             }
             .padding(.vertical, Spacing.lg)
         }
         .background(theme.background)
         .navigationTitle("外观")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: selectedChatBackgroundItem) { _, item in
+            Task { await loadChatBackgroundPreview(from: item) }
+        }
+        .sheet(isPresented: $showChatBackgroundPreview) {
+            if let image = pendingChatBackgroundImage,
+               let data = pendingChatBackgroundData {
+                ChatBackgroundPreviewSheet(
+                    image: image,
+                    imageData: data,
+                    manager: manager
+                )
+            }
+        }
+        .alert("无法使用这张图片", isPresented: Binding(
+            get: { chatBackgroundErrorMessage != nil },
+            set: { if !$0 { chatBackgroundErrorMessage = nil } }
+        )) {
+            Button("好", role: .cancel) { chatBackgroundErrorMessage = nil }
+        } message: {
+            Text(chatBackgroundErrorMessage ?? "请换一张图片后重试。")
+        }
+    }
+
+    // MARK: - Chat Background
+
+    private var chatBackgroundSettingsSection: some View {
+        SettingsSection(
+            header: "聊天背景",
+            footer: "背景图只显示在聊天界面的底层；Gemini 渐变动画和聊天内容仍显示在它上方。"
+        ) {
+            PhotosPicker(
+                selection: $selectedChatBackgroundItem,
+                matching: .images,
+                photoLibrary: .shared()
+            ) {
+                HStack(spacing: Spacing.md) {
+                    chatBackgroundPickerIcon
+
+                    VStack(alignment: .leading, spacing: Spacing.xxs) {
+                        Text(manager.hasChatBackground ? "更换聊天背景" : "自定义聊天背景")
+                            .scaledFont(size: 16)
+                            .foregroundStyle(theme.textPrimary)
+                        Text(isLoadingChatBackground
+                             ? "正在准备预览…"
+                             : (manager.hasChatBackground ? "已设置，点击更换" : "从相册选择图片"))
+                            .scaledFont(size: 12, weight: .medium)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+
+                    Spacer()
+
+                    if isLoadingChatBackground {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "chevron.right")
+                            .scaledFont(size: 12, weight: .semibold)
+                            .foregroundStyle(theme.textTertiary)
+                    }
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.chatBubblePadding)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isLoadingChatBackground)
+
+            if manager.hasChatBackground {
+                Divider()
+                    .padding(.leading, Spacing.md + IconSize.lg + Spacing.md)
+
+                Button {
+                    manager.restoreDefaultChatBackground()
+                    Haptics.play(.medium)
+                } label: {
+                    HStack(spacing: Spacing.md) {
+                        Image(systemName: "arrow.counterclockwise")
+                            .scaledFont(size: 16, weight: .medium)
+                            .foregroundStyle(theme.error)
+                            .frame(width: IconSize.lg, height: IconSize.lg)
+                            .background(theme.error.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: Spacing.xxs) {
+                            Text("恢复默认背景")
+                                .scaledFont(size: 16)
+                                .foregroundStyle(theme.error)
+                            Text("移除自定义图片并恢复主题默认背景")
+                                .scaledFont(size: 12, weight: .medium)
+                                .foregroundStyle(theme.textTertiary)
+                        }
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, Spacing.md)
+                    .padding(.vertical, Spacing.chatBubblePadding)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var chatBackgroundPickerIcon: some View {
+        if let image = manager.chatBackgroundImage {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: IconSize.lg, height: IconSize.lg)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(theme.cardBorder, lineWidth: 0.5)
+                )
+        } else {
+            Image(systemName: "photo.on.rectangle.angled")
+                .scaledFont(size: 16, weight: .medium)
+                .foregroundStyle(theme.brandPrimary)
+                .frame(width: IconSize.lg, height: IconSize.lg)
+                .background(theme.brandPrimary.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+    }
+
+    @MainActor
+    private func loadChatBackgroundPreview(from item: PhotosPickerItem?) async {
+        guard let item else { return }
+        isLoadingChatBackground = true
+        defer {
+            isLoadingChatBackground = false
+            // Allow selecting the same picture again after cancelling preview.
+            selectedChatBackgroundItem = nil
+        }
+
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self),
+                  let image = UIImage(data: data) else {
+                chatBackgroundErrorMessage = "无法读取这张图片，请换一张后重试。"
+                return
+            }
+            pendingChatBackgroundData = data
+            pendingChatBackgroundImage = image
+            showChatBackgroundPreview = true
+        } catch {
+            chatBackgroundErrorMessage = "读取图片时出错：\(error.localizedDescription)"
+        }
     }
 
     // MARK: - Live Preview Card
@@ -430,5 +586,142 @@ struct AppearanceSettingsView: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+}
+
+/// A confirm-before-save preview that mirrors the chat canvas layer order:
+/// selected photo at the bottom, Gemini colour field above it, then messages
+/// and composer glass on top.
+private struct ChatBackgroundPreviewSheet: View {
+    let image: UIImage
+    let imageData: Data
+    @Bindable var manager: AppearanceManager
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+    @State private var saveErrorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ChatBackgroundImageView(image: image)
+                    .ignoresSafeArea()
+
+                previewGeminiOverlay
+                    .ignoresSafeArea()
+
+                previewChatChrome
+            }
+            .navigationTitle("聊天背景预览")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { saveBackground() }
+                        .fontWeight(.semibold)
+                }
+            }
+            .alert("无法保存背景", isPresented: Binding(
+                get: { saveErrorMessage != nil },
+                set: { if !$0 { saveErrorMessage = nil } }
+            )) {
+                Button("好", role: .cancel) { saveErrorMessage = nil }
+            } message: {
+                Text(saveErrorMessage ?? "请换一张图片后重试。")
+            }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private var previewGeminiOverlay: some View {
+        ZStack {
+            LinearGradient(
+                colors: theme.isDark
+                    ? [.clear, Color.cyan.opacity(0.18), Color.blue.opacity(0.26)]
+                    : [.clear, Color.cyan.opacity(0.16), Color.blue.opacity(0.28)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            RadialGradient(
+                colors: [Color.mint.opacity(theme.isDark ? 0.18 : 0.24), .clear],
+                center: .bottomLeading,
+                startRadius: 0,
+                endRadius: 430
+            )
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var previewChatChrome: some View {
+        VStack(spacing: Spacing.md) {
+            Spacer()
+
+            HStack(alignment: .top, spacing: Spacing.sm) {
+                Circle()
+                    .fill(theme.brandPrimary.opacity(0.92))
+                    .frame(width: 30, height: 30)
+                    .overlay {
+                        Image(systemName: "sparkles")
+                            .scaledFont(size: 13, weight: .semibold)
+                            .foregroundStyle(theme.onAccentColor)
+                    }
+
+                Text("背景图会显示在渐变动画下方")
+                    .scaledFont(size: 14, weight: .medium)
+                    .foregroundStyle(theme.chatBubbleAssistantText)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(theme.chatBubbleAssistant.opacity(theme.isDark ? 0.90 : 0.94))
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack {
+                Spacer()
+                Text("预览效果")
+                    .scaledFont(size: 14, weight: .medium)
+                    .foregroundStyle(theme.chatBubbleUserText)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(theme.chatBubbleUser.opacity(0.94))
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+
+            Spacer()
+
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "plus")
+                    .scaledFont(size: 17, weight: .semibold)
+                    .foregroundStyle(theme.textSecondary)
+                Text("询问 AI")
+                    .scaledFont(size: 16)
+                    .foregroundStyle(theme.inputPlaceholder)
+                Spacer()
+                Image(systemName: "waveform")
+                    .scaledFont(size: 18, weight: .medium)
+                    .foregroundStyle(theme.textSecondary)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 54)
+            .background(theme.inputBackground.opacity(theme.isDark ? 0.94 : 0.90))
+            .clipShape(Capsule())
+            .overlay(
+                Capsule().strokeBorder(theme.inputBorder.opacity(0.85), lineWidth: 0.75)
+            )
+        }
+        .padding(Spacing.screenPadding)
+    }
+
+    private func saveBackground() {
+        do {
+            try manager.saveChatBackground(from: imageData)
+            Haptics.play(.medium)
+            dismiss()
+        } catch {
+            saveErrorMessage = error.localizedDescription
+        }
     }
 }
