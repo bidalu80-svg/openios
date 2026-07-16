@@ -140,10 +140,22 @@ struct AppearanceSettingsView: View {
             .buttonStyle(.plain)
             .disabled(isLoadingChatBackground)
 
-            if manager.hasChatBackground {
-                Divider()
-                    .padding(.leading, Spacing.md + IconSize.lg + Spacing.md)
+            Divider()
+                .padding(.leading, Spacing.md + IconSize.lg + Spacing.md)
 
+            SettingsCell(
+                icon: "text.bubble.fill",
+                title: "AI 正文阅读玻璃",
+                subtitle: "仅在使用自定义聊天背景时，为 AI 普通正文提供半透明阅读底",
+                iconColor: .indigo,
+                showDivider: manager.hasChatBackground,
+                accessory: .toggle(
+                    isOn: manager.useChatReadingGlass,
+                    onChange: { manager.useChatReadingGlass = $0 }
+                )
+            )
+
+            if manager.hasChatBackground {
                 Button {
                     manager.restoreDefaultChatBackground()
                     Haptics.play(.medium)

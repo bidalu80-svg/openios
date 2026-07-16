@@ -203,6 +203,13 @@ final class AppearanceManager {
         didSet { save() }
     }
 
+    /// Opt-in readability surface for assistant prose over a custom wallpaper.
+    /// It intentionally defaults to off so a wallpaper preserves the current
+    /// clean, unframed assistant text unless the user asks for more contrast.
+    var useChatReadingGlass: Bool {
+        didSet { save() }
+    }
+
     /// Whether the user is using a custom color instead of a preset.
     var useCustomColor: Bool {
         didSet { save() }
@@ -259,6 +266,7 @@ final class AppearanceManager {
     private static let reduceMotionKey = "openui.appearance.reduceMotion"
     private static let pureBlackKey = "openui.appearance.pureBlack"
     private static let tintedBgKey = "openui.appearance.tintedBg"
+    private static let chatReadingGlassKey = "openui.appearance.chatReadingGlass"
     private static let useCustomColorKey = "openui.appearance.useCustomColor"
     private static let customColorHSBKey = "openui.appearance.customColorHSB"
     private static let chatBackgroundIdentifierKey = "openui.appearance.chatBackgroundIdentifier"
@@ -276,6 +284,7 @@ final class AppearanceManager {
         self.reduceMotion = UserDefaults.standard.object(forKey: Self.reduceMotionKey) as? Bool ?? false
         self.usePureBlackDark = UserDefaults.standard.object(forKey: Self.pureBlackKey) as? Bool ?? false
         self.useTintedBackgrounds = UserDefaults.standard.object(forKey: Self.tintedBgKey) as? Bool ?? false
+        self.useChatReadingGlass = UserDefaults.standard.object(forKey: Self.chatReadingGlassKey) as? Bool ?? false
         self.useCustomColor = UserDefaults.standard.object(forKey: Self.useCustomColorKey) as? Bool ?? false
         self.customColorHSB = UserDefaults.standard.string(forKey: Self.customColorHSBKey) ?? "0.6,0.8,0.9"
         self.chatBackgroundIdentifier = UserDefaults.standard.string(forKey: Self.chatBackgroundIdentifierKey)
@@ -365,6 +374,7 @@ final class AppearanceManager {
         UserDefaults.standard.set(reduceMotion, forKey: Self.reduceMotionKey)
         UserDefaults.standard.set(usePureBlackDark, forKey: Self.pureBlackKey)
         UserDefaults.standard.set(useTintedBackgrounds, forKey: Self.tintedBgKey)
+        UserDefaults.standard.set(useChatReadingGlass, forKey: Self.chatReadingGlassKey)
         UserDefaults.standard.set(useCustomColor, forKey: Self.useCustomColorKey)
         UserDefaults.standard.set(customColorHSB, forKey: Self.customColorHSBKey)
         UserDefaults.standard.set(chatBackgroundIdentifier, forKey: Self.chatBackgroundIdentifierKey)

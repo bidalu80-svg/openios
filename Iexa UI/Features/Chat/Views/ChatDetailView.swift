@@ -6243,7 +6243,8 @@ struct ChatDetailView: View {
         ChatMessageBubble(
             role: .assistant,
             showTimestamp: activeActionMessageId == message.id,
-            timestamp: message.timestamp
+            timestamp: message.timestamp,
+            useAssistantReadingGlass: shouldUseAssistantReadingGlass(for: content)
         ) {
             AssistantMessageContent(
                 content: content,
@@ -6267,7 +6268,8 @@ struct ChatDetailView: View {
                 ChatMessageBubble(
                     role: .assistant,
                     showTimestamp: activeActionMessageId == message.id,
-                    timestamp: message.timestamp
+                    timestamp: message.timestamp,
+                    useAssistantReadingGlass: shouldUseAssistantReadingGlass(for: fallbackContent)
                 ) {
                     AssistantMessageContent(
                         content: fallbackContent,
@@ -6285,7 +6287,8 @@ struct ChatDetailView: View {
                 ChatMessageBubble(
                     role: .assistant,
                     showTimestamp: activeActionMessageId == message.id,
-                    timestamp: message.timestamp
+                    timestamp: message.timestamp,
+                    useAssistantReadingGlass: false
                 ) {
                     TypingIndicator()
                 }
@@ -6294,7 +6297,8 @@ struct ChatDetailView: View {
             ChatMessageBubble(
                 role: message.role,
                 showTimestamp: activeActionMessageId == message.id,
-                timestamp: message.timestamp
+                timestamp: message.timestamp,
+                useAssistantReadingGlass: shouldUseAssistantReadingGlass(for: message)
             ) {
                 messageContent(for: message, activityItem: activityItem)
             }
@@ -6313,6 +6317,40 @@ struct ChatDetailView: View {
                 view.contextMenu { messageContextMenu(for: message) }
             }
         }
+    }
+
+    private var shouldUseAssistantReadingGlass: Bool {
+        dependencies.appearanceManager.hasChatBackground
+            && dependencies.appearanceManager.useChatReadingGlass
+    }
+
+    private func shouldUseAssistantReadingGlass(for message: ChatMessage) -> Bool {
+        guard message.role == .assistant else { return false }
+
+        let content: String
+        if isMessageVisuallyStreaming(message),
+           viewModel.streamingStore.streamingMessageId == message.id {
+            content = viewModel.streamingStore.displayContent
+        } else {
+            content = message.content
+        }
+        return shouldUseAssistantReadingGlass(for: content)
+    }
+
+    private func shouldUseAssistantReadingGlass(for content: String) -> Bool {
+        guard shouldUseAssistantReadingGlass else { return false }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        // These render through dedicated components. Keep them independent so
+        // the local prose surface never changes the geometry or material of a
+        // tool step, media payload, visualization, or code block.
+        let lowercased = trimmed.lowercased()
+        guard !lowercased.contains("<details"),
+              !lowercased.contains("@@@viz-start"),
+              !trimmed.contains("```"),
+              !trimmed.contains("![") else { return false }
+        return true
     }
 
     private func isLocalAlpineResultMessage(_ message: ChatMessage) -> Bool {
