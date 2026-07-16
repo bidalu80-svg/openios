@@ -10299,7 +10299,9 @@ private struct MediaGenerationProgressTitle: View {
         "正在设置场景",
         "润色细节",
         "即将完成",
-        "正在进行最终润色"
+        "正在进行最终润色",
+        "最后再调整一次",
+        "正在等待图片返回"
     ]
 
     private static let videoWaitingStages = [
@@ -10342,22 +10344,36 @@ private struct MediaGenerationProgressTitle: View {
         }
         .onAppear { phaseStartedAt = .now }
         .onChange(of: phase) { _, _ in
-            phaseStartedAt = .now
+            // Image transport moves from submission to polling while the
+            // waiting card is already visible. Do not restart its visual
+            // storyboard on those bookkeeping updates, otherwise a slow image
+            // request could never reach the final repeating wait message.
+            if kind != "image" {
+                phaseStartedAt = .now
+            }
         }
     }
 
     private func storyboardState(at date: Date) -> (text: String, characterProgress: Double) {
         let elapsed = max(0, date.timeIntervalSince(phaseStartedAt))
         let stageDuration: TimeInterval = 4.05
+        let finalStageIndex = waitingStages.count - 1
         let stageIndex = min(
             Int(elapsed / stageDuration),
-            waitingStages.count - 1
+            finalStageIndex
         )
         let stageElapsed = elapsed - Double(stageIndex) * stageDuration
         let text = waitingStages[stageIndex]
+        let isRepeatingImageWait = kind == "image" && stageIndex == finalStageIndex
+        // Once all image-generation stages have played, keep the final wait
+        // copy honest and alive: type it from the first glyph every four
+        // seconds until a real image is attached and removes this card.
+        let characterElapsed = isRepeatingImageWait
+            ? stageElapsed.truncatingRemainder(dividingBy: 4.0)
+            : stageElapsed
         // Each glyph fades/slides in across several display frames instead of
         // replacing a whole Text value at a 30 Hz cadence.
-        let characterProgress = 0.14 + stageElapsed / 0.095
+        let characterProgress = 0.14 + characterElapsed / 0.095
         return (text, characterProgress)
     }
 }
