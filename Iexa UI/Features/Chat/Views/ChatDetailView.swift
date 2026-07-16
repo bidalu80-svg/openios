@@ -9560,8 +9560,10 @@ private struct FirstAssistantVisibleTokenProbe: View {
         visibleStatusHistory.map { status in
             let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let state = status.status?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return "\(action)|\(state)|\(status.done == true ? \"1\" : \"0\")|\(status.hidden == true ? \"1\" : \"0\")"
-        }.joined(separator: "\\n")
+            let done = status.done == true ? "1" : "0"
+            let hidden = status.hidden == true ? "1" : "0"
+            return "\(action)|\(state)|\(done)|\(hidden)"
+        }.joined(separator: "::")
     }
 
     var body: some View {
