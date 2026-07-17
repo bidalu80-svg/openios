@@ -581,7 +581,8 @@ final class BrowserWebSearchService: NSObject {
 
     private func executeNativeOpen(_ call: [String: Any], readable: Bool) async -> [String: Any] {
         let requestedURL = Self.urlValue(in: call)
-        guard let url = requestedURL ?? await currentPageURL() else {
+        let activeURL = requestedURL == nil ? await currentPageURL() : nil
+        guard let url = requestedURL ?? activeURL else {
             return [
                 "action": readable ? "browser.readable" : "browser.open",
                 "ok": false,
@@ -1072,7 +1073,8 @@ final class BrowserWebSearchService: NSObject {
 
     private func executeNativeFetch(_ call: [String: Any]) async -> [String: Any] {
         let requestedURL = Self.urlValue(in: call, allowLocalFiles: false)
-        guard let url = requestedURL ?? await currentPageURL(),
+        let activeURL = requestedURL == nil ? await currentPageURL() : nil
+        guard let url = requestedURL ?? activeURL,
               Self.isHTTPBrowserURL(url) else {
             return [
                 "action": "browser.fetch",
