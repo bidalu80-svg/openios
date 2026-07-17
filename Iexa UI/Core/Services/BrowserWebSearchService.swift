@@ -580,17 +580,22 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func executeNativeOpen(_ call: [String: Any], readable: Bool) async -> [String: Any] {
-        guard let url = Self.urlValue(in: call) else {
+        let requestedURL = Self.urlValue(in: call)
+        guard let url = requestedURL ?? await currentPageURL() else {
             return [
                 "action": readable ? "browser.readable" : "browser.open",
                 "ok": false,
-                "error": "Missing required field: url"
+                "error": "Missing required field: url (and there is no active browser page to reuse)"
             ]
         }
 
         let timeout = TimeInterval(Self.intValue(call["timeout"] ?? call["timeout_seconds"]) ?? 14)
         let forceReload = Self.boolValue(call["force_reload"] ?? call["forceReload"] ?? call["reload"]) ?? false
-        guard await load(url: url, timeout: min(max(timeout, 3), 30), forceReload: forceReload) else {
+        // `open` and `readable` are also used as continuation primitives. When
+        // a model omits URL on an already-open page, keep that page in place
+        // instead of failing or reloading it.
+        if requestedURL != nil,
+           !(await load(url: url, timeout: min(max(timeout, 3), 30), forceReload: forceReload)) {
             return [
                 "action": readable ? "browser.readable" : "browser.open",
                 "ok": false,
@@ -598,7 +603,7 @@ final class BrowserWebSearchService: NSObject {
                 "error": "Failed to load webpage"
             ]
         }
-        let reusedExistingPage = lastBrowserNavigationReusedExistingPage
+        let reusedExistingPage = requestedURL == nil || lastBrowserNavigationReusedExistingPage
         try? await Task.sleep(nanoseconds: 650_000_000)
 
         let maxLength = min(max(Self.intValue(call["max_length"] ?? call["limit"]) ?? 8_000, 800), 18_000)
@@ -1066,11 +1071,13 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func executeNativeFetch(_ call: [String: Any]) async -> [String: Any] {
-        guard let url = Self.urlValue(in: call, allowLocalFiles: false) else {
+        let requestedURL = Self.urlValue(in: call, allowLocalFiles: false)
+        guard let url = requestedURL ?? await currentPageURL(),
+              Self.isHTTPBrowserURL(url) else {
             return [
                 "action": "browser.fetch",
                 "ok": false,
-                "error": "Missing required field: url"
+                "error": "Missing required field: url (and there is no active browser page to fetch)"
             ]
         }
         let wv = webViewReady()
@@ -1142,7 +1149,7 @@ final class BrowserWebSearchService: NSObject {
                         "action": "browser.fetch",
                         "ok": (200..<300).contains(status),
                         "url": finalURL.absoluteString,
-                        "requested_url": url.absoluteString,
+                        "requested_url": requestedURL?.absoluteString ?? url.absoluteString,
                         "page_url": object["pageUrl"] as? String ?? wv.url?.absoluteString ?? "",
                         "status": status,
                         "status_text": object["statusText"] as? String ?? "",
@@ -4672,7 +4679,10 @@ final class BrowserWebSearchService: NSObject {
 
         switch normalized {
         case "", "browser_use", "browser.use":
-            if wantsSave { return "browser.fetch" }
+            // A generic output/path hint is common in tool continuations. It
+            // must not turn a current-page read into a download unless a URL
+            // was explicitly supplied; explicit `fetch` still routes below.
+            if wantsSave && hasURL { return "browser.fetch" }
             if hasScript { return "browser.execute_js" }
             if hasTypedText && (hasSelector || hasLabel || hasCoordinates) { return "browser.type" }
             if hasLabel || hasCoordinates { return "browser.click" }
@@ -4732,7 +4742,7 @@ final class BrowserWebSearchService: NSObject {
         case "list_tabs", "browser.list_tabs":
             return "browser.list_tabs"
         default:
-            if wantsSave { return "browser.fetch" }
+            if wantsSave && hasURL { return "browser.fetch" }
             if hasURL { return "browser.navigate" }
             return normalized.isEmpty ? "browser.screenshot" : normalized
         }
