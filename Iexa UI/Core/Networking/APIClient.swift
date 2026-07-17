@@ -3977,8 +3977,19 @@ final class APIClient: @unchecked Sendable {
     }
 
     func sendPreferredOpenAIStreaming(request: ChatCompletionRequest) async throws -> SSEStream {
-        guard providerType == .openAICompatible,
-              shouldPreferResponsesAPI(for: request) else {
+        guard providerType == .openAICompatible else {
+            return try await sendMessageStreaming(request: request)
+        }
+
+        // This setting is intentionally strict: every OpenAI-compatible request
+        // that reaches this shared route uses /responses, including attachments,
+        // function tools, and their continuation turns. Do not silently fall
+        // back, otherwise a Responses-only gateway is routed to the wrong API.
+        if UserDefaults.standard.bool(forKey: "openAIForceResponsesAPI") {
+            return try await sendResponsesStreaming(request: request)
+        }
+
+        guard shouldPreferResponsesAPI(for: request) else {
             return try await sendMessageStreaming(request: request)
         }
 
@@ -4016,70 +4027,12 @@ final class APIClient: @unchecked Sendable {
         if request.isPipeModel { return false }
         if providerType != .openAICompatible { return false }
         if request.responsesTools?.isEmpty == false { return true }
-        if request.tools?.isEmpty == false { return false }
-        if let toolChoice = request.toolChoice {
-            if !toolChoice.isEmpty, toolChoice.lowercased() != "none" {
-                return false
-            }
-        }
 
-        let modelMetadata = [
-            request.model,
-            (request.modelItem?["id"] as? String) ?? "",
-            (request.modelItem?["name"] as? String) ?? "",
-            (request.modelItem?["connection_type"] as? String) ?? ""
-        ].joined(separator: " ").lowercased()
-
-        let mediaHints = [
-            "gpt-image", "dall-e", "dalle", "image", "imagen", "flux", "sdxl",
-            "stable-diffusion", "midjourney", "seedream", "jimeng", "kolors",
-            "video", "sora", "veo", "wan", "kling", "hailuo", "runway", "luma"
-        ]
-        if mediaHints.contains(where: { modelMetadata.contains($0) }) {
-            return false
-        }
-
-        if request.messages.contains(where: { Self.messageContainsMediaPart($0) }) {
-            return false
-        }
-
-        if let params = request.params {
-            if params["tools"] != nil || params["functions"] != nil {
-                return false
-            }
-            if let toolChoice = params["tool_choice"] as? String,
-               !toolChoice.isEmpty,
-               toolChoice.lowercased() != "none" {
-                return false
-            }
-            if params["function_call"] != nil {
-                return false
-            }
-        }
-
-        if modelMetadata.contains("chat_completions") || modelMetadata.contains("chat-completions") {
-            return false
-        }
-        if modelMetadata.contains("responses") || modelMetadata.contains("response") {
-            return true
-        }
-
-        // Standard OpenAI models are the safest default for the Responses path.
-        return modelMetadata.contains("gpt-")
-            || modelMetadata.contains("o3")
-            || modelMetadata.contains("o4")
-            || modelMetadata.contains("o5")
-    }
-
-    private static func messageContainsMediaPart(_ message: [String: Any]) -> Bool {
-        guard let parts = message["content"] as? [[String: Any]] else { return false }
-        return parts.contains { part in
-            let type = (part["type"] as? String)?.lowercased()
-            if type == "image_url" || type == "input_image" || type == "video" || type == "file" {
-                return true
-            }
-            return part["image_url"] != nil || part["input_image"] != nil || part["video_url"] != nil
-        }
+        // Ordinary chat routing is controlled by the user preference in Chat
+        // Settings. Responses remains automatic only when the request contains
+        // hosted Responses tools, which cannot be represented by
+        // /chat/completions.
+        return false
     }
 
     private func shouldFallbackFromResponsesAPI(after error: Error) -> Bool {

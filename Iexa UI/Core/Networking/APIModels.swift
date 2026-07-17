@@ -549,9 +549,8 @@ struct ChatCompletionRequest: Sendable {
 
     /// Serialises the request to OpenAI's Responses API shape.
     ///
-    /// This is deliberately text/chat focused. Image and video generation keep
-    /// using their dedicated media endpoints so the generation progress pipeline
-    /// is not affected by chat endpoint routing.
+    /// This accepts every chat turn that can be sent through an OpenAI-compatible
+    /// endpoint, including attachments and native function-tool continuations.
     func toOpenAIResponsesJSON() -> [String: Any] {
         let shouldDowngradeSystemRole = !supportsSystemRoleInMessages
             || Self.openAICompatibleModelRejectsSystemRole(model)
@@ -564,11 +563,15 @@ struct ChatCompletionRequest: Sendable {
             "model": model,
             "input": Self.responsesInputItems(from: serializedMessages)
         ]
-        if let responsesTools, !responsesTools.isEmpty {
-            data["tools"] = responsesTools
+        let convertedFunctionTools = tools?.compactMap(Self.responsesFunctionTool(from:)) ?? []
+        let allTools = (responsesTools ?? []) + convertedFunctionTools
+        if !allTools.isEmpty {
+            data["tools"] = allTools
         }
         if let responsesToolChoice {
             data["tool_choice"] = responsesToolChoice
+        } else if let toolChoice, !toolChoice.isEmpty {
+            data["tool_choice"] = Self.responsesToolChoice(from: toolChoice)
         }
         if let parallelToolCalls {
             data["parallel_tool_calls"] = parallelToolCalls
@@ -641,13 +644,99 @@ struct ChatCompletionRequest: Sendable {
     }
 
     private static func responsesInputItems(from messages: [[String: Any]]) -> [[String: Any]] {
-        messages.map { message in
-            let role = responsesRole(from: (message["role"] as? String) ?? "user")
-            return [
-                "role": role,
-                "content": responsesContent(from: message["content"])
-            ]
+        messages.flatMap { message -> [[String: Any]] in
+            let rawRole = (message["role"] as? String)?.lowercased() ?? "user"
+
+            if rawRole == "tool" || rawRole == "function" {
+                let callID = (message["tool_call_id"] as? String)
+                    ?? (message["call_id"] as? String)
+                    ?? (message["tool_use_id"] as? String)
+                    ?? ""
+                guard !callID.isEmpty else { return [] }
+                return [[
+                    "type": "function_call_output",
+                    "call_id": callID,
+                    "output": renderedResponsesToolOutput(from: message["content"])
+                ]]
+            }
+
+            var result: [[String: Any]] = []
+            let role = responsesRole(from: rawRole)
+            var content = responsesContent(from: message["content"])
+            let fileParts = (message["files"] as? [[String: Any]] ?? [])
+                .compactMap { responsesContentPart(from: $0) }
+            if !fileParts.isEmpty {
+                var mergedParts: [[String: Any]] = []
+                if let text = content as? String, !text.isEmpty {
+                    mergedParts.append(["type": "input_text", "text": text])
+                } else if let parts = content as? [[String: Any]] {
+                    mergedParts = parts
+                }
+                mergedParts.append(contentsOf: fileParts)
+                content = mergedParts
+            }
+            if !responsesContentIsEmpty(content) {
+                result.append(["role": role, "content": content])
+            }
+
+            if rawRole == "assistant",
+               let toolCalls = message["tool_calls"] as? [[String: Any]] {
+                result.append(contentsOf: toolCalls.compactMap(responsesFunctionCallInput(from:)))
+            }
+            return result
         }
+    }
+
+    private static func responsesFunctionTool(from tool: [String: Any]) -> [String: Any]? {
+        guard (tool["type"] as? String)?.lowercased() == "function",
+              let function = tool["function"] as? [String: Any],
+              let name = function["name"] as? String,
+              !name.isEmpty else {
+            return nil
+        }
+        var converted: [String: Any] = ["type": "function", "name": name]
+        if let description = function["description"] as? String, !description.isEmpty {
+            converted["description"] = description
+        }
+        converted["parameters"] = function["parameters"] ?? ["type": "object", "properties": [:]]
+        if let strict = function["strict"] { converted["strict"] = strict }
+        return converted
+    }
+
+    private static func responsesToolChoice(from choice: String) -> Any {
+        let normalized = choice.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ["auto", "none", "required"].contains(normalized) ? normalized : "auto"
+    }
+
+    private static func responsesFunctionCallInput(from call: [String: Any]) -> [String: Any]? {
+        let function = call["function"] as? [String: Any]
+        let name = (function?["name"] as? String) ?? (call["name"] as? String) ?? ""
+        let callID = (call["id"] as? String) ?? (call["call_id"] as? String) ?? ""
+        guard !name.isEmpty, !callID.isEmpty else { return nil }
+        let arguments = renderedResponsesToolOutput(from: function?["arguments"] ?? call["arguments"])
+        return [
+            "type": "function_call",
+            "call_id": callID,
+            "name": name,
+            "arguments": arguments.isEmpty ? "{}" : arguments
+        ]
+    }
+
+    private static func renderedResponsesToolOutput(from value: Any?) -> String {
+        if let text = value as? String { return text }
+        guard let value,
+              JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let text = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return text
+    }
+
+    private static func responsesContentIsEmpty(_ content: Any) -> Bool {
+        if let text = content as? String { return text.isEmpty }
+        if let parts = content as? [Any] { return parts.isEmpty }
+        return false
     }
 
     private static func responsesRole(from rawRole: String) -> String {
@@ -697,6 +786,25 @@ struct ChatCompletionRequest: Sendable {
             if let url = part["image_url"] as? URL {
                 return ["type": "input_image", "image_url": url.absoluteString, "detail": "auto"]
             }
+        }
+
+        if type == "file" || type == "input_file" {
+            let file = part["file"] as? [String: Any]
+            let fileID = (part["file_id"] as? String)
+                ?? (part["id"] as? String)
+                ?? (file?["id"] as? String)
+            let fileURL = (part["file_url"] as? String)
+                ?? (part["url"] as? String)
+                ?? (file?["url"] as? String)
+            let filename = (part["filename"] as? String)
+                ?? (part["name"] as? String)
+                ?? (file?["filename"] as? String)
+                ?? (file?["name"] as? String)
+            var converted: [String: Any] = ["type": "input_file"]
+            if let fileID, !fileID.isEmpty { converted["file_id"] = fileID }
+            if let fileURL, !fileURL.isEmpty { converted["file_url"] = fileURL }
+            if let filename, !filename.isEmpty { converted["filename"] = filename }
+            return converted.count > 1 ? converted : nil
         }
 
         return nil

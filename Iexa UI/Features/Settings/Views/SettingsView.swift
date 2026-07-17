@@ -744,6 +744,7 @@ struct ChatSettingsView: View {
     @AppStorage("chatInput.codeEditingEnabled") private var codeEditingEnabled = false
     @AppStorage("chatInput.shortcutsEnabled") private var shortcutsEnabled = false
     @AppStorage("localAlpineToolPreviewEnabled") private var localAlpineToolPreviewEnabled = true
+    @AppStorage("openAIForceResponsesAPI") private var openAIForceResponsesAPI = false
     @AppStorage("quickPills") private var quickPillsData: String = ""
     @State private var availableTools: [ToolItem] = []
     @State private var isLoadingTools = false
@@ -797,6 +798,15 @@ struct ChatSettingsView: View {
                     .scaledFont(size: 12, weight: .medium)
                     .foregroundStyle(theme.textTertiary)
                     .listRowSeparator(.hidden)
+            }
+
+            Section {
+                Toggle("强制使用 Responses API", isOn: $openAIForceResponsesAPI)
+                    .tint(theme.brandPrimary)
+            } header: {
+                Text("OpenAI 兼容")
+            } footer: {
+                Text("开启后，OpenAI 兼容站点的聊天、附件、函数工具和工具续接统一使用 /responses。关闭后恢复 /chat/completions；仅 Responses 支持的托管工具仍会使用 /responses。")
             }
 
             Section {

@@ -7558,9 +7558,7 @@ final class ChatViewModel {
                             }
                         }
                     } else {
-                        let sseStream = try await manager.sendPreferredOpenAIStreaming(
-                            request: request
-                        )
+                        let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
 
                         for try await event in sseStream {
                             if Task.isCancelled { break }
@@ -10650,9 +10648,7 @@ final class ChatViewModel {
                 do {
                     var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
                     await self.populateCommonRequestFields(&request)
-                    let sseStream = try await manager.sendPreferredOpenAIStreaming(
-                        request: request
-                    )
+                    let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
 
                     for try await event in sseStream {
                         if Task.isCancelled { break }
@@ -12171,10 +12167,14 @@ final class ChatViewModel {
         private var order: [Int] = []
         private var assignedIdsByIndex: [Int: String] = [:]
         private var idCounts: [String: Int] = [:]
+        private var responsesIndexByItemID: [String: Int] = [:]
+        private var nextResponsesSyntheticIndex = 10_000
         private(set) var sawToolFinish = false
 
         func absorb(_ event: SSEEvent) {
             guard case .json(let json) = event else { return }
+
+            absorbResponsesFunctionCall(json)
 
             if let choices = json["choices"] as? [[String: Any]] {
                 for choice in choices {
@@ -12193,6 +12193,73 @@ final class ChatViewModel {
 
             absorbToolCalls(json["tool_calls"], replaceArguments: true)
             absorbAnthropicToolUse(json)
+        }
+
+        private func absorbResponsesFunctionCall(_ json: [String: Any]) {
+            let type = Self.stringValue(json["type"]) ?? ""
+            switch type {
+            case "response.output_item.added", "response.output_item.done":
+                guard let item = json["item"] as? [String: Any],
+                      Self.stringValue(item["type"]) == "function_call" else {
+                    return
+                }
+                let itemID = Self.stringValue(item["id"])
+                    ?? Self.stringValue(json["item_id"])
+                    ?? ""
+                let index = responsesIndex(itemID: itemID, outputIndex: json["output_index"])
+                var call = item
+                call["index"] = index
+                if let callID = Self.stringValue(item["call_id"]), !callID.isEmpty {
+                    call["id"] = callID
+                }
+                absorbToolCalls(call, replaceArguments: true)
+                if type == "response.output_item.done" { sawToolFinish = true }
+
+            case "response.function_call_arguments.delta":
+                let itemID = Self.stringValue(json["item_id"]) ?? ""
+                let index = responsesIndex(itemID: itemID, outputIndex: json["output_index"])
+                let call: [String: Any] = [
+                    "index": index,
+                    "arguments": Self.stringValue(json["delta"]) ?? ""
+                ]
+                absorbToolCalls(call, replaceArguments: false)
+
+            case "response.function_call_arguments.done":
+                let itemID = Self.stringValue(json["item_id"]) ?? ""
+                let index = responsesIndex(itemID: itemID, outputIndex: json["output_index"])
+                let call: [String: Any] = [
+                    "index": index,
+                    "arguments": Self.stringValue(json["arguments"]) ?? "{}"
+                ]
+                absorbToolCalls(call, replaceArguments: true)
+                sawToolFinish = true
+
+            case "response.completed":
+                if let response = json["response"] as? [String: Any],
+                   let output = response["output"] as? [[String: Any]] {
+                    for (offset, item) in output.enumerated()
+                    where Self.stringValue(item["type"]) == "function_call" {
+                        var call = item
+                        call["index"] = offset
+                        if let callID = Self.stringValue(item["call_id"]), !callID.isEmpty {
+                            call["id"] = callID
+                        }
+                        absorbToolCalls(call, replaceArguments: true)
+                        sawToolFinish = true
+                    }
+                }
+
+            default:
+                break
+            }
+        }
+
+        private func responsesIndex(itemID: String, outputIndex: Any?) -> Int {
+            if let existing = responsesIndexByItemID[itemID], !itemID.isEmpty { return existing }
+            let index = Self.intValue(outputIndex) ?? nextResponsesSyntheticIndex
+            if Self.intValue(outputIndex) == nil { nextResponsesSyntheticIndex += 1 }
+            if !itemID.isEmpty { responsesIndexByItemID[itemID] = index }
+            return index
         }
 
         func completedCalls() -> [LocalAlpineNativeToolCall] {
@@ -17056,6 +17123,18 @@ final class ChatViewModel {
             }
         }
 
+        // Responses API emits function calls as output items rather than the
+        // Chat Completions `tool_calls` array. Surface the same live status so
+        // native tool turns retain their normal UI feedback in forced mode.
+        if ["response.output_item.added", "response.output_item.done"].contains(payload["type"] as? String),
+           let item = payload["item"] as? [String: Any],
+           item["type"] as? String == "function_call",
+           let name = item["name"] as? String,
+           !name.isEmpty {
+            appendStatusUpdate(id: assistantMessageId,
+                status: ChatStatusUpdate(action: name, description: "Calling \(name)…", done: false))
+        }
+
         // Top-level sources
         if let rawSources = payload["sources"] as? [[String: Any]]
             ?? payload["citations"] as? [[String: Any]]
@@ -18985,6 +19064,7 @@ final class ChatViewModel {
                 return images
             }
         }
+
         if !images.isEmpty {
             return images
         }
