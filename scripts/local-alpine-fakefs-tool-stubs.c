@@ -10,6 +10,8 @@ static void default_die_handler(const char *msg) {
 
 void (*die_handler)(const char *msg) = default_die_handler;
 
+int g_lock_slow_trace = 0;
+
 void ish_vprintk(const char *msg, va_list args) {
     vfprintf(stderr, msg, args);
 }
