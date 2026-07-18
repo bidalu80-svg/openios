@@ -964,9 +964,8 @@ actor LocalAlpineAgentService {
 
         let uniqueCommands = Self.deduplicatedCommands(preparedCommands, defaultCWD: defaultCWD)
         let duplicateCount = max(0, preparedCommands.count - uniqueCommands.count)
-        let (singleStepCommands, deferredStepCount) = Self.commandsForSingleAgentStep(uniqueCommands)
-        let trimmedCommands = Array(singleStepCommands.prefix(maxCommandsPerResponse))
-        let skippedCount = max(0, singleStepCommands.count - trimmedCommands.count)
+        let trimmedCommands = Array(uniqueCommands.prefix(maxCommandsPerResponse))
+        let skippedCount = max(0, uniqueCommands.count - trimmedCommands.count)
         let toolRunId = UUID().uuidString
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var writtenFiles: [LocalAlpineWrittenFile] = []
@@ -1426,10 +1425,6 @@ actor LocalAlpineAgentService {
             lines.append("- 已跳过 \(skippedCount) 条多余命令，避免一次执行过多。")
             modelLines.append("- 已跳过 \(skippedCount) 条多余命令，避免一次执行过多。")
         }
-        if deferredStepCount > 0 {
-            lines.append("- 已暂缓 \(deferredStepCount) 条后续命令，按单步 agent 规则等待本轮观察结果后再继续。")
-            modelLines.append("- 已暂缓 \(deferredStepCount) 条后续命令，按单步 agent 规则等待本轮观察结果后再继续。")
-        }
         if skippedUnsafeShellWriteCount > 0 {
             lines.append("- 已跳过 \(skippedUnsafeShellWriteCount) 条被结构化写入覆盖的 shell 文本写代码命令，避免 heredoc/重定向破坏源码缩进。")
             modelLines.append("- 已跳过 \(skippedUnsafeShellWriteCount) 条被结构化写入覆盖的 shell 文本写代码命令，避免 heredoc/重定向破坏源码缩进。")
@@ -1487,38 +1482,6 @@ actor LocalAlpineAgentService {
             return false
         }
         return (filtered, skippedCount)
-    }
-
-    private nonisolated static func commandsForSingleAgentStep(
-        _ commands: [LocalAlpineAgentCommand]
-    ) -> ([LocalAlpineAgentCommand], Int) {
-        var accepted: [LocalAlpineAgentCommand] = []
-        var didAcceptShellExecution = false
-        var deferredCount = 0
-
-        for command in commands {
-            if didAcceptShellExecution {
-                deferredCount += 1
-                continue
-            }
-
-            if let newWriteTargets = pureStructuredWriteTargets(command), !newWriteTargets.isEmpty {
-                accepted.removeAll { previous in
-                    guard let previousTargets = pureStructuredWriteTargets(previous),
-                          !previousTargets.isEmpty else {
-                        return false
-                    }
-                    return previousTargets.isSubset(of: newWriteTargets)
-                }
-            }
-
-            accepted.append(command)
-            if commandHasShellExecution(command) {
-                didAcceptShellExecution = true
-            }
-        }
-
-        return (accepted, deferredCount)
     }
 
     private nonisolated static func commandHasShellExecution(_ command: LocalAlpineAgentCommand) -> Bool {

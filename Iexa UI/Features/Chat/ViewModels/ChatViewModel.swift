@@ -962,6 +962,10 @@ final class ChatViewModel {
             ?? localAlpinePendingToolStatusByMessageId[messageId]
             ?? localAlpineLastLiveToolStatusByMessageId[messageId]
         updateLocalAlpineToolCallMetadata(messageId: messageId, calls: finalCalls)
+        let mirroredParentId = localAlpineMirroredParentId(for: messageId)
+        if let mirroredParentId {
+            updateLocalAlpineToolCallMetadata(messageId: mirroredParentId, calls: finalCalls)
+        }
         localAlpineToolEventFlushTasks[messageId]?.cancel()
         localAlpineToolEventFlushTasks.removeValue(forKey: messageId)
         localAlpineActiveRunIdsByMessageId.removeValue(forKey: messageId)
@@ -970,6 +974,22 @@ final class ChatViewModel {
         localAlpinePendingToolCallsByMessageId.removeValue(forKey: messageId)
         localAlpinePendingToolStatusByMessageId.removeValue(forKey: messageId)
         localAlpineLastToolEventFlushAtByMessageId.removeValue(forKey: messageId)
+        if let mirroredParentId {
+            localAlpineToolEventFlushTasks[mirroredParentId]?.cancel()
+            localAlpineToolEventFlushTasks.removeValue(forKey: mirroredParentId)
+            localAlpineActiveRunIdsByMessageId.removeValue(forKey: mirroredParentId)
+            localAlpineLiveToolCallsByMessageId.removeValue(forKey: mirroredParentId)
+            localAlpineLastLiveToolStatusByMessageId.removeValue(forKey: mirroredParentId)
+            localAlpinePendingToolCallsByMessageId.removeValue(forKey: mirroredParentId)
+            localAlpinePendingToolStatusByMessageId.removeValue(forKey: mirroredParentId)
+            localAlpineLastToolEventFlushAtByMessageId.removeValue(forKey: mirroredParentId)
+            postLocalAlpineLiveToolState(
+                messageId: mirroredParentId,
+                cleared: true,
+                finalCalls: finalCalls,
+                finalStatus: finalStatus
+            )
+        }
         postLocalAlpineLiveToolState(
             messageId: messageId,
             cleared: true,
@@ -25842,7 +25862,17 @@ final class ChatViewModel {
         await persistLocalConversationIfNeeded()
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
-        if repeatedLocalAlpineErrorShouldStop(after: result, parentId: resultMessageId) {
+        let latestUserText = conversation?.messages.last(where: {
+            $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+        })?.content
+        if result.interactiveRequest == nil,
+           !localAlpineAgentStopRequested,
+           Self.localAlpineInspectionResultCanEndWithoutFinalSummary(
+               result,
+               latestUserText: latestUserText
+           ) {
+            localAlpineAgentStopRequested = true
+        } else if repeatedLocalAlpineErrorShouldStop(after: result, parentId: resultMessageId) {
             localAlpineAgentStopRequested = true
         } else if repeatedLocalAlpineNoProgressShouldStop(after: result, parentId: resultMessageId) {
             localAlpineAgentStopRequested = true
@@ -25851,9 +25881,7 @@ final class ChatViewModel {
                   Self.localAlpineToolCallsShowCompletedGoal(
                       result.toolCalls,
                       commandResults: result.commandResults,
-                      latestUserText: conversation?.messages.last(where: {
-                          $0.role == .user && !Self.isLocalAlpineAgentResult($0)
-                      })?.content
+                      latestUserText: latestUserText
                   ) {
             if !scheduleLocalAlpineFinalSummary(after: resultMessageId) {
                 localAlpineAgentStopRequested = true
@@ -26725,6 +26753,25 @@ final class ChatViewModel {
             return false
         }
         return localAlpineCommandsAreInspectionOnly(commandText)
+    }
+
+    private static func localAlpineInspectionResultCanEndWithoutFinalSummary(
+        _ result: LocalAlpineAgentResult,
+        latestUserText: String?
+    ) -> Bool {
+        guard let latestUserText,
+              localAlpineUserRequestIsInspectionOnly(latestUserText),
+              result.interactiveRequest == nil,
+              result.editedFileCount == 0,
+              result.writtenFiles.isEmpty,
+              !result.hadFailure,
+              !result.commandResults.isEmpty else {
+            return false
+        }
+        return localAlpineObservationIsInspectionOnly(
+            toolCalls: result.toolCalls,
+            commandResults: result.commandResults
+        )
     }
 
     private static func isLocalAlpineGoalActionRequest(_ text: String) -> Bool {
@@ -28129,21 +28176,36 @@ final class ChatViewModel {
             messageId: messageId,
             calls: localAlpineLiveToolCallsByMessageId[messageId] ?? []
         )
-        if let parentId = conversation?.messages
-            .first(where: { $0.id == messageId })?
-            .metadata?["iexa_local_alpine_mirrored_parent"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !parentId.isEmpty,
-           conversation?.messages.first(where: { $0.id == parentId })?.role == .assistant {
+        if let parentId = localAlpineMirroredParentId(for: messageId) {
             let calls = localAlpineLiveToolCallsByMessageId[messageId] ?? []
+            if localAlpineLiveToolCallsByMessageId[parentId] != calls {
+                localAlpineLiveToolCallsByMessageId[parentId] = calls
+            }
+            if let status = localAlpineLastLiveToolStatusByMessageId[messageId],
+               !Self.sameLiveToolStatus(localAlpineLastLiveToolStatusByMessageId[parentId], status) {
+                localAlpineLastLiveToolStatusByMessageId[parentId] = status
+            }
+            localAlpineLastToolEventFlushAtByMessageId[parentId] = Date()
             updateLocalAlpineToolCallMetadata(messageId: parentId, calls: calls)
             postLocalAlpineLiveToolState(
                 messageId: parentId,
                 finalCalls: calls,
-                finalStatus: localAlpineLastLiveToolStatusByMessageId[messageId]
+                finalStatus: localAlpineLastLiveToolStatusByMessageId[parentId]
             )
         }
         postLocalAlpineLiveToolState(messageId: messageId)
+    }
+
+    private func localAlpineMirroredParentId(for messageId: String) -> String? {
+        guard let parentId = conversation?.messages
+            .first(where: { $0.id == messageId })?
+            .metadata?["iexa_local_alpine_mirrored_parent"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !parentId.isEmpty,
+              conversation?.messages.first(where: { $0.id == parentId })?.role == .assistant else {
+            return nil
+        }
+        return parentId
     }
 
     private static func isReasoningLikeLocalAlpineToolCall(_ call: LocalAlpineToolCall) -> Bool {

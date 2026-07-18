@@ -3531,7 +3531,7 @@ actor LocalAlpineTerminalService {
         iexa_refresh_toolchain_env
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-07-18.1
+          _iexa_bootstrap_version=2026-07-18.2
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
           if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ -x "$_iexa_bootstrap_bin/nslookup" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:${PATH:-}"
@@ -3826,6 +3826,14 @@ actor LocalAlpineTerminalService {
           printf '/bin/sh: %s: not found\n' "$_iexa_dns_tool" >&2
           exit 127
         fi
+        case "${1:-}" in
+          --version|-version|version|-v|--help|-h)
+            printf '%s is available through Iexa Local Alpine DNS wrapper.\n' "$_iexa_dns_tool"
+            printf 'Real command: %s\n' "$_iexa_dns_real"
+            printf 'DNS queries are bounded to 120 seconds.\n'
+            exit 0
+            ;;
+        esac
         if command -v timeout >/dev/null 2>&1; then
           timeout 120 "$_iexa_dns_real" "$@"
           _iexa_dns_status=$?
