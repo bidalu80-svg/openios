@@ -28170,6 +28170,7 @@ final class ChatViewModel {
             if !Self.sameLiveToolStatus(localAlpineLastLiveToolStatusByMessageId[messageId], pendingStatus) {
                 localAlpineLastLiveToolStatusByMessageId[messageId] = pendingStatus
             }
+            applyLocalAlpineLiveToolStatusToMessage(messageId: messageId, status: pendingStatus)
         }
         localAlpineLastToolEventFlushAtByMessageId[messageId] = Date()
         updateLocalAlpineToolCallMetadata(
@@ -28184,6 +28185,7 @@ final class ChatViewModel {
             if let status = localAlpineLastLiveToolStatusByMessageId[messageId],
                !Self.sameLiveToolStatus(localAlpineLastLiveToolStatusByMessageId[parentId], status) {
                 localAlpineLastLiveToolStatusByMessageId[parentId] = status
+                applyLocalAlpineLiveToolStatusToMessage(messageId: parentId, status: status)
             }
             localAlpineLastToolEventFlushAtByMessageId[parentId] = Date()
             updateLocalAlpineToolCallMetadata(messageId: parentId, calls: calls)
@@ -28194,6 +28196,29 @@ final class ChatViewModel {
             )
         }
         postLocalAlpineLiveToolState(messageId: messageId)
+    }
+
+    private func applyLocalAlpineLiveToolStatusToMessage(messageId: String, status: ChatStatusUpdate) {
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else {
+            return
+        }
+        var history = conversation?.messages[index].statusHistory ?? []
+        if let last = history.last,
+           Self.sameLiveToolStatus(last, status) {
+            history[history.count - 1] = status
+        } else {
+            history.append(status)
+        }
+        if history.count > 60 {
+            history = Array(history.suffix(60))
+        }
+        conversation?.messages[index].statusHistory = history
+        conversation?.history.updateNode(id: messageId) { node in
+            node.statusHistory = history
+        }
+        if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
+            streamingStore.setStatusHistory(history)
+        }
     }
 
     private func localAlpineMirroredParentId(for messageId: String) -> String? {
