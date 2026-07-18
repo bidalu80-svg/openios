@@ -20,6 +20,11 @@ struct WebSearchConfig: Codable, Sendable {
     var searxngQueryURL: String
     var searxngLanguage: String
 
+    // YaCy
+    var yacyQueryURL: String
+    var yacyUsername: String
+    var yacyPassword: String
+
     // Google PSE
     var googlePSEAPIKey: String
     var googlePSEEngineID: String
@@ -136,6 +141,9 @@ struct WebSearchConfig: Codable, Sendable {
         case trustProxyEnvironment = "WEB_SEARCH_TRUST_ENV"
         case searxngQueryURL = "SEARXNG_QUERY_URL"
         case searxngLanguage = "SEARXNG_LANGUAGE"
+        case yacyQueryURL = "YACY_QUERY_URL"
+        case yacyUsername = "YACY_USERNAME"
+        case yacyPassword = "YACY_PASSWORD"
         case googlePSEAPIKey = "GOOGLE_PSE_API_KEY"
         case googlePSEEngineID = "GOOGLE_PSE_ENGINE_ID"
         case braveSearchAPIKey = "BRAVE_SEARCH_API_KEY"
@@ -205,6 +213,9 @@ struct WebSearchConfig: Codable, Sendable {
         trustProxyEnvironment = (try? c.decode(Bool.self, forKey: .trustProxyEnvironment)) ?? false
         searxngQueryURL = (try? c.decode(String.self, forKey: .searxngQueryURL)) ?? ""
         searxngLanguage = (try? c.decode(String.self, forKey: .searxngLanguage)) ?? ""
+        yacyQueryURL = (try? c.decode(String.self, forKey: .yacyQueryURL)) ?? ""
+        yacyUsername = (try? c.decode(String.self, forKey: .yacyUsername)) ?? ""
+        yacyPassword = (try? c.decode(String.self, forKey: .yacyPassword)) ?? ""
         googlePSEAPIKey = (try? c.decode(String.self, forKey: .googlePSEAPIKey)) ?? ""
         googlePSEEngineID = (try? c.decode(String.self, forKey: .googlePSEEngineID)) ?? ""
         braveSearchAPIKey = (try? c.decode(String.self, forKey: .braveSearchAPIKey)) ?? ""
@@ -266,6 +277,7 @@ struct WebSearchConfig: Codable, Sendable {
         searchConcurrentRequests = 10; fetchPageContentLengthLimit = 0; domainFilterList = []
         bypassEmbeddingAndRetrieval = false; bypassWebLoader = false; trustProxyEnvironment = false
         searxngQueryURL = ""; searxngLanguage = ""
+        yacyQueryURL = ""; yacyUsername = ""; yacyPassword = ""
         googlePSEAPIKey = ""; googlePSEEngineID = ""
         braveSearchAPIKey = ""; kagiSearchAPIKey = ""; mojeekSearchAPIKey = ""; bochaSearchAPIKey = ""
         serpstackAPIKey = ""; serpstackHTTPS = true; serperAPIKey = ""; serplyAPIKey = ""

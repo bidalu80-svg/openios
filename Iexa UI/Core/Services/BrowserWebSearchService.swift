@@ -180,6 +180,67 @@ final class BrowserWebSearchService: NSObject {
         )
     }
 
+    func responseFromConfiguredSearchItems(
+        _ rawItems: [WebSearchResultItem],
+        originalQuery: String?,
+        provider: String
+    ) async -> WebSearchResponse {
+        var seenLinks = Set<String>()
+        var finalItems: [WebSearchResultItem] = []
+
+        for item in rawItems {
+            guard let link = item.link?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !link.isEmpty,
+                  seenLinks.insert(link.lowercased()).inserted,
+                  let url = URL(string: link),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  !Self.isBlockedDocumentURL(url) else {
+                continue
+            }
+            finalItems.append(item)
+            if finalItems.count >= 8 { break }
+        }
+
+        var docs = await fetchDocuments(for: Array(finalItems.prefix(4)))
+        if let firstLink = finalItems.compactMap(\.link).first,
+           let url = URL(string: firstLink),
+           ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+           await load(url: url, timeout: 8) {
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            let snapshot = await evaluateFullPageSnapshot(maxScrolls: 14)
+            let thumbnail = await capturePageThumbnail(prefix: "configured_search")
+            if let index = finalItems.firstIndex(where: { $0.link == firstLink }) {
+                if let snapshot, finalItems[index].snippet?.isEmpty != false {
+                    finalItems[index].snippet = String(snapshot.text.prefix(260))
+                }
+                if let thumbnail {
+                    finalItems[index].thumbnailURL = thumbnail.absoluteString
+                }
+            }
+            if let snapshot,
+               !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let doc = Self.fullPageDocument(
+                    from: snapshot,
+                    fallbackTitle: finalItems.first(where: { $0.link == firstLink })?.title,
+                    fallbackURL: firstLink,
+                    provider: provider
+                )
+                docs.removeAll { Self.documentMatches($0, url: firstLink, alternateURL: snapshot.url) }
+                docs.insert(doc, at: 0)
+            }
+        }
+
+        guard !finalItems.isEmpty || !docs.isEmpty else { return WebSearchResponse() }
+        return WebSearchResponse(
+            status: true,
+            collectionNames: [provider],
+            filenames: finalItems.compactMap(\.link),
+            items: finalItems,
+            docs: docs,
+            loadedCount: docs.count
+        )
+    }
+
     func executeNativeBrowserTool(action rawAction: String, call: [String: Any]) async -> [String: Any] {
         let action = rawAction
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -7950,14 +8011,6 @@ final class BrowserWebSearchService: NSObject {
             ),
             SearchPage(url: "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)", timeout: 5, settleDelay: 350_000_000, resultLimit: 3),
             SearchPage(url: "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)", timeout: 5, settleDelay: 350_000_000, resultLimit: 2),
-            SearchPage(
-                url: needsFreshness
-                    ? "https://duckduckgo.com/html/?q=\(encoded)&df=d"
-                    : "https://duckduckgo.com/html/?q=\(encoded)",
-                timeout: 5,
-                settleDelay: 350_000_000,
-                resultLimit: 2
-            ),
             SearchPage(url: "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)", timeout: 6, settleDelay: 450_000_000, resultLimit: 1)
         ]
         if needsFreshness {

@@ -29,6 +29,7 @@ final class AdminWebSearchViewModel {
     // MARK: - Visibility toggles for secure fields
 
     var showSearxngKey = false
+    var showYacyPassword = false
     var showGooglePSEKey = false
     var showBraveKey = false
     var showKagiKey = false

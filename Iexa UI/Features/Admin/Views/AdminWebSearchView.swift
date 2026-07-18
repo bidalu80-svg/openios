@@ -182,6 +182,11 @@ struct AdminWebSearchView: View {
             inlineTextFieldRow(title: "SearXNG Query URL", placeholder: "http://...", text: $viewModel.retrievalConfig.web.searxngQueryURL)
             inlineTextFieldRow(title: "Language", placeholder: "en", text: $viewModel.retrievalConfig.web.searxngLanguage)
 
+        case "yacy":
+            inlineTextFieldRow(title: "YaCy Query URL", placeholder: "http://host:8090", text: $viewModel.retrievalConfig.web.yacyQueryURL)
+            inlineTextFieldRow(title: "Username", placeholder: "Optional", text: $viewModel.retrievalConfig.web.yacyUsername)
+            inlineSecureRow(title: "Password", placeholder: "Optional", text: $viewModel.retrievalConfig.web.yacyPassword, isVisible: viewModel.showYacyPassword) { viewModel.showYacyPassword.toggle() }
+
         case "google_pse":
             inlineSecureRow(title: "API Key", placeholder: "Enter Google PSE API Key", text: $viewModel.retrievalConfig.web.googlePSEAPIKey, isVisible: viewModel.showGooglePSEKey) { viewModel.showGooglePSEKey.toggle() }
             inlineTextFieldRow(title: "Engine ID", placeholder: "Enter Engine ID", text: $viewModel.retrievalConfig.web.googlePSEEngineID)

@@ -21095,7 +21095,7 @@ final class ChatViewModel {
         queries: [String],
         assistantMessageId: String
     ) async throws -> (result: WebSearchResponse, queries: [String]) {
-        let result = try await ClientWebSearchService().search(queries: queries, originalQuery: query)
+        let result = try await ClientWebSearchService(apiClient: manager?.apiClient).search(queries: queries, originalQuery: query)
         return (result, queries)
     }
 
