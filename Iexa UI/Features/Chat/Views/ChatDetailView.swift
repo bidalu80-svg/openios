@@ -11957,6 +11957,11 @@ private struct AgentToolStepPill: View {
             Capsule(style: .continuous)
                 .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.78))
         )
+        .agentRunningCapsuleSweep(
+            isActive: call.isRunning && !call.failed,
+            tint: tint,
+            cornerRadius: 22.5
+        )
         .overlay(
             Capsule(style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.24 : 0.42), lineWidth: 0.7)
@@ -12185,7 +12190,8 @@ private struct AgentStepFloatingBarHost: View {
 
     private var displayAnimationKey: String {
         guard let displayItem else { return "none" }
-        return "\(displayItem.id)|\(displayItem.currentStep?.id ?? "")|\(displayItem.totalStepCount)|\(displayItem.hasFailure)"
+        let currentFailed = displayItem.currentStep?.failed == true
+        return "\(displayItem.id)|\(displayItem.currentStep?.id ?? "")|\(displayItem.totalStepCount)|\(currentFailed)"
     }
 
     var body: some View {
@@ -12961,6 +12967,63 @@ private struct AgentToolResourceSnapshot: Equatable {
     }
 }
 
+private extension View {
+    @ViewBuilder
+    func agentRunningCapsuleSweep(isActive: Bool, tint: Color, cornerRadius: CGFloat) -> some View {
+        if isActive {
+            self.overlay {
+                AgentRunningCapsuleSweep(tint: tint, cornerRadius: cornerRadius)
+            }
+        } else {
+            self
+        }
+    }
+}
+
+private struct AgentRunningCapsuleSweep: View {
+    let tint: Color
+    let cornerRadius: CGFloat
+
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: reduceMotion ? 1 : 1.0 / 60.0)) { timeline in
+            GeometryReader { geometry in
+                let width = max(geometry.size.width, 1)
+                let height = max(geometry.size.height, 1)
+                let sweepWidth = max(width * 0.38, 76)
+                let period: TimeInterval = 1.55
+                let progress = reduceMotion ? 0.55 : timeline.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: period) / period
+                let x = -sweepWidth + CGFloat(progress) * (width + sweepWidth * 2)
+
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0.00),
+                                .init(color: .white.opacity(theme.isDark ? 0.04 : 0.08), location: 0.20),
+                                .init(color: .white.opacity(theme.isDark ? 0.24 : 0.40), location: 0.48),
+                                .init(color: tint.opacity(theme.isDark ? 0.18 : 0.22), location: 0.62),
+                                .init(color: .white.opacity(theme.isDark ? 0.07 : 0.12), location: 0.78),
+                                .init(color: .clear, location: 1.00),
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: sweepWidth, height: height)
+                    .blendMode(theme.isDark ? .screen : .plusLighter)
+                    .offset(x: x)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 private struct AgentActivityStepPill: View, Equatable {
     let step: AgentActivityStep
     let onStopRunningStep: (() -> Void)?
@@ -13099,6 +13162,11 @@ private struct AgentActivityStepPill: View, Equatable {
         .padding(.trailing, canStop ? 8 : 12)
         .frame(height: 34)
         .background(fill, in: Capsule(style: .continuous))
+        .agentRunningCapsuleSweep(
+            isActive: step.isRunning && !step.failed,
+            tint: tint,
+            cornerRadius: 17
+        )
         .overlay(
             Capsule(style: .continuous)
                 .strokeBorder(theme.cardBorder.opacity(theme.isDark ? 0.20 : 0.24), lineWidth: 0.6)
@@ -13332,6 +13400,8 @@ private struct LocalAlpineLazyFilePreview: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
 
+    private static let previewSampleByteLimit = 180_000
+
     private var displayName: String {
         let trimmed = fileName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmed.isEmpty { return trimmed }
@@ -13357,7 +13427,7 @@ private struct LocalAlpineLazyFilePreview: View {
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("正在读取完整文件...")
+                    Text("正在读取文件预览...")
                         .scaledFont(size: 13, weight: .semibold)
                         .foregroundStyle(theme.textSecondary)
                     Spacer(minLength: 0)
@@ -13412,7 +13482,7 @@ private struct LocalAlpineLazyFilePreview: View {
             }
             Spacer(minLength: 0)
             if loadedCode != nil {
-                Text("完整")
+                Text("预览")
                     .scaledFont(size: 11, weight: .bold)
                     .foregroundStyle(theme.success)
             }
@@ -13454,19 +13524,40 @@ private struct LocalAlpineLazyFilePreview: View {
         guard shouldLoad else { return }
 
         do {
-            let data = try await LocalAlpineTerminalService.shared.readFile(path: path)
-            let content = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+            let sample = try await LocalAlpineTerminalService.shared.readFileSample(
+                path: path,
+                maxBytes: Self.previewSampleByteLimit
+            )
+            let content = String(data: sample.data, encoding: .utf8) ?? String(decoding: sample.data, as: UTF8.self)
+            let displayContent = Self.displayContent(
+                content: content,
+                path: path,
+                isSampled: sample.isTruncated
+            )
+            let fullSize = sample.fullSize.map { Int(min($0, Int64(Int.max))) } ?? sample.data.count
             await MainActor.run {
-                loadedCode = content.isEmpty ? " " : content
-                loadedByteCount = data.count
+                loadedCode = displayContent
+                loadedByteCount = fullSize
                 isLoading = false
             }
         } catch {
             await MainActor.run {
-                errorMessage = "无法读取完整文件，正在显示步骤预览"
+                errorMessage = "无法读取文件预览，正在显示步骤预览"
                 isLoading = false
             }
         }
+    }
+
+    private static func displayContent(content: String, path: String, isSampled: Bool) -> String {
+        let normalized = content.isEmpty ? " " : content
+        guard isSampled else { return normalized }
+        return """
+        \(normalized)
+
+        …
+        已显示文件预览。完整内容保留在：
+        \(path)
+        """
     }
 }
 
@@ -13483,9 +13574,15 @@ private struct LocalAlpineFullTerminalOutputPreview: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
 
+    private static let previewSampleByteLimit = 180_000
+
     private var output: String {
         if let loadedOutput { return loadedOutput }
         return fallbackOutput
+    }
+
+    private var hasFallbackOutput: Bool {
+        !fallbackOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var terminalText: String {
@@ -13507,7 +13604,7 @@ private struct LocalAlpineFullTerminalOutputPreview: View {
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("正在读取完整终端输出...")
+                    Text("正在读取终端输出预览...")
                         .scaledFont(size: 13, weight: .semibold)
                         .foregroundStyle(theme.textSecondary)
                     Spacer(minLength: 0)
@@ -13552,11 +13649,12 @@ private struct LocalAlpineFullTerminalOutputPreview: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task(id: path) {
-            await loadFullOutputIfNeeded()
+            await loadOutputPreviewIfNeeded()
         }
     }
 
-    private func loadFullOutputIfNeeded() async {
+    private func loadOutputPreviewIfNeeded() async {
+        guard !hasFallbackOutput else { return }
         let shouldLoad = await MainActor.run { () -> Bool in
             guard !isLoading, loadedOutput == nil else { return false }
             isLoading = true
@@ -13566,19 +13664,40 @@ private struct LocalAlpineFullTerminalOutputPreview: View {
         guard shouldLoad else { return }
 
         do {
-            let data = try await LocalAlpineTerminalService.shared.readFile(path: path)
-            let content = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+            let sample = try await LocalAlpineTerminalService.shared.readFileSample(
+                path: path,
+                maxBytes: Self.previewSampleByteLimit
+            )
+            let content = String(data: sample.data, encoding: .utf8) ?? String(decoding: sample.data, as: UTF8.self)
+            let displayOutput = Self.displayOutput(
+                content: content,
+                path: path,
+                isSampled: sample.isTruncated
+            )
+            let fullSize = sample.fullSize.map { Int(min($0, Int64(Int.max))) } ?? sample.data.count
             await MainActor.run {
-                loadedOutput = content.isEmpty ? " " : content
-                loadedByteCount = data.count
+                loadedOutput = displayOutput
+                loadedByteCount = fullSize
                 isLoading = false
             }
         } catch {
             await MainActor.run {
-                errorMessage = "无法读取完整输出，正在显示前台预览"
+                errorMessage = "无法读取输出预览，正在显示步骤预览"
                 isLoading = false
             }
         }
+    }
+
+    private static func displayOutput(content: String, path: String, isSampled: Bool) -> String {
+        let normalized = content.isEmpty ? " " : content
+        guard isSampled else { return normalized }
+        return """
+        \(normalized)
+
+        …
+        已显示终端输出预览。完整输出保留在：
+        \(path)
+        """
     }
 }
 
@@ -14068,20 +14187,29 @@ private struct AgentLazyOutputPreview: View {
         case plain
     }
 
-    let lines: [String]
+    let sourceText: String
     let style: Style
     let isRunning: Bool
 
     @Environment(\.theme) private var theme
+    @State private var visibleLineLimit: Int = Self.initialVisibleLineLimit
+
+    private static let initialVisibleLineLimit = 520
+    private static let linePageSize = 520
 
     init(text: String, style: Style, isRunning: Bool = false) {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.lines = Self.softWrappedLines(normalized.isEmpty ? "（无内容）" : normalized)
+        self.sourceText = normalized.isEmpty ? "（无内容）" : normalized
         self.style = style
         self.isRunning = isRunning
     }
 
+    private var visibleOutput: (lines: [String], hasMore: Bool) {
+        Self.softWrappedLines(sourceText, maxRenderedLines: visibleLineLimit)
+    }
+
     var body: some View {
+        let output = visibleOutput
         VStack(alignment: .leading, spacing: isTerminal ? 9 : 2) {
             if isTerminal {
                 HStack(spacing: 8) {
@@ -14102,13 +14230,38 @@ private struct AgentLazyOutputPreview: View {
             }
 
             LazyVStack(alignment: .leading, spacing: 2) {
-                ForEach(lines.indices, id: \.self) { index in
-                    Text(lines[index])
+                ForEach(output.lines.indices, id: \.self) { index in
+                    Text(output.lines[index])
                         .font(font)
                         .foregroundStyle(foreground)
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                if output.hasMore {
+                    Button {
+                        Haptics.play(.light)
+                        withAnimation(MicroAnimation.snappy) {
+                            visibleLineLimit += Self.linePageSize
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "chevron.down.circle.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("继续加载更多输出")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            Text("已显示 \(output.lines.count) 行")
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
+                                .foregroundStyle(loadMoreSecondaryForeground)
+                        }
+                        .foregroundStyle(loadMoreForeground)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 10)
+                        .background(loadMoreBackground, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 8)
                 }
             }
         }
@@ -14116,6 +14269,9 @@ private struct AgentLazyOutputPreview: View {
         .padding(style == .terminal ? 18 : 16)
         .background(background)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onChange(of: sourceText) { _, _ in
+            visibleLineLimit = Self.initialVisibleLineLimit
+        }
     }
 
     private var isTerminal: Bool {
@@ -14150,26 +14306,87 @@ private struct AgentLazyOutputPreview: View {
         }
     }
 
-    private static func softWrappedLines(_ text: String, maxLineLength: Int = 240) -> [String] {
-        var rendered: [String] = []
-        rendered.reserveCapacity(min(text.count / 48 + 1, 512))
+    private var loadMoreForeground: Color {
+        switch style {
+        case .terminal:
+            return Color(red: 0.44, green: 0.96, blue: 0.58)
+        case .plain:
+            return theme.brandPrimary
+        }
+    }
 
-        for rawLine in text.components(separatedBy: .newlines) {
+    private var loadMoreSecondaryForeground: Color {
+        switch style {
+        case .terminal:
+            return .white.opacity(0.54)
+        case .plain:
+            return theme.textTertiary
+        }
+    }
+
+    private var loadMoreBackground: Color {
+        switch style {
+        case .terminal:
+            return .white.opacity(0.08)
+        case .plain:
+            return theme.surfaceContainerHighest.opacity(theme.isDark ? 0.50 : 0.72)
+        }
+    }
+
+    private static func softWrappedLines(
+        _ text: String,
+        maxLineLength: Int = 240,
+        maxRenderedLines: Int
+    ) -> (lines: [String], hasMore: Bool) {
+        var rendered: [String] = []
+        rendered.reserveCapacity(min(maxRenderedLines, 512))
+
+        func appendLine(_ line: String) -> Bool {
+            guard rendered.count < maxRenderedLines else {
+                return false
+            }
+            rendered.append(line)
+            return true
+        }
+
+        func appendWrappedLine(_ rawLine: Substring) -> Bool {
             guard !rawLine.isEmpty else {
-                rendered.append(" ")
-                continue
+                guard appendLine(" ") else {
+                    return false
+                }
+                return true
             }
 
             var start = rawLine.startIndex
             while start < rawLine.endIndex {
+                guard rendered.count < maxRenderedLines else {
+                    return false
+                }
                 let end = rawLine.index(start, offsetBy: maxLineLength, limitedBy: rawLine.endIndex)
                     ?? rawLine.endIndex
                 rendered.append(String(rawLine[start..<end]))
                 start = end
             }
+            return true
         }
 
-        return rendered.isEmpty ? ["（无内容）"] : rendered
+        var lineStart = text.startIndex
+        while lineStart <= text.endIndex {
+            if let newline = text[lineStart...].firstIndex(of: "\n") {
+                guard appendWrappedLine(text[lineStart..<newline]) else {
+                    return (rendered.isEmpty ? ["（无内容）"] : rendered, true)
+                }
+                lineStart = text.index(after: newline)
+                continue
+            }
+
+            guard appendWrappedLine(text[lineStart..<text.endIndex]) else {
+                return (rendered.isEmpty ? ["（无内容）"] : rendered, true)
+            }
+            break
+        }
+
+        return (rendered.isEmpty ? ["（无内容）"] : rendered, false)
     }
 }
 
