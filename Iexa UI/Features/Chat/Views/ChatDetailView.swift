@@ -3711,8 +3711,7 @@ struct ChatDetailView: View {
         if context.hiddenMergedActivityMessageIds.contains(message.id) {
             return true
         }
-        if context.mergedActivityAnchorIds.contains(message.id),
-           hasRenderableAgentActivityCached() {
+        if context.mergedActivityAnchorIds.contains(message.id) {
             return false
         }
 
