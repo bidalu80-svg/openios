@@ -331,6 +331,7 @@ jobs:
               exit 1
             fi
           fi
+          find "External/ish-arm64-2.0.0" -type f \( -name "*.sh" -o -name "configure" \) -exec chmod +x {} +
           export IEXA_ISH_SOURCE_PATH="$PWD/External/ish-arm64-2.0.0"
           export IEXA_ISH_SOURCE_FORCE=1
           bash scripts/prepare-ish-source.sh External/ish
