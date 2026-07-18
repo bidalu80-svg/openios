@@ -1198,68 +1198,6 @@ actor LocalAlpineAgentService {
                     continue
                 }
 
-                if let warning = unsafeCodeFileWriteWarning(for: commandToExecute) {
-                    let result = LocalAlpineCommandResult(
-                        command: commandToExecute,
-                        output: warning,
-                        exitCode: 126,
-                        interactiveRequest: nil
-                    )
-                    stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
-                    modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
-                    commandResults.append(Self.commandResult(
-                        command: commandToExecute,
-                        cwd: effectiveCWD,
-                        result: result
-                    ))
-                    stopRemainingCommands = true
-                    continue
-                }
-
-                if let warning = busyBoxCompatibilityWarning(for: commandToExecute) {
-                    let result = LocalAlpineCommandResult(
-                        command: commandToExecute,
-                        output: warning,
-                        exitCode: 126,
-                        interactiveRequest: nil
-                    )
-                    stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
-                    modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
-                    commandResults.append(Self.commandResult(
-                        command: commandToExecute,
-                        cwd: effectiveCWD,
-                        result: result
-                    ))
-                    stopRemainingCommands = true
-                    continue
-                }
-
-                if let repairNote = await repairRunnableFileCompatibilityIfNeeded(
-                    for: commandToExecute,
-                    cwd: effectiveCWD
-                ) {
-                    stepLines.append(repairNote)
-                    modelStepLines.append(repairNote)
-                }
-
-                if let warning = await runnableFileCompatibilityWarning(for: commandToExecute, cwd: effectiveCWD) {
-                    let result = LocalAlpineCommandResult(
-                        command: commandToExecute,
-                        output: warning,
-                        exitCode: 126,
-                        interactiveRequest: nil
-                    )
-                    stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
-                    modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
-                    commandResults.append(Self.commandResult(
-                        command: commandToExecute,
-                        cwd: effectiveCWD,
-                        result: result
-                    ))
-                    stopRemainingCommands = true
-                    continue
-                }
-
                 let classifiedShellTool = Self.shellToolClassification(
                     for: commandToExecute,
                     fallbackName: command.shellToolName,
@@ -1274,6 +1212,90 @@ actor LocalAlpineAgentService {
                     filePaths: command.shellToolFilePaths.isEmpty ? classifiedShellTool.filePaths : command.shellToolFilePaths,
                     preferredTitle: command.preferredToolTitle
                 )
+
+                if let warning = unsafeCodeFileWriteWarning(for: commandToExecute) {
+                    await emitToolStart(context)
+                    let result = LocalAlpineCommandResult(
+                        command: commandToExecute,
+                        output: warning,
+                        exitCode: 126,
+                        interactiveRequest: nil
+                    )
+                    stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                    modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
+                    commandResults.append(Self.commandResult(
+                        command: commandToExecute,
+                        cwd: effectiveCWD,
+                        result: result
+                    ))
+                    await emitTool(Self.toolCallResult(
+                        context,
+                        exitCode: result.exitCode,
+                        outputPreview: result.output,
+                        failed: true
+                    ))
+                    stopRemainingCommands = true
+                    continue
+                }
+
+                if let warning = busyBoxCompatibilityWarning(for: commandToExecute) {
+                    await emitToolStart(context)
+                    let result = LocalAlpineCommandResult(
+                        command: commandToExecute,
+                        output: warning,
+                        exitCode: 126,
+                        interactiveRequest: nil
+                    )
+                    stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                    modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
+                    commandResults.append(Self.commandResult(
+                        command: commandToExecute,
+                        cwd: effectiveCWD,
+                        result: result
+                    ))
+                    await emitTool(Self.toolCallResult(
+                        context,
+                        exitCode: result.exitCode,
+                        outputPreview: result.output,
+                        failed: true
+                    ))
+                    stopRemainingCommands = true
+                    continue
+                }
+
+                if let repairNote = await repairRunnableFileCompatibilityIfNeeded(
+                    for: commandToExecute,
+                    cwd: effectiveCWD
+                ) {
+                    stepLines.append(repairNote)
+                    modelStepLines.append(repairNote)
+                }
+
+                if let warning = await runnableFileCompatibilityWarning(for: commandToExecute, cwd: effectiveCWD) {
+                    await emitToolStart(context)
+                    let result = LocalAlpineCommandResult(
+                        command: commandToExecute,
+                        output: warning,
+                        exitCode: 126,
+                        interactiveRequest: nil
+                    )
+                    stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
+                    modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
+                    commandResults.append(Self.commandResult(
+                        command: commandToExecute,
+                        cwd: effectiveCWD,
+                        result: result
+                    ))
+                    await emitTool(Self.toolCallResult(
+                        context,
+                        exitCode: result.exitCode,
+                        outputPreview: result.output,
+                        failed: true
+                    ))
+                    stopRemainingCommands = true
+                    continue
+                }
+
                 await emitToolStart(context)
                 if let delaySeconds = command.delaySeconds, delaySeconds > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(delaySeconds) * 1_000_000_000)

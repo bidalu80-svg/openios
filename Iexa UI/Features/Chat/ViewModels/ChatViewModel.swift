@@ -606,7 +606,7 @@ final class ChatViewModel {
     private let localAlpineAgentMaxSteps = 120
     private let localAlpineNoProgressRepeatLimit = 4
     private let localAlpineToolEventFlushInterval: TimeInterval = 0.45
-    private let localAlpineLiveToolPreviewLimit = 260
+    private let localAlpineLiveToolPreviewLimit = 6_000
     private let localAlpineLiveToolDetailLimit = 180
     private let localAlpineLiveToolCommandLimit = 420
     private static let localNativeFunctionMaxSteps = 48
@@ -9373,7 +9373,38 @@ final class ChatViewModel {
         )
         await Task.yield()
 
-        var result = await LocalAlpineTerminalService.shared.execute(command: command, cwd: "/mnt/iexa/shared")
+        func emitDirectToolProgress(_ output: String) {
+            let preview = Self.localAlpineDirectLiveShellOutputPreview(output)
+            guard !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            let progressCall = LocalAlpineToolCall(
+                id: directToolCallId,
+                runId: directToolRunId,
+                name: "command",
+                phase: .start,
+                title: directToolDisplay.title,
+                detail: directToolDetail,
+                cwd: "/mnt/iexa/shared",
+                command: command,
+                exitCode: nil,
+                outputPreview: preview,
+                filePaths: [],
+                startedAtMs: directStartedAtMs,
+                completedAtMs: nil,
+                failed: false
+            )
+            applyLocalAlpineToolEvent(
+                LocalAlpineToolEvent(runId: directToolRunId, call: progressCall),
+                messageId: assistantMessageId
+            )
+        }
+
+        var result = await LocalAlpineTerminalService.shared.execute(
+            command: command,
+            cwd: "/mnt/iexa/shared",
+            onOutput: { output in
+                emitDirectToolProgress(output)
+            }
+        )
         enqueueLocalAlpineOpenRequests(result.openRequests)
         while let request = result.interactiveRequest {
             updateAssistantMessage(
@@ -9396,7 +9427,10 @@ final class ChatViewModel {
             result = await LocalAlpineTerminalService.shared.execute(
                 command: request.command,
                 cwd: request.cwd,
-                stdinInput: stdinInput
+                stdinInput: stdinInput,
+                onOutput: { output in
+                    emitDirectToolProgress(output)
+                }
             )
             enqueueLocalAlpineOpenRequests(result.openRequests)
         }
@@ -28033,6 +28067,20 @@ final class ChatViewModel {
     private static func prefixForLiveUI(_ value: String, limit: Int) -> String {
         guard value.count > limit else { return value }
         return String(value.prefix(limit)) + "\n...（前台预览已截断，完整结果保留在本地执行记录中）"
+    }
+
+    private static func localAlpineDirectLiveShellOutputPreview(_ output: String) -> String {
+        let cleaned = output
+            .replacingOccurrences(of: "\u{0007}", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return "" }
+
+        let lines = cleaned.split(whereSeparator: \.isNewline).map(String.init)
+        let lineLimited = lines.count > 18 ? lines.suffix(18).joined(separator: "\n") : cleaned
+        if lineLimited.count <= 2_000 {
+            return lineLimited
+        }
+        return String(lineLimited.suffix(2_000))
     }
 
     private func flushLocalAlpineToolEventIfNeeded(messageId: String, immediate: Bool) {

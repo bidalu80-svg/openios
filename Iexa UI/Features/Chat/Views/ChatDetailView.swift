@@ -13581,10 +13581,6 @@ private struct LocalAlpineFullTerminalOutputPreview: View {
         return fallbackOutput
     }
 
-    private var hasFallbackOutput: Bool {
-        !fallbackOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
     private var terminalText: String {
         var lines: [String] = []
         let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -13654,7 +13650,6 @@ private struct LocalAlpineFullTerminalOutputPreview: View {
     }
 
     private func loadOutputPreviewIfNeeded() async {
-        guard !hasFallbackOutput else { return }
         let shouldLoad = await MainActor.run { () -> Bool in
             guard !isLoading, loadedOutput == nil else { return false }
             isLoading = true
