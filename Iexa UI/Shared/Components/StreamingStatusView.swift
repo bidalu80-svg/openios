@@ -127,13 +127,20 @@ struct StreamingStatusView: View {
     }
 
     private static func isWebSearchAction(_ action: String) -> Bool {
-        action == "web_search"
-            || action == "websearch"
-            || action == "web search"
-            || action == "local_alpine_web_search"
-            || action == "browser_web_search"
-            || action == "get_readable"
-            || action.contains("readable")
+        let normalized = action
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+            .lowercased()
+
+        return normalized == "web_search"
+            || normalized == "websearch"
+            || normalized == "local_alpine_web_search"
+            || normalized == "browser_web_search"
+            || normalized == "browser_use"
+            || normalized.hasPrefix("browser.")
+            || normalized == "get_readable"
+            || normalized.contains("readable")
     }
 
     private var webSearchCard: some View {

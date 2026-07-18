@@ -249,12 +249,13 @@ private struct AgentToolBlock: Identifiable, Hashable {
 private struct CollapsedStatusGroup {
     let startIndex: Int
     let action: String
+    let groupKey: String
     let stepKey: String
     var subject: String
     var statuses: [ChatStatusUpdate]
 
     var key: String {
-        let stepComponent = stepKey.isEmpty ? action : "\(action)::\(stepKey)"
+        let stepComponent = stepKey.isEmpty ? groupKey : "\(groupKey)::\(stepKey)"
         return subject.isEmpty ? stepComponent : "\(stepComponent)::\(subject)"
     }
 }
@@ -787,7 +788,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 toolArgs: detail,
                 sortOrder: statusSortOrder(group),
                 durationText: durationText(for: group.statuses, isRunning: statusValue.isRunning),
-                browserURL: statusOpenURL(for: group.statuses, action: action),
+                browserURL: statusOpenURL(for: group.statuses, groupKey: group.groupKey),
                 imageFilePath: nil,
                 outputReference: nil,
                 outputByteCount: nil,
@@ -798,11 +799,11 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 cwd: nil,
                 previewThumbnailReference: statusThumbnailReference(
                     for: group.statuses,
-                    action: action,
+                    groupKey: group.groupKey,
                     officePreviewReferences: officePreviewReferences,
                     generatedImageFiles: generatedImageFiles
                 ),
-                previewOpenURL: statusOpenURL(for: group.statuses, action: action),
+                previewOpenURL: statusOpenURL(for: group.statuses, groupKey: group.groupKey),
                 previewFile: previewFile
             )
         }
@@ -1082,11 +1083,11 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let output = statusPreviewText(for: group.statuses)
             let previewThumbnail = statusThumbnailReference(
                 for: group.statuses,
-                action: action,
+                groupKey: group.groupKey,
                 officePreviewReferences: officePreviewReferences,
                 generatedImageFiles: generatedImageFiles
             )
-            let previewURL = statusOpenURL(for: group.statuses, action: action)
+            let previewURL = statusOpenURL(for: group.statuses, groupKey: group.groupKey)
             let previewFile = action.contains("local_office_agent") ? officeDocumentFiles.first : nil
             let isRunning = status.done != true
             let startedAt: Date? = isRunning ? group.statuses.compactMap(\.occurredAt).first : nil
@@ -1297,6 +1298,82 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return key
     }
 
+    private static func statusGroupingToolKey(for action: String) -> String {
+        let normalized = action
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+            .lowercased()
+
+        if normalized.contains("web_search")
+            || normalized.contains("browser_web_search")
+            || normalized == "browser_use"
+            || normalized.hasPrefix("browser.")
+            || normalized.contains("get_readable")
+            || normalized.contains("readable") {
+            return "tool:web_browser"
+        }
+        if normalized.contains("code_interpreter") {
+            return "tool:code_interpreter"
+        }
+        if normalized.contains("image_generation") {
+            return "tool:image_generation"
+        }
+        if normalized.contains("video_generation") {
+            return "tool:video_generation"
+        }
+        if normalized.contains("local_office_agent") {
+            return "tool:office"
+        }
+        if normalized.contains("local_native_tool") {
+            return "tool:local_native"
+        }
+        if normalized == "local_alpine"
+            || normalized == "local_alpine_agent"
+            || normalized == "local_alpine_tool" {
+            return "tool:local_alpine"
+        }
+        return "tool:\(normalized)"
+    }
+
+    private static func shouldKeepStatusStepKey(_ stepKey: String, for groupKey: String) -> Bool {
+        guard !stepKey.isEmpty else { return false }
+        switch groupKey {
+        case "tool:web_browser",
+             "tool:code_interpreter",
+             "tool:image_generation",
+             "tool:video_generation",
+             "tool:office",
+             "tool:local_native",
+             "tool:local_alpine":
+            return false
+        default:
+            return true
+        }
+    }
+
+    private static func shouldSplitStatusSubject(
+        existing: String,
+        incoming: String,
+        groupKey: String
+    ) -> Bool {
+        guard !existing.isEmpty, !incoming.isEmpty, existing != incoming else {
+            return false
+        }
+
+        switch groupKey {
+        case "tool:web_browser":
+            // A Minis-style browser/search chain naturally transitions from a
+            // query to one or more URLs/readability results. Keep that chain in
+            // one capsule; only split consecutive distinct search queries.
+            return existing.hasPrefix("query:") && incoming.hasPrefix("query:")
+        case "tool:image_generation", "tool:video_generation":
+            return existing.hasPrefix("query:") && incoming.hasPrefix("query:")
+        default:
+            return true
+        }
+    }
+
     private static func collapsedStatusGroups(
         from statusHistory: [ChatStatusUpdate],
         include: (ChatStatusUpdate, String) -> Bool
@@ -1311,16 +1388,23 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let action = status.action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
             guard include(status, action) else { continue }
 
-            let stepKey = statusGroupingStepKey(for: status)
+            let groupKey = statusGroupingToolKey(for: action)
+            let rawStepKey = statusGroupingStepKey(for: status)
+            let stepKey = shouldKeepStatusStepKey(rawStepKey, for: groupKey) ? rawStepKey : ""
             let subject = statusGroupingSubject(for: status)
             if var group = currentGroup,
-               group.action == action,
+               group.groupKey == groupKey,
                group.stepKey == stepKey {
-                if !group.subject.isEmpty, !subject.isEmpty, group.subject != subject {
+                if shouldSplitStatusSubject(
+                    existing: group.subject,
+                    incoming: subject,
+                    groupKey: groupKey
+                ) {
                     groups.append(group)
                     currentGroup = CollapsedStatusGroup(
                         startIndex: index,
                         action: action,
+                        groupKey: groupKey,
                         stepKey: stepKey,
                         subject: subject,
                         statuses: [status]
@@ -1340,6 +1424,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 currentGroup = CollapsedStatusGroup(
                     startIndex: index,
                     action: action,
+                    groupKey: groupKey,
                     stepKey: stepKey,
                     subject: subject,
                     statuses: [status]
@@ -1387,20 +1472,20 @@ private struct AgentActivityItem: Identifiable, Hashable {
 
     private static func statusThumbnailReference(
         for statuses: [ChatStatusUpdate],
-        action: String,
+        groupKey: String,
         officePreviewReferences: [String],
         generatedImageFiles: [ChatMessageFile]
     ) -> String? {
         for status in statuses.reversed() {
             if let reference = statusThumbnailReference(
                 for: status,
-                action: action,
+                groupKey: groupKey,
                 officePreviewReferences: officePreviewReferences
             ) {
                 return reference
             }
         }
-        if action.contains("image_generation") {
+        if groupKey == "tool:image_generation" {
             return generatedImageFiles
                 .reversed()
                 .compactMap(Self.imageReference(for:))
@@ -1411,10 +1496,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
 
     private static func statusOpenURL(
         for statuses: [ChatStatusUpdate],
-        action: String
+        groupKey: String
     ) -> String? {
         for status in statuses.reversed() {
-            if let url = statusOpenURL(for: status, action: action) {
+            if let url = statusOpenURL(for: status, groupKey: groupKey) {
                 return url
             }
         }
@@ -1493,28 +1578,25 @@ private struct AgentActivityItem: Identifiable, Hashable {
 
     private static func statusThumbnailReference(
         for status: ChatStatusUpdate,
-        action: String,
+        groupKey: String,
         officePreviewReferences: [String]
     ) -> String? {
-        if action.contains("local_office_agent"),
+        if groupKey == "tool:office",
            let reference = officePreviewReferences.first {
             return reference
         }
-        if action.contains("web_search")
-            || action.contains("browser_web_search")
-            || action.contains("get_readable")
-            || action.contains("readable") {
+        if groupKey == "tool:web_browser" {
             if let thumbnail = status.items.compactMap({ item in
                 let value = item.thumbnailURL?.trimmingCharacters(in: .whitespacesAndNewlines)
                 return value?.isEmpty == false ? value : nil
             }).first {
                 return thumbnail
             }
-            if let url = statusOpenURL(for: status, action: action) {
+            if let url = statusOpenURL(for: status, groupKey: groupKey) {
                 return agentToolWebPreviewReference(for: url)
             }
         }
-        if action.contains("image_generation") {
+        if groupKey == "tool:image_generation" {
             if let thumbnail = status.items.compactMap({ item in
                 let candidates = [
                     item.thumbnailURL,
@@ -1543,11 +1625,8 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return nil
     }
 
-    private static func statusOpenURL(for status: ChatStatusUpdate, action: String) -> String? {
-        guard action.contains("web_search")
-                || action.contains("browser_web_search")
-                || action.contains("get_readable")
-                || action.contains("readable") else {
+    private static func statusOpenURL(for status: ChatStatusUpdate, groupKey: String) -> String? {
+        guard groupKey == "tool:web_browser" else {
             return nil
         }
         let candidates = status.items.compactMap(\.link) + status.urls

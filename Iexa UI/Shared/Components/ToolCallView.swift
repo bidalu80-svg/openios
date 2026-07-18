@@ -2939,9 +2939,10 @@ private struct CollapsedToolCallGroup: View {
 // MARK: - Tool Calls Container
 
 /// Renders a list of tool calls extracted from message content.
-/// Consecutive calls sharing the same MCP server prefix (the part before `__`)
-/// are collapsed into a single expandable summary row, matching the Iexa native server
-/// web UI. Plain tool names with no prefix are grouped by exact name.
+/// Consecutive calls are collapsed only when they belong to the same Minis-style
+/// tool family/server. Unrelated tool families remain separate capsules so the
+/// message history reflects the real tool chain instead of hiding everything under
+/// one generic group.
 struct ToolCallsContainer: View {
     let toolCalls: [ToolCallData]
     var authToken: String? = nil
@@ -2955,15 +2956,83 @@ struct ToolCallsContainer: View {
         return String(name[name.startIndex..<separatorRange.lowerBound])
     }
 
-    /// Groups all consecutive tool calls into a single group.
-    /// All tool calls in a single `ToolCallsContainer` are already consecutive
-    /// (they come from the same position in the message content), so we treat
-    /// them all as one group — matching the Iexa native server web UI behavior where
-    /// any mix of consecutive tools (e.g. web_search + fetch_page) collapses
-    /// into a single "Explored N tool_a, tool_b" row.
+    /// Minis-style grouping: preserve the model's tool-call order, but only
+    /// collapse consecutive calls that belong to the same tool family/server.
+    /// This avoids a single generic capsule for mixed consecutive tools
+    /// where unrelated web/code/file/image calls were hidden under one header.
     private static func subGroupByName(_ calls: [ToolCallData]) -> [[ToolCallData]] {
         guard !calls.isEmpty else { return [] }
-        return [calls]
+
+        var groups: [[ToolCallData]] = []
+        var current: [ToolCallData] = []
+        var currentKey: String?
+
+        for call in calls {
+            let key = groupingKey(for: call.name)
+            if let currentKey, currentKey == key {
+                current.append(call)
+            } else {
+                if !current.isEmpty {
+                    groups.append(current)
+                }
+                current = [call]
+                currentKey = key
+            }
+        }
+
+        if !current.isEmpty {
+            groups.append(current)
+        }
+        return groups
+    }
+
+    private static func groupingKey(for name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+            .lowercased()
+
+        if trimmed.contains("__") {
+            return "mcp:\(serverPrefix(for: trimmed).lowercased())"
+        }
+
+        if normalized.contains("web_search")
+            || normalized.contains("websearch")
+            || normalized.contains("search_web")
+            || normalized.contains("browser")
+            || normalized.contains("fetch")
+            || normalized.contains("read_page")
+            || normalized.contains("get_readable") {
+            return "builtin:web"
+        }
+        if normalized.contains("memory") {
+            return "builtin:memory"
+        }
+        if normalized.contains("python")
+            || normalized.contains("code")
+            || normalized.contains("shell")
+            || normalized.contains("terminal") {
+            return "builtin:code"
+        }
+        if normalized.contains("file")
+            || normalized.contains("document")
+            || normalized.contains("read")
+            || normalized.contains("write")
+            || normalized.contains("edit")
+            || normalized.contains("patch") {
+            return "builtin:file"
+        }
+        if normalized.contains("image")
+            || normalized.contains("photo")
+            || normalized.contains("camera") {
+            return "builtin:image"
+        }
+        if normalized.contains("video") {
+            return "builtin:video"
+        }
+
+        return "tool:\(normalized)"
     }
 
     var body: some View {
@@ -2987,7 +3056,7 @@ struct ToolCallsContainer: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 2)
                     } else {
-                        // Multiple same-name calls — collapsible group
+                        // Multiple same-family calls — collapsible group
                         CollapsedToolCallGroup(calls: group, authToken: authToken, serverBaseURL: serverBaseURL)
                     }
                 }
