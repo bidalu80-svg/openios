@@ -183,21 +183,96 @@ final class BrowserWebSearchService: NSObject {
     static func agentSearchPageURLs(for query: String) -> [String] {
         let normalized = normalizedQuery(query)
         guard !normalized.isEmpty else { return [] }
+        return searchPageURLs(for: normalized)
+    }
+
+    private static func searchPageURLs(for rawQuery: String) -> [String] {
+        let normalized = normalizedQuery(rawQuery)
+        guard !normalized.isEmpty else { return [] }
         let encoded = normalized.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? normalized
         let timestamp = Int(Date().timeIntervalSince1970)
         let needsFreshness = searchNeedsFreshness(normalized)
-        var pages = [
-            needsFreshness
-                ? "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&filters=ex1%3a%22ez1%22&_=\(timestamp)"
-                : "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&_=\(timestamp)",
-            "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)",
-            "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)",
-            "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)"
-        ]
-        if needsFreshness {
-            pages.append("https://so.toutiao.com/search?keyword=\(encoded)&pd=information&dvpf=pc&_=\(timestamp)")
+
+        let pageForProvider: (SearchProvider) -> String = { provider in
+            switch provider {
+            case .baidu:
+                return "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)"
+            case .so:
+                return "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)"
+            case .sogou:
+                return "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)"
+            case .bing:
+                return needsFreshness
+                    ? "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&filters=ex1%3a%22ez1%22&_=\(timestamp)"
+                    : "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&_=\(timestamp)"
+            case .toutiao:
+                return "https://so.toutiao.com/search?keyword=\(encoded)&pd=information&dvpf=pc&_=\(timestamp)"
+            case .google:
+                return "https://www.google.com/search?q=\(encoded)&hl=zh-CN&_=\(timestamp)"
+            case .duckduckgo:
+                return "https://duckduckgo.com/html/?q=\(encoded)&kl=cn-zh&_=\(timestamp)"
+            }
         }
-        return pages
+
+        var providers = searchProviderOrder(for: normalized, needsFreshness: needsFreshness)
+        if needsFreshness, !providers.contains(.toutiao) {
+            providers.insert(.toutiao, at: min(1, providers.count))
+        }
+        return providers.map(pageForProvider)
+    }
+
+    private static func searchProviderOrder(for query: String, needsFreshness: Bool) -> [SearchProvider] {
+        let lowercased = query.lowercased()
+        let explicitProviders: [(SearchProvider, [String])] = [
+            (.baidu, ["百度", "baidu", "baidu.com"]),
+            (.so, ["360", "好搜", "so.com", "www.so.com"]),
+            (.sogou, ["搜狗", "sogou", "sogou.com"]),
+            (.bing, ["必应", "bing", "cn.bing.com"]),
+            (.toutiao, ["头条", "今日头条", "toutiao", "so.toutiao.com"]),
+            (.google, ["谷歌", "google", "google.com"]),
+            (.duckduckgo, ["duckduckgo", "duck duck go", "ddg"])
+        ]
+        var preferred: [SearchProvider] = []
+        for (provider, markers) in explicitProviders {
+            if markers.contains(where: { lowercased.contains($0.lowercased()) }) {
+                preferred.append(provider)
+            }
+        }
+
+        let fallback: [SearchProvider] = needsFreshness
+            ? [.baidu, .toutiao, .so, .sogou, .bing]
+            : [.baidu, .so, .sogou, .bing]
+        preferred.append(contentsOf: fallback)
+        return preferred.reduce(into: [SearchProvider]()) { result, provider in
+            if !result.contains(provider) {
+                result.append(provider)
+            }
+        }
+    }
+
+    private static func searchPage(for url: String) -> SearchPage {
+        guard let host = URL(string: url)?.host?.lowercased() else {
+            return SearchPage(url: url, timeout: 6, settleDelay: 450_000_000, resultLimit: 1)
+        }
+        if host == "www.baidu.com" || host.hasSuffix(".baidu.com") {
+            return SearchPage(url: url, timeout: 5, settleDelay: 350_000_000, resultLimit: 3)
+        }
+        if host == "www.so.com" || host.hasSuffix(".so.com") {
+            return SearchPage(url: url, timeout: 5, settleDelay: 350_000_000, resultLimit: 2)
+        }
+        if host == "www.sogou.com" || host.hasSuffix(".sogou.com") {
+            return SearchPage(url: url, timeout: 6, settleDelay: 450_000_000, resultLimit: 1)
+        }
+        if host == "cn.bing.com" || host.hasSuffix(".bing.com") {
+            return SearchPage(url: url, timeout: 5, settleDelay: 350_000_000, resultLimit: 2)
+        }
+        if host == "so.toutiao.com" {
+            return SearchPage(url: url, timeout: 6, settleDelay: 450_000_000, resultLimit: 1)
+        }
+        if host == "www.google.com" || host.hasSuffix(".google.com") || host.hasSuffix(".duckduckgo.com") {
+            return SearchPage(url: url, timeout: 7, settleDelay: 500_000_000, resultLimit: 1)
+        }
+        return SearchPage(url: url, timeout: 6, settleDelay: 450_000_000, resultLimit: 1)
     }
 
     func responseFromConfiguredSearchItems(
@@ -8009,25 +8084,7 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func searchItems(for query: String) async -> [WebSearchResultItem] {
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        let timestamp = Int(Date().timeIntervalSince1970)
-        let needsFreshness = Self.searchNeedsFreshness(query)
-        var pages: [SearchPage] = [
-            SearchPage(
-                url: needsFreshness
-                    ? "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&filters=ex1%3a%22ez1%22&_=\(timestamp)"
-                    : "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&_=\(timestamp)",
-                timeout: 5,
-                settleDelay: 350_000_000,
-                resultLimit: 3
-            ),
-            SearchPage(url: "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)", timeout: 5, settleDelay: 350_000_000, resultLimit: 3),
-            SearchPage(url: "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)", timeout: 5, settleDelay: 350_000_000, resultLimit: 2),
-            SearchPage(url: "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)", timeout: 6, settleDelay: 450_000_000, resultLimit: 1)
-        ]
-        if needsFreshness {
-            pages.append(SearchPage(url: "https://so.toutiao.com/search?keyword=\(encoded)&pd=information&dvpf=pc&_=\(timestamp)", timeout: 6, settleDelay: 450_000_000, resultLimit: 1))
-        }
+        let pages = Self.searchPageURLs(for: query).map { Self.searchPage(for: $0) }
 
         var pageBuckets: [[WebSearchResultItem]] = []
         var seenLinks = Set<String>()
@@ -9720,6 +9777,16 @@ private struct BrowserPageSnapshot {
     let description: String
     let published: String
     let text: String
+}
+
+private enum SearchProvider: Equatable {
+    case baidu
+    case so
+    case sogou
+    case bing
+    case toutiao
+    case google
+    case duckduckgo
 }
 
 private struct SearchPage {
