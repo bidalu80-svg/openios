@@ -2711,47 +2711,46 @@ private struct RunningToolCapsuleSweep: View {
     let cornerRadius: CGFloat
 
     @Environment(\.theme) private var theme
-    @State private var phase: CGFloat = -1
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        GeometryReader { geometry in
-            let width = max(geometry.size.width, 1)
-            let height = max(geometry.size.height, 1)
-            let sweepWidth = max(width * 0.34, 96)
+        TimelineView(.animation(minimumInterval: reduceMotion ? 1 : 1.0 / 60.0)) { timeline in
+            GeometryReader { geometry in
+                let width = max(geometry.size.width, 1)
+                let height = max(geometry.size.height, 1)
+                let sweepWidth = max(width * 0.78, 150)
+                let period: TimeInterval = 2.35
+                let progress = reduceMotion ? 0.55 : timeline.date.timeIntervalSinceReferenceDate
+                    .truncatingRemainder(dividingBy: period) / period
+                let travel = width + sweepWidth * 2.4
+                let x = -sweepWidth * 1.2 + CGFloat(progress) * travel
 
-            Rectangle()
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            .clear,
-                            .white.opacity(theme.isDark ? 0.08 : 0.14),
-                            .white.opacity(theme.isDark ? 0.28 : 0.44),
-                            tint.opacity(theme.isDark ? 0.20 : 0.24),
-                            .white.opacity(theme.isDark ? 0.12 : 0.20),
-                            .clear,
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0.00),
+                                .init(color: .white.opacity(theme.isDark ? 0.015 : 0.025), location: 0.12),
+                                .init(color: .white.opacity(theme.isDark ? 0.075 : 0.115), location: 0.28),
+                                .init(color: .white.opacity(theme.isDark ? 0.22 : 0.30), location: 0.48),
+                                .init(color: tint.opacity(theme.isDark ? 0.15 : 0.17), location: 0.62),
+                                .init(color: .white.opacity(theme.isDark ? 0.075 : 0.11), location: 0.80),
+                                .init(color: .clear, location: 1.00),
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
                     )
-                )
-                .frame(width: sweepWidth, height: height)
-                .blendMode(.screen)
-                .offset(x: -sweepWidth + phase * (width + sweepWidth * 2))
+                    .frame(width: sweepWidth, height: height * 2.4)
+                    .rotationEffect(.degrees(-7))
+                    .blur(radius: 3.0)
+                    .blendMode(theme.isDark ? .screen : .plusLighter)
+                    .offset(x: x, y: -height * 0.7)
+            }
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .allowsHitTesting(false)
-        .onAppear {
-            startSweep()
-        }
-    }
-
-    private func startSweep() {
-        phase = -1
-        DispatchQueue.main.async {
-            withAnimation(.linear(duration: 1.45).repeatForever(autoreverses: false)) {
-                phase = 1
-            }
-        }
+        .accessibilityHidden(true)
     }
 }
 

@@ -13007,30 +13007,34 @@ private struct AgentRunningCapsuleSweep: View {
             GeometryReader { geometry in
                 let width = max(geometry.size.width, 1)
                 let height = max(geometry.size.height, 1)
-                let sweepWidth = max(width * 0.38, 76)
-                let period: TimeInterval = 1.55
+                let sweepWidth = max(width * 0.78, 150)
+                let period: TimeInterval = 2.35
                 let progress = reduceMotion ? 0.55 : timeline.date.timeIntervalSinceReferenceDate
                     .truncatingRemainder(dividingBy: period) / period
-                let x = -sweepWidth + CGFloat(progress) * (width + sweepWidth * 2)
+                let travel = width + sweepWidth * 2.4
+                let x = -sweepWidth * 1.2 + CGFloat(progress) * travel
 
                 Rectangle()
                     .fill(
                         LinearGradient(
                             stops: [
                                 .init(color: .clear, location: 0.00),
-                                .init(color: .white.opacity(theme.isDark ? 0.04 : 0.08), location: 0.20),
-                                .init(color: .white.opacity(theme.isDark ? 0.24 : 0.40), location: 0.48),
-                                .init(color: tint.opacity(theme.isDark ? 0.18 : 0.22), location: 0.62),
-                                .init(color: .white.opacity(theme.isDark ? 0.07 : 0.12), location: 0.78),
+                                .init(color: .white.opacity(theme.isDark ? 0.015 : 0.025), location: 0.12),
+                                .init(color: .white.opacity(theme.isDark ? 0.075 : 0.115), location: 0.28),
+                                .init(color: .white.opacity(theme.isDark ? 0.22 : 0.30), location: 0.48),
+                                .init(color: tint.opacity(theme.isDark ? 0.15 : 0.17), location: 0.62),
+                                .init(color: .white.opacity(theme.isDark ? 0.075 : 0.11), location: 0.80),
                                 .init(color: .clear, location: 1.00),
                             ],
                             startPoint: .leading,
                             endPoint: .trailing
                         )
                     )
-                    .frame(width: sweepWidth, height: height)
+                    .frame(width: sweepWidth, height: height * 2.4)
+                    .rotationEffect(.degrees(-7))
+                    .blur(radius: 3.0)
                     .blendMode(theme.isDark ? .screen : .plusLighter)
-                    .offset(x: x)
+                    .offset(x: x, y: -height * 0.7)
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
