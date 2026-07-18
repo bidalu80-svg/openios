@@ -3471,48 +3471,58 @@ struct AssistantMessageContent: View {
     ///
     /// `**92号汽油：约 <tool call> 7.20 元/升**`
     ///
-    /// Rendering that byte-for-byte splits the Markdown into two independent
-    /// text views, so the `**` markers become visible. Lifting the tool calls
-    /// into their own step capsule group keeps the operation visible while
-    /// allowing the prose to render as one complete Markdown document.
+    /// Rendering must preserve the original segment order. Tool calls are
+    /// still grouped with adjacent tool calls, and contiguous text chunks are
+    /// joined, but nothing is globally re-ordered ahead of or behind prose.
     private static func displayGroups(for segments: [ContentSegment]) -> [SegmentGroup] {
-        let hasToolCalls = segments.contains { segment in
-            if case .toolCall = segment { return true }
-            return false
-        }
-        guard hasToolCalls else {
-            return groupSegments(segments)
-        }
+        var groups: [SegmentGroup] = []
+        var pendingText: [String] = []
 
-        var reasoningBlocks: [ReasoningData] = []
-        var toolCalls: [ToolCallData] = []
-        var textParts: [String] = []
+        func flushText() {
+            guard !pendingText.isEmpty else { return }
+            let prose = joinedTextPartsPreservingInlineMarkdown(pendingText)
+            pendingText.removeAll(keepingCapacity: true)
+            guard !prose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            if case .text(var existing) = groups.last {
+                groups.removeLast()
+                existing = joinedTextPartsPreservingInlineMarkdown([existing, prose])
+                groups.append(.text(existing))
+            } else {
+                groups.append(.text(prose))
+            }
+        }
 
         for segment in segments {
             switch segment {
             case .text(let text):
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
-                    textParts.append(trimmed)
+                    pendingText.append(trimmed)
                 }
+
             case .toolCall(let toolCall):
-                toolCalls.append(toolCall)
+                flushText()
+                if case .toolCalls(var existing) = groups.last {
+                    groups.removeLast()
+                    existing.append(toolCall)
+                    groups.append(.toolCalls(existing))
+                } else {
+                    groups.append(.toolCalls([toolCall]))
+                }
+
             case .reasoning(let reasoning):
-                reasoningBlocks.append(reasoning)
+                flushText()
+                if case .reasoningBlocks(var existing) = groups.last {
+                    groups.removeLast()
+                    existing.append(reasoning)
+                    groups.append(.reasoningBlocks(existing))
+                } else {
+                    groups.append(.reasoningBlocks([reasoning]))
+                }
             }
         }
 
-        var groups: [SegmentGroup] = []
-        if !reasoningBlocks.isEmpty {
-            groups.append(.reasoningBlocks(reasoningBlocks))
-        }
-        if !toolCalls.isEmpty {
-            groups.append(.toolCalls(toolCalls))
-        }
-        let prose = joinedTextPartsPreservingInlineMarkdown(textParts)
-        if !prose.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            groups.append(.text(prose))
-        }
+        flushText()
         return groups
     }
 

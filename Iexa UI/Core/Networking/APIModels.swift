@@ -2825,6 +2825,10 @@ nonisolated struct WebSearchResultItem: Sendable, Hashable {
     var link: String?
     var snippet: String?
     var thumbnailURL: String?
+    var nodeID: String?
+    var selector: String?
+    var rect: [String: Int]?
+    var clickable: Bool?
 
     init?(json: [String: Any]) {
         title = json["title"] as? String
@@ -2838,6 +2842,33 @@ nonisolated struct WebSearchResultItem: Sendable, Hashable {
         thumbnailURL = json["thumbnail_url"] as? String
             ?? json["thumbnailURL"] as? String
             ?? json["image"] as? String
+        nodeID = json["node_id"] as? String
+            ?? json["nodeId"] as? String
+        selector = json["selector"] as? String
+            ?? json["css"] as? String
+        if let rawRect = json["rect"] as? [String: Any] {
+            var parsedRect: [String: Int] = [:]
+            for key in [
+                "x", "y", "width", "height",
+                "center_x", "center_y",
+                "page_x", "page_y",
+                "page_center_x", "page_center_y"
+            ] {
+                if let intValue = rawRect[key] as? Int {
+                    parsedRect[key] = intValue
+                } else if let numberValue = rawRect[key] as? NSNumber {
+                    parsedRect[key] = numberValue.intValue
+                }
+            }
+            if !parsedRect.isEmpty {
+                rect = parsedRect
+            }
+        }
+        if let boolValue = json["clickable"] as? Bool {
+            clickable = boolValue
+        } else if let numberValue = json["clickable"] as? NSNumber {
+            clickable = numberValue.boolValue
+        }
 
         if (title?.isEmpty ?? true), (link?.isEmpty ?? true), (snippet?.isEmpty ?? true) {
             return nil

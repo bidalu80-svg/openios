@@ -7772,6 +7772,44 @@ final class BrowserWebSearchService: NSObject {
         if let thumbnailURL = item.thumbnailURL, !thumbnailURL.isEmpty {
             payload["thumbnail_url"] = thumbnailURL
         }
+        if let nodeID = item.nodeID, !nodeID.isEmpty {
+            payload["node_id"] = nodeID
+            payload["nodeId"] = nodeID
+        }
+        if let selector = item.selector, !selector.isEmpty {
+            payload["selector"] = selector
+        }
+        if let rect = item.rect, !rect.isEmpty {
+            payload["rect"] = rect
+            if let pageX = rect["page_x"] {
+                payload["page_x"] = pageX
+            }
+            if let pageY = rect["page_y"] {
+                payload["page_y"] = pageY
+            }
+            if let pageCenterX = rect["page_center_x"] {
+                payload["page_center_x"] = pageCenterX
+            }
+            if let pageCenterY = rect["page_center_y"] {
+                payload["page_center_y"] = pageCenterY
+            }
+        }
+        if let clickable = item.clickable {
+            payload["clickable"] = clickable
+        }
+        if item.clickable == true {
+            var suggestedAction: [String: Any] = [
+                "action": "browser.click"
+            ]
+            if let nodeID = item.nodeID, !nodeID.isEmpty {
+                suggestedAction["node_id"] = nodeID
+            } else if let selector = item.selector, !selector.isEmpty {
+                suggestedAction["selector"] = selector
+            }
+            if suggestedAction.count > 1 {
+                payload["suggested_action"] = suggestedAction
+            }
+        }
         return payload
     }
 
@@ -9096,6 +9134,76 @@ final class BrowserWebSearchService: NSObject {
             const value = `${item.title || ''} ${item.link || ''} ${item.snippet || ''}`.toLowerCase();
             return /意见反馈|用户反馈|反馈中心|投诉|举报|登录|注册|验证码|captcha|punish|隐私政策|服务协议|帮助中心|下载客户端|打开app|打开 app/i.test(value);
           }
+          const now = Date.now();
+          const expiresAt = now + 10 * 60 * 1000;
+          window.__iexaNodeStore = window.__iexaNodeStore || {};
+          window.__iexaNodeSeq = Number(window.__iexaNodeSeq || 0);
+          const scrollX = Math.round(window.scrollX || 0);
+          const scrollY = Math.round(window.scrollY || 0);
+          function rectFor(node) {
+            if (!node || !node.getBoundingClientRect) return null;
+            const r = node.getBoundingClientRect();
+            return {
+              x: Math.round(r.left),
+              y: Math.round(r.top),
+              width: Math.round(r.width),
+              height: Math.round(r.height),
+              center_x: Math.round(r.left + r.width / 2),
+              center_y: Math.round(r.top + r.height / 2),
+              page_x: Math.round(r.left + scrollX),
+              page_y: Math.round(r.top + scrollY),
+              page_center_x: Math.round(r.left + scrollX + r.width / 2),
+              page_center_y: Math.round(r.top + scrollY + r.height / 2)
+            };
+          }
+          function cssPath(node) {
+            if (!node || !node.nodeType || node.nodeType !== 1) return '';
+            if (node.id && window.CSS && CSS.escape) return '#' + CSS.escape(node.id);
+            const parts = [];
+            let current = node;
+            while (current && current.nodeType === 1 && current !== document.body && current !== document.documentElement && parts.length < 5) {
+              let name = (current.tagName || '').toLowerCase();
+              if (!name) break;
+              const classes = String(current.className || '').split(/\\s+/).filter(Boolean).slice(0, 2);
+              if (window.CSS && CSS.escape) {
+                for (const cls of classes) name += '.' + CSS.escape(cls);
+              }
+              const parent = current.parentElement;
+              if (parent) {
+                const siblings = Array.from(parent.children).filter(child => child.tagName === current.tagName);
+                if (siblings.length > 1) name += ':nth-of-type(' + (siblings.indexOf(current) + 1) + ')';
+              }
+              parts.unshift(name);
+              current = parent;
+            }
+            return parts.join(' > ');
+          }
+          function storeNode(node) {
+            if (!node) return '';
+            const nodeId = 'dom-' + (++window.__iexaNodeSeq);
+            window.__iexaNodeStore[nodeId] = { node, expiresAt };
+            return nodeId;
+          }
+          function clickMeta(anchor, node) {
+            const target = anchor || node;
+            if (!target) return {};
+            const nodeId = storeNode(target);
+            const selector = cssPath(target);
+            const rect = rectFor(target) || {};
+            const meta = {
+              node_id: nodeId,
+              nodeId,
+              selector,
+              rect,
+              clickable: true
+            };
+            if (nodeId) {
+              meta.suggested_action = { action: 'browser.click', node_id: nodeId };
+            } else if (selector) {
+              meta.suggested_action = { action: 'browser.click', selector };
+            }
+            return meta;
+          }
           const candidates = [];
           const selectors = [
             '.result',
@@ -9127,7 +9235,7 @@ final class BrowserWebSearchService: NSObject {
               const dateNode = node.querySelector && node.querySelector('time, .news_dt, .c-color-gray2, .result__timestamp, .b_factrow, [aria-label*="Published"], [aria-label*="Updated"]');
               const dateText = text(dateNode);
               const snippet = [dateText, text(snippetNode)].filter(Boolean).join(' - ');
-              candidates.push({ title, link, snippet });
+              candidates.push(Object.assign({ title, link, snippet }, clickMeta(anchor, node)));
             }
           }
           for (const script of document.querySelectorAll('script[type="application/json"], script[data-druid-card-data-id]')) {
@@ -9150,7 +9258,7 @@ final class BrowserWebSearchService: NSObject {
               const link = linkFor(anchor, anchor);
               const title = text(anchor);
               if (!link || !title || title.length < 3 || blocked(link)) continue;
-              candidates.push({ title, link, snippet: '' });
+              candidates.push(Object.assign({ title, link, snippet: '' }, clickMeta(anchor, anchor)));
             }
           }
           const out = [];

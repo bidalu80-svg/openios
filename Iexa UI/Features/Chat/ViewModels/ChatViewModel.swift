@@ -16539,7 +16539,8 @@ final class ChatViewModel {
             "index", "node_id", "nodeId", "action", "kind", "reason", "confidence",
             "tag", "role", "type", "text", "label", "title", "aria_label",
             "placeholder", "name", "value", "href", "url", "link", "selector", "score",
-            "scroll_y", "page_x", "page_y", "page_center_x", "page_center_y"
+            "scroll_y", "page_x", "page_y", "page_center_x", "page_center_y",
+            "clickable", "editable", "disabled"
         ] {
             guard let value = raw[key] else { continue }
             if let text = value as? String {
@@ -16560,6 +16561,21 @@ final class ChatViewModel {
             }
             if !compactRect.isEmpty {
                 compact["rect"] = compactRect
+            }
+        }
+        if let suggested = raw["suggested_action"] as? [String: Any] {
+            var compactSuggested: [String: Any] = [:]
+            for key in ["action", "node_id", "nodeId", "selector", "label"] {
+                guard let value = suggested[key] else { continue }
+                if let text = value as? String {
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        compactSuggested[key] = String(trimmed.prefix(500))
+                    }
+                }
+            }
+            if !compactSuggested.isEmpty {
+                compact["suggested_action"] = compactSuggested
             }
         }
         return compact
