@@ -686,7 +686,7 @@ final class ChatViewModel {
 
     private func runLiveActivityKind(modelId: String, prompt: String) -> String {
         if shouldUseDirectVideoGeneration(modelId: modelId) { return "video" }
-        if shouldUseDirectImageGeneration(modelId: modelId)
+        if shouldUseIndependentDirectImageEndpoint(modelId: modelId)
             || shouldPreferChatNativeImageGeneration(modelId: modelId)
             || (imageGenerationEnabled && Self.looksLikeDirectImageGenerationRequest(prompt)) {
             return "image"
@@ -710,6 +710,7 @@ final class ChatViewModel {
         }
         return shouldUseDirectImageGeneration(modelId: modelId)
             || shouldPreferChatNativeImageGeneration(modelId: modelId)
+            || selectedModelSupportsImageGenerationCapability(modelId: modelId)
     }
 
     private func localAlpineLiveActivityKind(for command: String) -> String {
@@ -7328,7 +7329,7 @@ final class ChatViewModel {
                         return
                     }
 
-                    if self.shouldUseDirectImageGeneration(modelId: modelId),
+                    if self.shouldUseIndependentDirectImageEndpoint(modelId: modelId),
                        !self.shouldPreferChatNativeImageGeneration(modelId: modelId) {
                         do {
                             guard self.currentProviderType != .anthropic else {
@@ -7482,7 +7483,7 @@ final class ChatViewModel {
                             NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
                             return
                         } catch {
-                            guard self.shouldFallbackToChatForImageGeneration(error) else { throw error }
+                            guard self.shouldFallbackToChatForImageGeneration(error, modelId: modelId) else { throw error }
                             self.logger.warning("Direct image endpoint failed; falling back to chat-native image output: \(error.localizedDescription)")
                             DiagnosticLogManager.shared.warning(
                                 "Direct image endpoint failed; falling back to chat-native output model=\(modelId) error=\(error.localizedDescription)",
@@ -7936,6 +7937,13 @@ final class ChatViewModel {
             || shouldPreferChatNativeImageGeneration(modelId: modelId) {
             return true
         }
+        if imageGenerationEnabled,
+           selectedModelSupportsImageGenerationCapability(modelId: modelId) {
+            return true
+        }
+        // Non-image chat models can still use the app-side image tool, but only
+        // for explicit image-generation requests. Dedicated/configured image
+        // models are handled above without prompt heuristics.
         if imageGenerationEnabled && Self.looksLikeDirectImageGenerationRequest(normalized) {
             return true
         }
@@ -7959,6 +7967,14 @@ final class ChatViewModel {
             return true
         }
 
+        if imageGenerationEnabled,
+           !effectiveModelId.isEmpty,
+           selectedModelSupportsImageGenerationCapability(modelId: effectiveModelId) {
+            return true
+        }
+
+        // Fallback for ordinary chat models with the image-generation switch on:
+        // keep this prompt-gated so normal chat is not forced into media routing.
         guard imageGenerationEnabled,
               canUseDirectImageEndpointProvider,
               !normalizedText.isEmpty,
@@ -18538,11 +18554,14 @@ final class ChatViewModel {
         }
 
         // Tool IDs (user selection respects manual toggles via userDisabledToolIds)
-        let allToolIds = localAlpineClientSideTask ? [] : Array(selectedToolIds)
+        let allToolIds = (localAlpineClientSideTask || shouldPrioritizeImageRoute) ? [] : Array(selectedToolIds)
         if !allToolIds.isEmpty { request.toolIds = allToolIds }
 
         // Terminal ID if enabled
-        if terminalEnabled, let terminalServer = selectedTerminalServer, !terminalServer.isLocalAlpine {
+        if !shouldPrioritizeImageRoute,
+           terminalEnabled,
+           let terminalServer = selectedTerminalServer,
+           !terminalServer.isLocalAlpine {
             request.terminalId = terminalServer.id
         }
 
@@ -18745,6 +18764,34 @@ final class ChatViewModel {
         return model.supportsImageGeneration
     }
 
+    private func selectedModelSupportsImageGenerationCapability(modelId: String?) -> Bool {
+        // Deterministic model/setting based route. This intentionally does not
+        // inspect the user's prompt; image-capable selected models must not be
+        // mixed with Local Alpine/code-editing tools for the same turn.
+        guard canUseDirectImageEndpointProvider,
+              imageGenerationEnabled,
+              let model = selectedModel else {
+            return false
+        }
+        let requestedModelId = (modelId ?? selectedModelId ?? conversation?.model ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentSelectedModelId = (selectedModelId ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !requestedModelId.isEmpty,
+           requestedModelId != model.id,
+           requestedModelId != currentSelectedModelId {
+            return false
+        }
+        if model.supportsImageGeneration { return true }
+        if model.defaultFeatureIds.contains("image_generation") { return true }
+        if model.builtinTools["image_generation"] == true { return true }
+        if let value = model.capabilities?["image_generation"]?.lowercased(),
+           ["1", "true", "yes", "enabled"].contains(value) {
+            return true
+        }
+        return false
+    }
+
     private var canUseDirectImageEndpointProvider: Bool {
         guard let providerType = currentProviderType else { return false }
         return providerType != .anthropic
@@ -18775,8 +18822,7 @@ final class ChatViewModel {
 
     private func canStartIndependentDirectImageGeneration(modelId: String, text: String? = nil) -> Bool {
         guard canUseDirectImageEndpointProvider else { return false }
-        if shouldUseDirectImageGeneration(modelId: modelId)
-            && !shouldPreferChatNativeImageGeneration(modelId: modelId) {
+        if shouldUseIndependentDirectImageEndpoint(modelId: modelId) {
             return true
         }
         guard imageGenerationEnabled else { return false }
@@ -18790,6 +18836,17 @@ final class ChatViewModel {
         return !shouldPreferChatNativeImageGeneration(modelId: modelId)
     }
 
+    private func shouldUseIndependentDirectImageEndpoint(modelId: String) -> Bool {
+        guard canUseDirectImageEndpointProvider,
+              !shouldPreferChatNativeImageGeneration(modelId: modelId) else {
+            return false
+        }
+        if shouldUseDirectImageGeneration(modelId: modelId) {
+            return true
+        }
+        return selectedModelSupportsImageGenerationCapability(modelId: modelId)
+    }
+
     private func shouldUseModelDrivenImageGeneration(for modelId: String) -> Bool {
         imageGenerationEnabled
             && (currentProviderType == .iexa || shouldUseLocalNativeFunctionTools(for: modelId))
@@ -18797,6 +18854,9 @@ final class ChatViewModel {
 
     private func shouldPreferServerDefaultImageModel(modelId: String, text: String) -> Bool {
         guard canStartIndependentDirectImageGeneration(modelId: modelId, text: text) else {
+            return false
+        }
+        if selectedModelSupportsImageGenerationCapability(modelId: modelId) {
             return false
         }
         return !(shouldUseDirectImageGeneration(modelId: modelId)
@@ -19945,7 +20005,10 @@ final class ChatViewModel {
         }
     }
 
-    private func shouldFallbackToChatForImageGeneration(_ error: Error) -> Bool {
+    private func shouldFallbackToChatForImageGeneration(_ error: Error, modelId: String) -> Bool {
+        guard !selectedModelSupportsImageGenerationCapability(modelId: modelId) else {
+            return false
+        }
         let apiError = APIError.from(error)
         if case .httpError(let statusCode, _, _) = apiError {
             return [400, 404, 405, 422].contains(statusCode)
@@ -20993,6 +21056,7 @@ final class ChatViewModel {
         guard !hasAttachments else { return }
         guard !WebLinkContextResolver.containsHTTPURL(text) else { return }
         guard !(shouldUseDirectImageGeneration(modelId: modelId)
+            || selectedModelSupportsImageGenerationCapability(modelId: modelId)
             || shouldPreferChatNativeImageGeneration(modelId: modelId)),
               !shouldUseDirectVideoGeneration(modelId: modelId) else {
             return
