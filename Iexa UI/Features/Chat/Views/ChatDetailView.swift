@@ -2250,18 +2250,31 @@ private struct AgentActivityItem: Identifiable, Hashable {
         liveToolCalls: [LocalAlpineToolCall] = [],
         liveStatus: ChatStatusUpdate? = nil
     ) {
-        if message.metadata?["iexa_local_native_continuation"] == "true"
-            || message.metadata?["iexa_local_alpine_final_summary"] != nil
-            || message.metadata?["iexa_local_alpine_continuation"] == "true"
-            || message.metadata?["iexa_local_alpine_missing_tool_correction"] != nil
-            || message.metadata?["iexa_local_alpine_hidden_correction_parent"] == "true" {
+        let metadata = message.metadata
+        let allowsLocalAlpineContinuationActivity =
+            metadata?["iexa_local_alpine_continuation"] == "true"
+            && metadata?["iexa_local_alpine_final_summary"] == nil
+            && metadata?["iexa_local_alpine_missing_tool_correction"] == nil
+            && (
+                metadata?["iexa_local_alpine_tool_calls"] != nil
+                || !liveToolCalls.isEmpty
+                || liveStatus?.action == "local_alpine_tool"
+            )
+        let hasLiveLocalAlpineActivity =
+            !liveToolCalls.isEmpty
+            || liveStatus?.action == "local_alpine_tool"
+            || metadata?["iexa_local_alpine_tool_calls"] != nil
+        if metadata?["iexa_local_native_continuation"] == "true"
+            || metadata?["iexa_local_alpine_final_summary"] != nil
+            || (metadata?["iexa_local_alpine_continuation"] == "true" && !allowsLocalAlpineContinuationActivity)
+            || metadata?["iexa_local_alpine_missing_tool_correction"] != nil
+            || metadata?["iexa_local_alpine_hidden_correction_parent"] == "true" {
             return nil
         }
-        guard Self.isActivityMessage(message) else {
+        guard Self.isActivityMessage(message) || hasLiveLocalAlpineActivity else {
             return nil
         }
         let startedAt = CFAbsoluteTimeGetCurrent()
-        let metadata = message.metadata
         let writtenFiles = LocalAlpineWrittenFile.decodeMetadata(metadata?["iexa_local_alpine_written_files"])
         let commandResults = LocalAlpineAgentCommandResult.decodeMetadata(metadata?["iexa_local_alpine_command_results"])
         let persistedToolCalls = LocalAlpineToolCall.decodeMetadata(metadata?["iexa_local_alpine_tool_calls"])
@@ -3744,6 +3757,9 @@ struct ChatDetailView: View {
             if metadata["iexa_local_alpine_auto_verify"] != nil
                 || metadata["iexa_local_alpine_missing_tool_correction"] != nil {
                 return !isMessageVisuallyStreaming(message) && !hasVisibleCleanedAssistantText()
+            }
+            if hasRenderableAgentActivityCached() {
+                return false
             }
             if isMessageVisuallyStreaming(message) {
                 return false
@@ -10501,216 +10517,97 @@ private struct MediaGenerationDotsCanvas: View {
     }
 
     private struct ScanState {
-        let primaryFocus: CGPoint
-        let secondaryFocus: CGPoint
+        let focus: CGPoint
         let tint: Color
         let spacing: CGFloat
-        let origin: CGPoint
-        let pulse: Double
-        let clusterSize: CGSize
         let columns: Int
         let rows: Int
-    }
-
-    private struct DotSample {
-        let point: CGPoint
-        let normalizedX: Double
-        let normalizedY: Double
-    }
-
-    private struct DotStyle {
-        let radius: CGFloat
-        let opacity: Double
     }
 
     private func render(context: inout GraphicsContext, size: CGSize) {
         guard size.width > 1, size.height > 1 else { return }
         let state = scanState(for: size)
-        for row in 0..<state.rows {
-            for column in 0..<state.columns {
-                guard let style = dotStyle(row: row, column: column, state: state) else { continue }
-                let sample = dotSample(row: row, column: column, state: state)
-                let rect = CGRect(
-                    x: sample.point.x - style.radius,
-                    y: sample.point.y - style.radius,
-                    width: style.radius * 2,
-                    height: style.radius * 2
+        for row in -1...state.rows {
+            for column in -1...state.columns {
+                drawDot(
+                    context: &context,
+                    size: size,
+                    state: state,
+                    row: row,
+                    column: column
                 )
-                context.fill(Path(ellipseIn: rect), with: .color(state.tint.opacity(style.opacity)))
             }
         }
     }
 
     private func scanState(for size: CGSize) -> ScanState {
-        // From the reference video: the field is not a full-card net.  It is a
-        // mid-card lattice whose visible mass breathes and migrates between
-        // diagonal clusters.  Keep plenty of empty card around it.
-        let spacing: CGFloat = isVideo ? 14.2 : 13.4
-        let clusterWidth = size.width * (isVideo ? 0.72 : 0.76)
-        let clusterHeight = size.height * (isVideo ? 0.48 : 0.45)
-        let columns = max(13, Int((clusterWidth / spacing).rounded(.down)))
-        let rows = max(10, Int((clusterHeight / spacing).rounded(.down)))
-        let gridWidth = CGFloat(columns - 1) * spacing
-        let gridHeight = CGFloat(rows - 1) * spacing
-        let origin = CGPoint(
-            x: size.width * 0.50 - gridWidth / 2,
-            y: size.height * (isVideo ? 0.55 : 0.55) - gridHeight / 2
-        )
-
-        let driftClock = time / (isVideo ? 1.12 : 0.96)
-        let pulseClock = time / (isVideo ? 1.35 : 1.18)
-        let easedPulse = smoothStep(smoothRandom(clock: pulseClock, seed: 19))
-        let center = CGPoint(x: origin.x + gridWidth / 2, y: origin.y + gridHeight / 2)
-        let primaryFocus = randomFocus(
-            center: center,
-            gridWidth: gridWidth,
-            gridHeight: gridHeight,
-            clock: driftClock,
-            seedX: 31,
-            seedY: 47,
-            xAmplitude: 0.82,
-            yAmplitude: 0.88
-        )
-        let secondaryFocus = randomFocus(
-            center: center,
-            gridWidth: gridWidth,
-            gridHeight: gridHeight,
-            clock: driftClock * 0.82 + 0.37,
-            seedX: 83,
-            seedY: 109,
-            xAmplitude: 0.88,
-            yAmplitude: 0.92
+        // ChatGPT's card is a fine, regular lattice with a soft radial bloom
+        // drifting through it.  It is not a scanner that visits a sequence of
+        // horizontal lanes.  Keep the lattice across the full card, then let
+        // this edge-less focus cloud create the perceived motion.
+        let period = isVideo ? 5.0 : 4.4
+        let phase = (time.truncatingRemainder(dividingBy: period) + period) / period * .pi * 2
+        let focus = CGPoint(
+            x: size.width * CGFloat(
+                0.50 + 0.20 * sin(phase) + 0.065 * sin(phase * 2.0 + 0.75)
+            ),
+            y: size.height * CGFloat(
+                0.54 + 0.17 * cos(phase - 0.62) + 0.055 * sin(phase * 1.6)
+            )
         )
         let tint = isDark
             ? Color(red: 0.82, green: 0.80, blue: 0.89)
-            : Color(red: 0.48, green: 0.46, blue: 0.53)
+            : Color(red: 0.55, green: 0.52, blue: 0.63)
+        let spacing: CGFloat = isVideo ? 11.4 : 11.1
         return ScanState(
-            primaryFocus: primaryFocus,
-            secondaryFocus: secondaryFocus,
+            focus: focus,
             tint: tint,
             spacing: spacing,
-            origin: origin,
-            pulse: easedPulse,
-            clusterSize: CGSize(width: gridWidth, height: gridHeight),
-            columns: columns,
-            rows: rows
+            columns: Int((size.width / spacing).rounded(.up)) + 2,
+            rows: Int((size.height / spacing).rounded(.up)) + 2
         )
     }
 
-    private func dotSample(row: Int, column: Int, state: ScanState) -> DotSample {
-        let point = CGPoint(
-            x: state.origin.x + CGFloat(column) * state.spacing,
-            y: state.origin.y + CGFloat(row) * state.spacing
-        )
-        let nx = state.columns <= 1 ? 0.5 : Double(column) / Double(state.columns - 1)
-        let ny = state.rows <= 1 ? 0.5 : Double(row) / Double(state.rows - 1)
-        return DotSample(point: point, normalizedX: nx, normalizedY: ny)
-    }
-
-    private func dotStyle(row: Int, column: Int, state: ScanState) -> DotStyle? {
-        let sample = dotSample(row: row, column: column, state: state)
-        let centerFalloff = ovalFalloff(
-            normalizedX: sample.normalizedX,
-            normalizedY: sample.normalizedY,
-            radiusX: 0.68,
-            radiusY: 0.76
-        )
-        guard centerFalloff > 0.025 else { return nil }
-
-        let primary = focusBloom(sample.point, focus: state.primaryFocus, state: state, width: 0.27, height: 0.33)
-        let secondary = focusBloom(sample.point, focus: state.secondaryFocus, state: state, width: 0.23, height: 0.29)
-        let shimmerClock = time / 1.18
-        let shimmer = smoothRandom(
-            clock: shimmerClock + sample.normalizedX * 0.9 - sample.normalizedY * 0.7,
-            seed: row * 37 + column * 53 + 151
-        )
-        let dotBreath = smoothRandom(
-            clock: time / 0.82 + sample.normalizedX * 0.55 + sample.normalizedY * 0.35,
-            seed: row * 97 + column * 131 + 211
-        )
-        let diagonalGain = 0.82 + 0.18 * shimmer
-        let bloom = max(primary, secondary * 0.78) * diagonalGain
-        let breathing = 0.86 + state.pulse * 0.22
-        let fieldNoise = smoothRandom(
-            clock: time / 1.65 + sample.normalizedX * 0.35 + sample.normalizedY * 0.42,
-            seed: row * 17 + column * 29 + 71
-        )
-        let baseField = centerFalloff * (0.055 + fieldNoise * 0.035)
-        let highlight = centerFalloff * bloom * breathing
-        let intensity = baseField + highlight * 0.78
-        guard intensity > 0.026 else { return nil }
-
-        let lampScale = 0.74 + dotBreath * 0.54
-        let radius = CGFloat(0.18 + pow(highlight, 0.82) * (isDark ? 1.20 : 1.44) * lampScale)
-        let opacity = min(
-            isDark ? 0.50 : 0.58,
-            (isDark ? 0.018 : 0.030) + intensity * (isDark ? 0.28 : 0.38) * (0.80 + dotBreath * 0.28)
-        )
-        return DotStyle(radius: radius, opacity: opacity)
-    }
-
-    private func focusBloom(
-        _ point: CGPoint,
-        focus: CGPoint,
+    private func drawDot(
+        context: inout GraphicsContext,
+        size: CGSize,
         state: ScanState,
-        width: Double,
-        height: Double
-    ) -> Double {
-        let dx = Double((point.x - focus.x) / max(state.clusterSize.width, 1)) / width
-        let dy = Double((point.y - focus.y) / max(state.clusterSize.height, 1)) / height
-        return exp(-(dx * dx + dy * dy) * 1.18)
+        row: Int,
+        column: Int
+    ) {
+        let point = dotPosition(row: row, column: column, spacing: state.spacing)
+        let intensity = dotIntensity(point: point, size: size, focus: state.focus)
+        guard intensity > 0.075 else { return }
+        let radius = CGFloat(0.40 + intensity * 0.82)
+        let rect = CGRect(
+            x: point.x - radius,
+            y: point.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        let baseOpacity = isDark ? 0.055 : 0.045
+        let scanOpacity = isDark ? 0.29 : 0.24
+        let color = state.tint.opacity(baseOpacity + intensity * scanOpacity)
+        context.fill(Path(ellipseIn: rect), with: .color(color))
     }
 
-    private func ovalFalloff(
-        normalizedX: Double,
-        normalizedY: Double,
-        radiusX: Double,
-        radiusY: Double
-    ) -> Double {
-        let dx = (normalizedX - 0.5) / radiusX
-        let dy = (normalizedY - 0.5) / radiusY
-        let distance = sqrt(dx * dx + dy * dy)
-        return 1 - smoothStep((distance - 0.62) / 0.38)
-    }
-
-    private func randomFocus(
-        center: CGPoint,
-        gridWidth: CGFloat,
-        gridHeight: CGFloat,
-        clock: Double,
-        seedX: Int,
-        seedY: Int,
-        xAmplitude: CGFloat,
-        yAmplitude: CGFloat
-    ) -> CGPoint {
-        let x = smoothRandom(clock: clock, seed: seedX) - 0.5
-        let y = smoothRandom(clock: clock + 0.31, seed: seedY) - 0.5
+    private func dotPosition(row: Int, column: Int, spacing: CGFloat) -> CGPoint {
         return CGPoint(
-            x: center.x + CGFloat(x) * gridWidth * xAmplitude,
-            y: center.y + CGFloat(y) * gridHeight * yAmplitude
+            x: CGFloat(column) * spacing,
+            y: CGFloat(row) * spacing
         )
     }
 
-    private func smoothRandom(clock: Double, seed: Int) -> Double {
-        let base = floor(clock)
-        let fraction = clock - base
-        let eased = smoothStep(fraction)
-        let a = randomUnit(Int(base), seed: seed)
-        let b = randomUnit(Int(base) + 1, seed: seed)
-        return a + (b - a) * eased
-    }
-
-    private func randomUnit(_ index: Int, seed: Int) -> Double {
-        var value = UInt64(bitPattern: Int64(index &* 374_761_393 &+ seed &* 668_265_263))
-        value ^= value >> 13
-        value &*= 1_274_126_177
-        value ^= value >> 16
-        return Double(value & 0xFFFF) / Double(0xFFFF)
-    }
-
-    private func smoothStep(_ value: Double) -> Double {
-        let clamped = min(1, max(0, value))
-        return clamped * clamped * (3 - 2 * clamped)
+    private func dotIntensity(
+        point: CGPoint,
+        size: CGSize,
+        focus: CGPoint
+    ) -> Double {
+        let dx = Double((point.x - focus.x) / max(size.width, 1))
+        let dy = Double((point.y - focus.y) / max(size.height, 1))
+        let bloom = exp(-(dx * dx + dy * dy) * 15)
+        let pulse = 0.88 + 0.12 * sin(time * 2.05)
+        return 0.075 + bloom * 0.88 * pulse
     }
 }
 

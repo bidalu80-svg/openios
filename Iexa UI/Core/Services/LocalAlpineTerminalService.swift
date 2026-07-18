@@ -3338,7 +3338,7 @@ actor LocalAlpineTerminalService {
             """
         }
 
-        return protectSlowNPMVersionChecks(in: rewriteApkNodeAlias(in: command))
+        return protectDNSVersionChecks(in: protectSlowNPMVersionChecks(in: rewriteApkNodeAlias(in: command)))
     }
 
     private func managedPythonHTTPServerCommand(for command: String) -> String? {
@@ -3531,7 +3531,7 @@ actor LocalAlpineTerminalService {
         iexa_refresh_toolchain_env
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-07-18.2
+          _iexa_bootstrap_version=2026-07-18.3
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
           if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ -x "$_iexa_bootstrap_bin/nslookup" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:${PATH:-}"
@@ -3816,7 +3816,7 @@ actor LocalAlpineTerminalService {
         for _iexa_dns_dir in ${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}; do
           [ -n "$_iexa_dns_dir" ] || _iexa_dns_dir=.
           _iexa_dns_candidate="$_iexa_dns_dir/$_iexa_dns_tool"
-          if [ -x "$_iexa_dns_candidate" ] && [ "$_iexa_dns_dir" != "$_iexa_dns_wrapper_dir" ]; then
+          if [ -x "$_iexa_dns_candidate" ] && [ "$_iexa_dns_dir" != "$_iexa_dns_wrapper_dir" ] && [ "$_iexa_dns_dir" != "/usr/local/bin" ]; then
             _iexa_dns_real="$_iexa_dns_candidate"
             break
           fi
@@ -3856,7 +3856,7 @@ actor LocalAlpineTerminalService {
             for _iexa_dns_dir in ${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}; do
               [ -n "$_iexa_dns_dir" ] || _iexa_dns_dir=.
               _iexa_dns_candidate="$_iexa_dns_dir/$tool"
-              if [ -x "$_iexa_dns_candidate" ] && [ "$_iexa_dns_dir" != "$_iexa_dns_wrapper_dir" ]; then
+              if [ -x "$_iexa_dns_candidate" ] && [ "$_iexa_dns_dir" != "$_iexa_dns_wrapper_dir" ] && [ "$_iexa_dns_dir" != "/usr/local/bin" ]; then
                 _iexa_dns_real="$_iexa_dns_candidate"
                 break
               fi
@@ -3872,6 +3872,13 @@ actor LocalAlpineTerminalService {
           chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" "$_iexa_bootstrap_bin/top" "$_iexa_bootstrap_bin/nslookup" 2>/dev/null || true
           for tool in dig host drill; do
             [ -x "$_iexa_bootstrap_bin/$tool" ] && chmod +x "$_iexa_bootstrap_bin/$tool" 2>/dev/null || true
+          done
+          mkdir -p /usr/local/bin 2>/dev/null || true
+          for tool in nslookup dig host drill; do
+            if [ -x "$_iexa_bootstrap_bin/$tool" ]; then
+              cp "$_iexa_bootstrap_bin/$tool" "/usr/local/bin/$tool" 2>/dev/null || true
+              chmod +x "/usr/local/bin/$tool" 2>/dev/null || true
+            fi
           done
           printf '%s\\n' "$_iexa_bootstrap_version" > "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null || true
           export PATH="$_iexa_bootstrap_bin:${PATH:-}"
@@ -4172,6 +4179,38 @@ actor LocalAlpineTerminalService {
           cat "$tmp" 2>/dev/null || true
           rm -f "$tmp"
           return "$status"
+        }
+        \(rewritten)
+        """
+    }
+
+    private func protectDNSVersionChecks(in command: String) -> String {
+        var rewritten = command
+        let replacements = [
+            (#"(?<![\w./-])(nslookup|dig|host|drill)\s+--version(?![\w-])"#, "iexa_dns_version $1"),
+            (#"(?<![\w./-])(nslookup|dig|host|drill)\s+-version(?![\w-])"#, "iexa_dns_version $1"),
+            (#"(?<![\w./-])(nslookup|dig|host|drill)\s+-v(?![\w-])"#, "iexa_dns_version $1")
+        ]
+        for (pattern, replacement) in replacements {
+            rewritten = rewritten.replacingOccurrences(
+                of: pattern,
+                with: replacement,
+                options: [.regularExpression, .caseInsensitive]
+            )
+        }
+        guard rewritten != command else { return command }
+        return """
+        iexa_dns_version() {
+          tool="$1"
+          path="$(command -v "$tool" 2>/dev/null || true)"
+          if [ -z "$path" ]; then
+            echo "missing: $tool"
+            return 127
+          fi
+          echo "$tool is available through Iexa Local Alpine."
+          echo "Command: $path"
+          echo "Version probing is skipped because BusyBox DNS tools may treat version flags as DNS queries."
+          return 0
         }
         \(rewritten)
         """

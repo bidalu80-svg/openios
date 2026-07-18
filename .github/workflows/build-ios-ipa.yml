@@ -323,6 +323,16 @@ jobs:
           echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
           export PKG_CONFIG_PATH="$(brew --prefix libarchive)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
+          if [ ! -d "External/ish-arm64-2.0.0" ]; then
+            if [ -f "External/ish-arm64-2.0.0.zip" ]; then
+              unzip -q "External/ish-arm64-2.0.0.zip" -d External
+            else
+              echo "::error::Missing vendored iSH source at External/ish-arm64-2.0.0 or External/ish-arm64-2.0.0.zip"
+              exit 1
+            fi
+          fi
+          export IEXA_ISH_SOURCE_PATH="$PWD/External/ish-arm64-2.0.0"
+          export IEXA_ISH_SOURCE_FORCE=1
           bash scripts/prepare-ish-source.sh External/ish
           mkdir -p ".build/local-alpine-resources"
           bash scripts/prepare-local-alpine-fakefs.sh \
