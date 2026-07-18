@@ -100,181 +100,21 @@ struct AdminWebSearchView: View {
                 showDivider: true
             )
 
-            inlinePickerRow(
-                title: "Web Search Engine",
-                selection: $viewModel.retrievalConfig.web.webSearchEngine,
-                options: searchEngineOptions
-            )
-
-            // Engine-specific fields
-            engineSpecificFields
-
-            HStack(spacing: Spacing.md) {
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    Text("Search Result Count")
-                        .scaledFont(size: 14, weight: .medium)
-                        .foregroundStyle(theme.textSecondary)
-                    TextField("3", value: $viewModel.retrievalConfig.web.searchResultCount, format: .number)
-                        .scaledFont(size: 15)
-                        .keyboardType(.numberPad)
-                        .textInputAutocapitalization(.never)
-                }
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    Text("Concurrent Requests")
-                        .scaledFont(size: 14, weight: .medium)
-                        .foregroundStyle(theme.textSecondary)
-                    TextField("10", value: $viewModel.retrievalConfig.web.searchConcurrentRequests, format: .number)
-                        .scaledFont(size: 15)
-                        .keyboardType(.numberPad)
-                        .textInputAutocapitalization(.never)
-                }
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text("Browser Agent Search")
+                    .scaledFont(size: 14, weight: .medium)
+                    .foregroundStyle(theme.textSecondary)
+                Text("聊天联网搜索现在使用内置浏览器 Agent：先打开真实搜索页，再由模型继续打开、滚动、读取来源网页。第三方搜索 API 配置不再作为普通聊天搜索主路径。")
+                    .scaledFont(size: 13)
+                    .foregroundStyle(theme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, Spacing.md)
             .padding(.vertical, Spacing.chatBubblePadding)
 
             Divider().padding(.leading, Spacing.md)
-
-            inlineTextFieldRow(
-                title: "Fetch URL Content Length Limit",
-                placeholder: "0",
-                text: Binding(
-                    get: { String(viewModel.retrievalConfig.web.fetchPageContentLengthLimit) },
-                    set: { viewModel.retrievalConfig.web.fetchPageContentLengthLimit = Int($0) ?? 0 }
-                ),
-                keyboardType: .numberPad
-            )
-
-            inlineTextFieldRow(
-                title: "Domain Filter List",
-                placeholder: "e.g. example.com, docs.ai",
-                text: $viewModel.domainFilterListString
-            )
-
-            inlineToggleRow(
-                title: "Bypass Embedding and Retrieval",
-                isOn: $viewModel.retrievalConfig.web.bypassEmbeddingAndRetrieval,
-                showDivider: true
-            )
-
-            inlineToggleRow(
-                title: "Bypass Web Loader",
-                isOn: $viewModel.retrievalConfig.web.bypassWebLoader,
-                showDivider: true
-            )
-
-            inlineToggleRow(
-                title: "Trust Proxy Environment",
-                isOn: $viewModel.retrievalConfig.web.trustProxyEnvironment,
-                showDivider: false
-            )
         }
         .padding(.horizontal, Spacing.sm)
-    }
-
-    // MARK: - Engine-Specific Fields
-
-    @ViewBuilder
-    private var engineSpecificFields: some View {
-        let engine = viewModel.retrievalConfig.web.webSearchEngine
-
-        switch engine {
-        case "searxng":
-            inlineTextFieldRow(title: "SearXNG Query URL", placeholder: "http://...", text: $viewModel.retrievalConfig.web.searxngQueryURL)
-            inlineTextFieldRow(title: "Language", placeholder: "en", text: $viewModel.retrievalConfig.web.searxngLanguage)
-
-        case "yacy":
-            inlineTextFieldRow(title: "YaCy Query URL", placeholder: "http://host:8090", text: $viewModel.retrievalConfig.web.yacyQueryURL)
-            inlineTextFieldRow(title: "Username", placeholder: "Optional", text: $viewModel.retrievalConfig.web.yacyUsername)
-            inlineSecureRow(title: "Password", placeholder: "Optional", text: $viewModel.retrievalConfig.web.yacyPassword, isVisible: viewModel.showYacyPassword) { viewModel.showYacyPassword.toggle() }
-
-        case "google_pse":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Google PSE API Key", text: $viewModel.retrievalConfig.web.googlePSEAPIKey, isVisible: viewModel.showGooglePSEKey) { viewModel.showGooglePSEKey.toggle() }
-            inlineTextFieldRow(title: "Engine ID", placeholder: "Enter Engine ID", text: $viewModel.retrievalConfig.web.googlePSEEngineID)
-
-        case "brave":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Brave API Key", text: $viewModel.retrievalConfig.web.braveSearchAPIKey, isVisible: viewModel.showBraveKey) { viewModel.showBraveKey.toggle() }
-
-        case "kagi":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Kagi API Key", text: $viewModel.retrievalConfig.web.kagiSearchAPIKey, isVisible: viewModel.showKagiKey) { viewModel.showKagiKey.toggle() }
-
-        case "mojeek":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Mojeek API Key", text: $viewModel.retrievalConfig.web.mojeekSearchAPIKey, isVisible: viewModel.showMojeekKey) { viewModel.showMojeekKey.toggle() }
-
-        case "bocha":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Bocha API Key", text: $viewModel.retrievalConfig.web.bochaSearchAPIKey, isVisible: viewModel.showBochaKey) { viewModel.showBochaKey.toggle() }
-
-        case "serpstack":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Serpstack API Key", text: $viewModel.retrievalConfig.web.serpstackAPIKey, isVisible: viewModel.showSerpstackKey) { viewModel.showSerpstackKey.toggle() }
-            inlineToggleRow(title: "HTTPS", isOn: $viewModel.retrievalConfig.web.serpstackHTTPS, showDivider: true)
-
-        case "serper":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Serper API Key", text: $viewModel.retrievalConfig.web.serperAPIKey, isVisible: viewModel.showSerperKey) { viewModel.showSerperKey.toggle() }
-
-        case "serply":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Serply API Key", text: $viewModel.retrievalConfig.web.serplyAPIKey, isVisible: viewModel.showSerplyKey) { viewModel.showSerplyKey.toggle() }
-
-        case "searchapi":
-            inlineSecureRow(title: "API Key", placeholder: "Enter SearchAPI API Key", text: $viewModel.retrievalConfig.web.searchAPIAPIKey, isVisible: viewModel.showSearchAPIKey) { viewModel.showSearchAPIKey.toggle() }
-            inlineTextFieldRow(title: "Engine", placeholder: "google", text: $viewModel.retrievalConfig.web.searchAPIEngine)
-
-        case "serpapi":
-            inlineSecureRow(title: "API Key", placeholder: "Enter SerpAPI API Key", text: $viewModel.retrievalConfig.web.serpAPIAPIKey, isVisible: viewModel.showSerpAPIKey) { viewModel.showSerpAPIKey.toggle() }
-            inlineTextFieldRow(title: "Engine", placeholder: "google", text: $viewModel.retrievalConfig.web.serpAPIEngine)
-
-        case "tavily":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Tavily API Key", text: $viewModel.retrievalConfig.web.tavilyAPIKey, isVisible: viewModel.showTavilyKey) { viewModel.showTavilyKey.toggle() }
-            inlineTextFieldRow(title: "Extract Depth", placeholder: "basic", text: $viewModel.retrievalConfig.web.tavilyExtractDepth)
-
-        case "jina":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Jina API Key", text: $viewModel.retrievalConfig.web.jinaAPIKey, isVisible: viewModel.showJinaKey) { viewModel.showJinaKey.toggle() }
-
-        case "bing":
-            inlineSecureRow(title: "Subscription Key", placeholder: "Enter Bing Subscription Key", text: $viewModel.retrievalConfig.web.bingSearchV7SubscriptionKey, isVisible: viewModel.showBingKey) { viewModel.showBingKey.toggle() }
-            inlineTextFieldRow(title: "Endpoint", placeholder: "https://api.bing.microsoft.com/v7.0/search", text: $viewModel.retrievalConfig.web.bingSearchV7Endpoint)
-            inlineTextFieldRow(title: "Region", placeholder: "en-US", text: $viewModel.retrievalConfig.web.bingSearchV7Region)
-
-        case "exa":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Exa API Key", text: $viewModel.retrievalConfig.web.exaAPIKey, isVisible: viewModel.showExaKey) { viewModel.showExaKey.toggle() }
-
-        case "perplexity":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Perplexity API Key", text: $viewModel.retrievalConfig.web.perplexityAPIKey, isVisible: viewModel.showPerplexityKey) { viewModel.showPerplexityKey.toggle() }
-
-        case "sougou":
-            inlineSecureRow(title: "API SID", placeholder: "Enter Sougou API SID", text: $viewModel.retrievalConfig.web.sougouAPISID, isVisible: viewModel.showSougouSID) { viewModel.showSougouSID.toggle() }
-            inlineSecureRow(title: "API SK", placeholder: "Enter Sougou API SK", text: $viewModel.retrievalConfig.web.sougouAPISK, isVisible: viewModel.showSougouSK) { viewModel.showSougouSK.toggle() }
-
-        case "firecrawl":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Firecrawl API Key", text: $viewModel.retrievalConfig.web.firecrawlAPIKey, isVisible: viewModel.showFirecrawlKey) { viewModel.showFirecrawlKey.toggle() }
-            inlineTextFieldRow(title: "API Base URL", placeholder: "https://api.firecrawl.dev", text: $viewModel.retrievalConfig.web.firecrawlAPIBaseURL)
-
-        case "external":
-            inlineTextFieldRow(title: "External Search URL", placeholder: "http://...", text: $viewModel.retrievalConfig.web.externalSearchURL)
-            inlineSecureRow(title: "API Key", placeholder: "Enter External Search API Key", text: $viewModel.retrievalConfig.web.externalSearchAPIKey, isVisible: viewModel.showExternalSearchKey) { viewModel.showExternalSearchKey.toggle() }
-
-        case "yandex":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Yandex API Key", text: $viewModel.retrievalConfig.web.yandexSearchAPIKey, isVisible: viewModel.showYandexKey) { viewModel.showYandexKey.toggle() }
-            inlineTextFieldRow(title: "Folder ID", placeholder: "Enter Folder ID", text: $viewModel.retrievalConfig.web.yandexSearchFolderID)
-            inlineTextFieldRow(title: "Language", placeholder: "en", text: $viewModel.retrievalConfig.web.yandexSearchLang)
-
-        case "youcom":
-            inlineSecureRow(title: "API Key", placeholder: "Enter You.com API Key", text: $viewModel.retrievalConfig.web.youSearchAPIKey, isVisible: viewModel.showYouKey) { viewModel.showYouKey.toggle() }
-
-        case "ollama_cloud":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Ollama Cloud API Key", text: $viewModel.retrievalConfig.web.ollamaCloudAPIKey, isVisible: viewModel.showOllamaCloudKey) { viewModel.showOllamaCloudKey.toggle() }
-            inlineTextFieldRow(title: "API URL", placeholder: "http://...", text: $viewModel.retrievalConfig.web.ollamaCloudAPIURL)
-            inlineTextFieldRow(title: "Model", placeholder: "Enter Model", text: $viewModel.retrievalConfig.web.ollamaCloudModel)
-
-        case "perplexity_search":
-            inlineSecureRow(title: "API Key", placeholder: "Enter Perplexity Search API Key", text: $viewModel.retrievalConfig.web.perplexitySearchAPIKey, isVisible: viewModel.showPerplexitySearchKey) { viewModel.showPerplexitySearchKey.toggle() }
-            inlineTextFieldRow(title: "API URL", placeholder: "http://...", text: $viewModel.retrievalConfig.web.perplexitySearchAPIURL)
-            inlineTextFieldRow(title: "Model", placeholder: "Enter Model", text: $viewModel.retrievalConfig.web.perplexitySearchModel)
-
-        case "DDGS":
-            inlineTextFieldRow(title: "Proxy", placeholder: "http://...", text: $viewModel.retrievalConfig.web.ddgsProxy)
-
-        default:
-            EmptyView()
-        }
     }
 
     // MARK: - Loader Section
@@ -387,39 +227,6 @@ struct AdminWebSearchView: View {
             )
         }
         .padding(.horizontal, Spacing.sm)
-    }
-
-    // MARK: - Search Engine Options
-
-    private var searchEngineOptions: [(value: String, label: String)] {
-        [
-            (value: "", label: "None"),
-            (value: "ollama_cloud", label: "Ollama Cloud"),
-            (value: "perplexity_search", label: "Perplexity Search"),
-            (value: "searxng", label: "SearXNG"),
-            (value: "yacy", label: "YaCy"),
-            (value: "google_pse", label: "Google PSE"),
-            (value: "brave", label: "Brave"),
-            (value: "kagi", label: "Kagi"),
-            (value: "mojeek", label: "Mojeek"),
-            (value: "bocha", label: "Bocha"),
-            (value: "serpstack", label: "Serpstack"),
-            (value: "serper", label: "Serper"),
-            (value: "serply", label: "Serply"),
-            (value: "searchapi", label: "SearchAPI"),
-            (value: "serpapi", label: "SerpAPI"),
-            (value: "DDGS", label: "DDGS"),
-            (value: "tavily", label: "Tavily"),
-            (value: "jina", label: "Jina"),
-            (value: "bing", label: "Bing"),
-            (value: "exa", label: "Exa"),
-            (value: "perplexity", label: "Perplexity"),
-            (value: "sougou", label: "Sougou"),
-            (value: "firecrawl", label: "Firecrawl"),
-            (value: "external", label: "External"),
-            (value: "yandex", label: "Yandex"),
-            (value: "youcom", label: "You.com"),
-        ]
     }
 
     // MARK: - Row Builders

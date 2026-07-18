@@ -180,6 +180,26 @@ final class BrowserWebSearchService: NSObject {
         )
     }
 
+    static func agentSearchPageURLs(for query: String) -> [String] {
+        let normalized = normalizedQuery(query)
+        guard !normalized.isEmpty else { return [] }
+        let encoded = normalized.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? normalized
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let needsFreshness = searchNeedsFreshness(normalized)
+        var pages = [
+            needsFreshness
+                ? "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&filters=ex1%3a%22ez1%22&_=\(timestamp)"
+                : "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&_=\(timestamp)",
+            "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)",
+            "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)",
+            "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)"
+        ]
+        if needsFreshness {
+            pages.append("https://so.toutiao.com/search?keyword=\(encoded)&pd=information&dvpf=pc&_=\(timestamp)")
+        }
+        return pages
+    }
+
     func responseFromConfiguredSearchItems(
         _ rawItems: [WebSearchResultItem],
         originalQuery: String?,
@@ -581,63 +601,55 @@ final class BrowserWebSearchService: NSObject {
             ]
         }
 
-        let extraQueries = Self.stringArray(in: call, keys: ["queries", "search_queries"])
-        let limit = min(max(Self.intValue(call["limit"] ?? call["count"] ?? call["max_results"]) ?? 6, 1), 8)
-        let includeScreenshot = Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"] ?? call["attach_preview"] ?? call["attachPreview"]) ?? false
-        let queries = Self.deviceDateAwareQueries(([query] + extraQueries).map(Self.normalizedQuery))
-        let response = await search(queries: Array(queries.prefix(4)), originalQuery: query)
-
-        var itemsPayload = response.items.prefix(limit).map(Self.itemPayload(from:))
-        var docsPayload = response.docs.prefix(4).map(Self.documentPayload(from:))
-        var previewImages: [String] = []
-
-        if includeScreenshot,
-           let existingThumbnail = itemsPayload.compactMap({ $0["thumbnail_url"] as? String }).first {
-            previewImages.append(existingThumbnail)
-        } else if includeScreenshot,
-           let firstLink = response.items.compactMap(\.link).first,
-           let url = URL(string: firstLink),
-           ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-           await load(url: url, timeout: 10) {
-            try? await Task.sleep(nanoseconds: 550_000_000)
-            let snapshot = await evaluateFullPageSnapshot(maxScrolls: 14)
-            let thumbnail = await capturePageThumbnail(prefix: "search")
-            if let thumbnail {
-                previewImages.append(thumbnail.absoluteString)
-            }
-            if !itemsPayload.isEmpty {
-                let currentSnippet = itemsPayload[0]["snippet"] as? String
-                if let snapshot, currentSnippet?.isEmpty != false {
-                    itemsPayload[0]["snippet"] = String(snapshot.text.prefix(260))
-                }
-                if let thumbnail {
-                    itemsPayload[0]["thumbnail_url"] = thumbnail.absoluteString
-                }
-            }
-            if let snapshot, !snapshot.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let doc = Self.fullPageDocument(
-                    from: snapshot,
-                    fallbackTitle: response.items.first(where: { $0.link == firstLink })?.title,
-                    fallbackURL: firstLink,
-                    provider: "wkwebview_browser_tool_full_page"
-                )
-                docsPayload.removeAll { Self.documentPayloadMatches($0, url: firstLink, alternateURL: snapshot.url) }
-                docsPayload.insert(Self.documentPayload(from: doc), at: 0)
+        let timeout = TimeInterval(Self.intValue(call["timeout"] ?? call["timeout_seconds"]) ?? 10)
+        var loadedURL: String?
+        for page in Self.agentSearchPageURLs(for: query).prefix(4) {
+            guard let url = URL(string: page) else { continue }
+            if await load(url: url, timeout: min(max(timeout, 3), 20), forceReload: true) {
+                loadedURL = page
+                break
             }
         }
+        guard let loadedURL else {
+            return [
+                "action": "web.search",
+                "ok": false,
+                "query": query,
+                "error": "Failed to load search page"
+            ]
+        }
 
-        return [
-            "action": "web.search",
-            "ok": !response.items.isEmpty || !response.docs.isEmpty,
-            "query": query,
-            "queries": queries,
-            "count": itemsPayload.count,
-            "items": itemsPayload,
-            "docs": Array(docsPayload.prefix(4)),
-            "attach_file": false,
-            "preview_images": previewImages,
-            "summary": itemsPayload.isEmpty ? "未找到可用搜索结果。" : "已搜索 \(itemsPayload.count) 个网页来源。"
-        ]
+        try? await Task.sleep(nanoseconds: 650_000_000)
+        var navigatePayload = await executeNativeBrowserUse([
+            "action": "navigate",
+            "url": loadedURL,
+            "force_reload": false,
+            "reload": false,
+            "screenshot": Self.boolValue(call["screenshot"] ?? call["with_screenshot"] ?? call["thumbnail"] ?? call["attach_preview"] ?? call["attachPreview"]) ?? false,
+            "max_scrolls": min(max(Self.intValue(call["max_scrolls"] ?? call["maxScrolls"]) ?? 3, 1), 6),
+            "observation_limit": min(max(Self.intValue(call["observation_limit"] ?? call["limit"] ?? call["count"] ?? call["max_results"]) ?? 48, 12), 80)
+        ])
+        let searchItems = await evaluateSearchItems()
+        let items = searchItems.prefix(
+            min(max(Self.intValue(call["limit"] ?? call["count"] ?? call["max_results"]) ?? 8, 1), 12)
+        ).map(Self.itemPayload(from:))
+
+        navigatePayload["action"] = "web.search"
+        navigatePayload["browser_action"] = "browser.open"
+        navigatePayload["query"] = query
+        navigatePayload["search_page_url"] = loadedURL
+        navigatePayload["items"] = items
+        navigatePayload["count"] = items.count
+        navigatePayload["next_action_required"] = true
+        navigatePayload["visible_answer_allowed"] = false
+        navigatePayload["suggested_next_browser_action"] = "browser.find_elements"
+        navigatePayload["next_action_reason"] = "Search page is open. Continue with browser_use to inspect results, open relevant pages, scroll/read them, and only then answer the user."
+        navigatePayload["model_instruction"] = "Intermediate web search page. Do not answer from this search page alone. Continue with browser_use: inspect/click a relevant result, then get_readable/get_text/scroll_and_collect on the opened source page before final answer."
+        navigatePayload["final_answer_instruction"] = "Do not answer the user yet. Emit the next browser_use tool call."
+        navigatePayload["summary"] = items.isEmpty
+            ? "已打开搜索结果页，等待继续浏览网页。"
+            : "已打开搜索结果页，识别到 \(items.count) 个候选结果，等待继续打开/读取来源。"
+        return navigatePayload
     }
 
     private func executeNativeOpen(_ call: [String: Any], readable: Bool) async -> [String: Any] {

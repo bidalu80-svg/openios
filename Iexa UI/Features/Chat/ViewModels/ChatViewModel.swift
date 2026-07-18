@@ -2667,8 +2667,8 @@ final class ChatViewModel {
         ),
         LocalAlpineToolCapability(
             name: "web_search",
-            description: "Search the live web with the built-in browser and return source-backed results. Build queries from the current device date/time, not model training-cutoff dates.",
-            arguments: ["query", "queries optional", "limit optional", "screenshot optional", "aliases: search_web/browser_search"]
+            description: "Start a Minis-style browser search workflow in the shared iOS browser. This opens a real search page and returns an intermediate page observation; continue with browser_use to inspect, open, scroll, and read source pages before answering. Build queries from the current device date/time, not model training-cutoff dates.",
+            arguments: ["query", "queries optional", "limit optional", "screenshot optional", "then continue with browser_use", "aliases: search_web/browser_search"]
         ),
         LocalAlpineToolCapability(
             name: "iexa_open",
@@ -2743,15 +2743,15 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "web_search",
-                    "description": "Search the live web with the built-in browser and return source-backed results. Anchor relative/current queries to the current device date/time, not model training-cutoff dates.",
+                    "description": "Start a Minis-style browser search workflow in the shared iOS browser. This opens a real search page and returns an intermediate page observation; continue with browser_use to inspect, open, scroll, and read source pages before answering. Anchor relative/current queries to the current device date/time, not model training-cutoff dates.",
                     "parameters": [
                         "type": "object",
                         "properties": [
                             "tool_title": ["type": "string", "description": "Short user-facing title for this step."],
                             "query": ["type": "string", "description": "Search query. Include the current device year/date for current/latest/today/time-sensitive requests."],
                             "queries": ["type": "array", "items": ["type": "string"], "description": "Optional alternate queries, preferably including a device-date/current-year variant when freshness matters."],
-                            "limit": ["type": "integer", "description": "Maximum result count, 1-8."],
-                            "screenshot": ["type": "boolean", "description": "Capture a thumbnail for the top result when helpful."]
+                            "limit": ["type": "integer", "description": "Maximum candidate count to expose from the opened search page, 1-12."],
+                            "screenshot": ["type": "boolean", "description": "Capture tool-only visual state when helpful. Do not show screenshots unless the user asks."]
                         ],
                         "required": ["tool_title", "query"]
                     ]
@@ -2961,7 +2961,7 @@ final class ChatViewModel {
         - Fill a short user-language `tool_title` for every tool. Prefer structured file tools for read/write/edit; do not write source code via shell heredocs/echo/cat/tee/printf.
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Tool call style: when a listed tool can complete the user's request, call it directly instead of explaining that you could do it. Infer intent from the user's latest wording, prior tool results, current page/workspace context, and reasonable safe defaults. Ask only when the target/action is genuinely ambiguous, needs private credentials, or could affect data outside the requested scope.
-        - Use `web_search` for live search, `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
+        - Use `web_search` to start live web search in the shared iOS browser, then continue with `browser_use` to inspect/open/scroll/read real source pages before answering. Use `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
         - Browser override: use `browser_use` like Minis, but prefer the app's automation observation fields over guessing. After every `navigate`, `click`, `type`, `scroll`, `execute_js`, viewport, or tab action, inspect `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll`. Continue with candidate `node_id` values for `click`/`type`/`hover`; use screenshots only when visual confirmation or coordinate fallback is needed. After pressing a generate/export/download button, wait for the real result with `wait_for_image`, `wait_for_dom_stable`, or `fetch`; do not stop at the click.
         - Browser interaction: treat click/type/scroll/find success as intermediate only. Continue bounded primitive `browser_use` steps in the same turn until the user's page task is complete, a final file/result is available, or the tool explicitly returns `requires_user_verification:true`. Use `find_elements` with `scan_page:true` to discover controls across the full page; when an item returns `nodeId`/`node_id`, pass that id to the next click/type/hover instead of inventing a selector. If DOM matching misses a visible control, scroll it into view and click by viewport coordinates from the screenshot. Use `get_readable`, `get_text`, or `scroll_and_collect` before summarizing long pages; do not conclude from the first viewport. Screenshots are tool-only by default; do not set `attach_preview`, `show_in_chat`, or `attach_file` unless the user asks to save/download/show a screenshot. Human-verification words visible on the page are not a failure; pause only when the tool explicitly returns `requires_user_verification:true`. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. After the user completes verification, continue from the same shared page using the next screenshot/read result; do not reopen or reload the same URL unless required.
         - Browser auth limits: if `browser_use` reaches Google/OAuth login pages (`accounts.google.com`, `signin.google.com`, `myaccount.google.com`, `oauth2.googleapis.com`) or the page says `disallowed_useragent`, 403, or "browser is not secure", do not retry login loops. Tell the user this must be completed in system Safari/Chrome, provide the https link as a normal Markdown link, and ask them to paste the needed result back into chat.
@@ -3043,7 +3043,7 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": "web_search",
-                        "description": "Search the live web with the iOS built-in browser when the answer may require current, recent, external, source-backed, or uncertain information. Infer the search query from the user's natural language and anchor relative/current queries to the current device date/time, not model training-cutoff dates; include today's date/year when freshness matters.",
+                        "description": "Start a Minis-style web search in the shared iOS browser when the answer may require current, recent, external, source-backed, or uncertain information. Infer the search query from the user's natural language and anchor relative/current queries to the current device date/time, not model training-cutoff dates; include today's date/year when freshness matters. The result is an intermediate browser page state, not final evidence: continue with browser_use to inspect/open/scroll/read source pages before answering.",
                         "parameters": [
                             "type": "object",
                             "properties": [
@@ -3053,8 +3053,8 @@ final class ChatViewModel {
                                     "items": ["type": "string"],
                                     "description": "Optional alternate search queries for better recall, including a current device date/year variant when freshness matters."
                                 ],
-                                "limit": ["type": "integer", "description": "Number of sources to return, 1-8."],
-                                "screenshot": ["type": "boolean", "description": "Whether to capture a page thumbnail for the source card."]
+                                "limit": ["type": "integer", "description": "Maximum candidate count to expose from the opened search page, 1-12."],
+                                "screenshot": ["type": "boolean", "description": "Whether to capture tool-only visual state for the search page. Do not show screenshots unless the user asks."]
                             ],
                             "required": ["query"]
                         ]
@@ -13861,6 +13861,7 @@ final class ChatViewModel {
         let query = ((arguments["query"] as? String)
             ?? (arguments["queries"] as? [String])?.first
             ?? (arguments["keywords"] as? String)
+            ?? (arguments["web_search_query"] as? String)
             ?? (arguments["url"] as? String)
             ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -15621,6 +15622,29 @@ final class ChatViewModel {
         toolContent: String,
         latestUserPrompt: String?
     ) -> LocalAlpineNativeToolCall? {
+        if call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "web_search",
+           anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true),
+           !anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
+            var arguments = localAlpineNativeToolArguments(for: call)
+            for key in ["query", "q", "queries", "keywords", "keyword", "text", "search"] {
+                arguments.removeValue(forKey: key)
+            }
+            arguments["action"] = "find_elements"
+            arguments["scan_page"] = true
+            arguments["screenshot"] = true
+            arguments["capture_visuals"] = true
+            arguments["attach_preview"] = false
+            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 12, 12)
+            arguments["observation_limit"] = max(nativeToolIntValue(arguments["observation_limit"] ?? arguments["limit"]) ?? 56, 56)
+            arguments["continuation_stage"] = "web_search_page_scan"
+            let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
+            return LocalAlpineNativeToolCall(
+                id: "browser_continue_\(UUID().uuidString)",
+                name: "browser_use",
+                arguments: String(data: data, encoding: .utf8) ?? "{}"
+            )
+        }
+
         let effectiveCall = normalizeBrowserAutomationToolCallIfNeeded(
             call,
             latestUserPrompt: latestUserPrompt
@@ -20859,7 +20883,7 @@ final class ChatViewModel {
 
         Browser override: use `browser_use` like Minis. The shared browser is an iPhone-size mobile Safari/WKWebView by default, not desktop Chrome. Do not switch to `desktop_chrome` or desktop-sized viewport unless the user explicitly asks for desktop/PC mode. For interactive pages, open/navigate first, then read `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll` from every result. Prefer returned candidate `node_id` values for the next `click`, `type`, or `hover`; use `screenshot` only for visual confirmation or coordinate fallback. After pressing a page generate/export/download button, wait for the real result with `wait_for_image` or `wait_for_dom_stable`; do not stop at the click. Treat every browser action result as intermediate until the user task is complete or the tool explicitly returns `requires_user_verification:true`.
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. Use `browser_use` for interactive page work. Use `next_action_candidates` and `post_action_observation.visible_elements` first; use `find_elements` with `scan_page:true` for full-page discovery; reuse returned `nodeId`/`node_id` for the next click/type/hover; use viewport coordinates only when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or the tool explicitly returns `requires_user_verification:true`. Do not narrate intermediate browser work in chat; progress belongs in the tool card. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. If verification is required, the shared browser stays on the same page; after the user completes it, continue from the next observation result without reopening/reloading the same URL.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. `web_search` only opens a real search page and returns an intermediate browser state; do not answer from `web_search` alone. Continue with `browser_use` to inspect results, open relevant pages, then read/scroll source pages with `get_readable`, `get_text`, or `scroll_and_collect` before final answer. Use `browser_use` for interactive page work. Use `next_action_candidates` and `post_action_observation.visible_elements` first; use `find_elements` with `scan_page:true` for full-page discovery; reuse returned `nodeId`/`node_id` for the next click/type/hover; use viewport coordinates only when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or the tool explicitly returns `requires_user_verification:true`. Do not narrate intermediate browser work in chat; progress belongs in the tool card. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. If verification is required, the shared browser stays on the same page; after the user completes it, continue from the next observation result without reopening/reloading the same URL.
 
         Tool call style: when a real or fallback browser/native tool can satisfy the user's request, call it directly instead of only explaining. Infer the search query, URL target, page control, or follow-up intent from the latest user message and visible context; use reasonable safe defaults; ask only when the request is genuinely ambiguous, needs credentials, or would affect data outside the requested scope.
 
@@ -21521,7 +21545,7 @@ final class ChatViewModel {
         """
 
         [客户端联网搜索能力]
-        Iexa 客户端已接入内置 WKWebView 浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明你可以调用 iOS 内置浏览器搜索工具。若本轮请求提供了 `web_search` / `browser_readable` 函数工具，请直接调用真实函数工具；若没有函数工具但系统提示提供 `iexa_native` 浏览器工具，请主动输出 `web.search` 或 `browser.readable` 工具块。天气、新闻、价格、版本、发布、日程等时间敏感问题要默认把当前日期/年份加入查询，并优先核验接近搜索当天的来源；用户明确要求今天或 24 小时内时按当天范围收紧。不要声称你无法联网、无法实时搜索、无法访问最新信息。
+        Iexa 客户端已接入内置 WKWebView 浏览器联网搜索。用户询问你是否能联网、能搜索、能查最新信息时，请明确回答：可以，并说明你可以调用 iOS 内置浏览器搜索工具。若本轮请求提供了 `web_search` / `browser_readable` / `browser_use` 函数工具，请直接调用真实函数工具；`web_search` 只负责打开真实搜索页，之后必须继续用 `browser_use` 打开、滚动、读取来源网页再回答。若没有函数工具但系统提示提供 `iexa_native` 浏览器工具，请主动输出 `web.search` 或 `browser.readable` 工具块。天气、新闻、价格、版本、发布、日程等时间敏感问题要默认把当前日期/年份加入查询，并优先核验接近搜索当天的来源；用户明确要求今天或 24 小时内时按当天范围收紧。不要声称你无法联网、无法实时搜索、无法访问最新信息。
         [/客户端联网搜索能力]
         """
     }
