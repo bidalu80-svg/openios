@@ -1668,7 +1668,7 @@ actor LocalAlpineTerminalService {
         stty -echo 2>/dev/null || true
         export PS1=''
         if cd \(shellSingleQuoted(runtimeCWD)); then
-        \(materializedCommand)
+        /bin/sh -lc \(shellSingleQuoted(materializedCommand))
         __iexa_agent_status=$?
         else
         __iexa_agent_status=$?
@@ -3531,9 +3531,9 @@ actor LocalAlpineTerminalService {
         iexa_refresh_toolchain_env
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-07-13.1
+          _iexa_bootstrap_version=2026-07-18.1
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
-          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ -x "$_iexa_bootstrap_bin/dig" ] && [ -x "$_iexa_bootstrap_bin/host" ] && [ -x "$_iexa_bootstrap_bin/nslookup" ] && [ -x "$_iexa_bootstrap_bin/drill" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
+          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ -x "$_iexa_bootstrap_bin/nslookup" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:${PATH:-}"
             export BROWSER=iexa-open
             hash -r 2>/dev/null || true
@@ -3806,7 +3806,7 @@ actor LocalAlpineTerminalService {
           cat > "$_iexa_bootstrap_bin/top" <<'IEXA_TOP_FALLBACK'
         \(localTopShimScript)
         IEXA_TOP_FALLBACK
-          cat > "$_iexa_bootstrap_bin/dig" <<'IEXA_DNS_TIMEOUT_FALLBACK'
+          cat > "$_iexa_bootstrap_bin/nslookup" <<'IEXA_DNS_TIMEOUT_FALLBACK'
         #!/bin/sh
         _iexa_dns_tool=$(basename "$0")
         _iexa_dns_real=""
@@ -3840,11 +3840,31 @@ actor LocalAlpineTerminalService {
         esac
         exit "$_iexa_dns_status"
         IEXA_DNS_TIMEOUT_FALLBACK
-          for tool in host nslookup drill; do
-            cp "$_iexa_bootstrap_bin/dig" "$_iexa_bootstrap_bin/$tool" 2>/dev/null || true
+          for tool in dig host drill; do
+            _iexa_dns_real=""
+            _iexa_dns_wrapper_dir="$_iexa_bootstrap_bin"
+            _iexa_dns_old_ifs="$IFS"
+            IFS=:
+            for _iexa_dns_dir in ${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}; do
+              [ -n "$_iexa_dns_dir" ] || _iexa_dns_dir=.
+              _iexa_dns_candidate="$_iexa_dns_dir/$tool"
+              if [ -x "$_iexa_dns_candidate" ] && [ "$_iexa_dns_dir" != "$_iexa_dns_wrapper_dir" ]; then
+                _iexa_dns_real="$_iexa_dns_candidate"
+                break
+              fi
+            done
+            IFS="$_iexa_dns_old_ifs"
+            if [ -n "$_iexa_dns_real" ]; then
+              cp "$_iexa_bootstrap_bin/nslookup" "$_iexa_bootstrap_bin/$tool" 2>/dev/null || true
+            else
+              rm -f "$_iexa_bootstrap_bin/$tool" 2>/dev/null || true
+            fi
           done
           cp "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" 2>/dev/null || true
-          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" "$_iexa_bootstrap_bin/top" "$_iexa_bootstrap_bin/dig" "$_iexa_bootstrap_bin/host" "$_iexa_bootstrap_bin/nslookup" "$_iexa_bootstrap_bin/drill" 2>/dev/null || true
+          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" "$_iexa_bootstrap_bin/top" "$_iexa_bootstrap_bin/nslookup" 2>/dev/null || true
+          for tool in dig host drill; do
+            [ -x "$_iexa_bootstrap_bin/$tool" ] && chmod +x "$_iexa_bootstrap_bin/$tool" 2>/dev/null || true
+          done
           printf '%s\\n' "$_iexa_bootstrap_version" > "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null || true
           export PATH="$_iexa_bootstrap_bin:${PATH:-}"
           export BROWSER=iexa-open

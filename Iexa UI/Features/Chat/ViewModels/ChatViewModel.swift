@@ -949,11 +949,17 @@ final class ChatViewModel {
         }
     }
 
-    private func clearLocalAlpineLiveToolState(for messageId: String) {
-        let finalCalls = localAlpinePendingToolCallsByMessageId[messageId]
+    private func clearLocalAlpineLiveToolState(
+        for messageId: String,
+        finalCalls preferredFinalCalls: [LocalAlpineToolCall]? = nil,
+        finalStatus preferredFinalStatus: ChatStatusUpdate? = nil
+    ) {
+        let finalCalls = preferredFinalCalls
+            ?? localAlpinePendingToolCallsByMessageId[messageId]
             ?? localAlpineLiveToolCallsByMessageId[messageId]
             ?? []
-        let finalStatus = localAlpinePendingToolStatusByMessageId[messageId]
+        let finalStatus = preferredFinalStatus
+            ?? localAlpinePendingToolStatusByMessageId[messageId]
             ?? localAlpineLastLiveToolStatusByMessageId[messageId]
         updateLocalAlpineToolCallMetadata(messageId: messageId, calls: finalCalls)
         localAlpineToolEventFlushTasks[messageId]?.cancel()
@@ -2691,7 +2697,7 @@ final class ChatViewModel {
         """
 
     private static let localAlpineDNSLookupRules = """
-        - DNS/domain lookup compatibility: Local Alpine already includes `nslookup`; do not install `bind-tools`, `dig`, or `drill` just to inspect DNS. For user requests such as "查 DNS", "查询域名 DNS 记录", "DNS 复查", or "lookup DNS", extract the hostname from any URL first, then run bounded `nslookup` loops. Use record types `A AAAA CNAME MX NS TXT SOA`; for public verification also query `1.1.1.1` and `8.8.8.8`. Example:
+        - DNS/domain lookup compatibility: Local Alpine already includes `nslookup`; do not install or prefer `bind-tools`, `dig`, `host`, or `drill` just to inspect DNS. For user requests such as "查 DNS", "查询域名 DNS 记录", "DNS 复查", or "lookup DNS", extract the hostname from any URL first, then run bounded `nslookup` loops. Use record types `A AAAA CNAME MX NS TXT SOA`; for public verification also query `1.1.1.1` and `8.8.8.8`. Example:
           `domain='example.com'; for t in A AAAA CNAME MX NS TXT SOA; do echo "[$t]"; nslookup -type=$t "$domain" 2>&1 | sed 's/[[:space:]]*$//'; done`
           Public check:
           `domain='example.com'; for s in 1.1.1.1 8.8.8.8; do echo "SERVER $s"; for t in A AAAA MX NS TXT SOA; do echo "[$t]"; nslookup -type=$t "$domain" "$s" 2>&1 | sed 's/[[:space:]]*$//'; done; done`
@@ -2703,7 +2709,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "shell_execute",
-                    "description": "Run one bounded POSIX sh/BusyBox ash command in Local Alpine. Use `/mnt/iexa/shared` for project work. For DNS lookups use built-in `nslookup`; do not install bind-tools/dig/drill for DNS.",
+                    "description": "Run one bounded POSIX sh/BusyBox ash command in Local Alpine. Use `/mnt/iexa/shared` for project work. For DNS lookups use built-in `nslookup`; do not install bind-tools/dig/host/drill for DNS.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -25750,6 +25756,10 @@ final class ChatViewModel {
             isStreaming: false,
             statusHistory: [doneStatus]
         )
+        let finalToolCalls = localAlpineToolCallsPreservingContentOffsets(
+            result.toolCalls,
+            messageId: resultMessageId
+        )
         if let index = conversation?.messages.firstIndex(where: { $0.id == resultMessageId }) {
             var metadata = conversation?.messages[index].metadata ?? [:]
             metadata["iexa_local_alpine_raw_result"] = Self.localAlpineStoredRawResult(
@@ -25759,10 +25769,6 @@ final class ChatViewModel {
             if let toolRunId = result.toolRunId {
                 metadata["iexa_local_alpine_tool_run_id"] = toolRunId
             }
-            let finalToolCalls = localAlpineToolCallsPreservingContentOffsets(
-                result.toolCalls,
-                messageId: resultMessageId
-            )
             if let toolCalls = LocalAlpineToolCall.metadataString(for: finalToolCalls) {
                 metadata["iexa_local_alpine_tool_calls"] = toolCalls
             }
@@ -25779,7 +25785,11 @@ final class ChatViewModel {
             resultMessageId: resultMessageId
         )
         await attachLocalAlpineGeneratedMediaIfNeeded(messageId: resultMessageId)
-        clearLocalAlpineLiveToolState(for: resultMessageId)
+        clearLocalAlpineLiveToolState(
+            for: resultMessageId,
+            finalCalls: finalToolCalls,
+            finalStatus: doneStatus
+        )
         let resultMessageSnapshot = conversation?.messages.first(where: { $0.id == resultMessageId })
         let resultMetadata = resultMessageSnapshot?.metadata
         let resultFiles = resultMessageSnapshot?.files
