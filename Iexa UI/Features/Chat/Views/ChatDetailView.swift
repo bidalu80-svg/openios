@@ -11467,10 +11467,7 @@ private struct IsolatedAssistantMessage: View {
         guard metadata?["iexa_local_alpine_final_summary"] != nil else {
             return content
         }
-        let limit = 8_000
-        guard content.count > limit else { return content }
-        return String(content.prefix(limit))
-            + "\n\n...（回复过长，前台显示已截断；完整工具结果保留在本地上下文中。）"
+        return content
     }
 
     private static func containsCodeFence(_ text: String) -> Bool {
@@ -12245,12 +12242,12 @@ private struct AgentStepFloatingBar: View {
     @State private var selectedIndex: Int = 0
 
     private var tint: Color {
-        if selectedStep?.failed == true || item.hasFailure { return .orange }
-        return item.isActive || selectedStep?.isRunning == true ? theme.brandPrimary : theme.success
+        if selectedStep?.failed == true { return .orange }
+        return selectedStep?.isRunning == true || (selectedStep == nil && item.isActive) ? theme.brandPrimary : theme.success
     }
 
     private var icon: String {
-        if selectedStep?.failed == true || item.hasFailure { return "exclamationmark.circle.fill" }
+        if selectedStep?.failed == true { return "exclamationmark.circle.fill" }
         return selectedStep?.isRunning == true ? "progress.indicator" : "checkmark.circle.fill"
     }
 
@@ -14216,13 +14213,10 @@ private struct ParsedLocalAlpineResult {
         let commandBlocks = Self.codeBlocks(in: boundaryTrimmed, preferredLanguage: "bash").joined(separator: "\n\n---\n\n")
         let textBlocks = Self.codeBlocks(in: boundaryTrimmed, preferredLanguage: "text").joined(separator: "\n\n---\n\n")
 
-        commandText = Self.clip(
-            commandFromMetadata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? commandBlocks
-                : commandFromMetadata,
-            limit: 8_000
-        )
-        outputText = Self.clip(textBlocks.isEmpty ? boundaryTrimmed : textBlocks, limit: 20_000)
+        commandText = commandFromMetadata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? commandBlocks
+            : commandFromMetadata
+        outputText = textBlocks.isEmpty ? boundaryTrimmed : textBlocks
         let metadataHasCommand = !commandFromMetadata.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         commandCount = max(Self.headingCount(in: searchable, heading: "命令"), metadataHasCommand ? 1 : 0)
         editedFileCount = Self.editedFileCount(in: searchable)
@@ -14298,11 +14292,6 @@ private struct ParsedLocalAlpineResult {
         return regex.numberOfMatches(in: content, range: range)
     }
 
-    private static func clip(_ text: String, limit: Int) -> String {
-        let trimmed = text.trimmingCharacters(in: .newlines)
-        guard trimmed.count > limit else { return trimmed }
-        return String(trimmed.prefix(limit)) + "\n...（内容过长，已折叠）"
-    }
 }
 
 // MARK: - Superscript Number Helper

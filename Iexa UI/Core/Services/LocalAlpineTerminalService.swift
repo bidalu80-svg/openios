@@ -1500,20 +1500,24 @@ actor LocalAlpineTerminalService {
             || lowered.contains("/ping ") {
             return min(defaultTimeout, 20)
         }
-        if lowered.range(of: #"(^|[;&|()\s])(?:dig|host)(\s|$)"#, options: .regularExpression) != nil
+        if lowered.range(of: #"(^|[;&|()\s])(?:dig|host|nslookup|drill)(\s|$)"#, options: .regularExpression) != nil
             || lowered.contains("/dig ")
-            || lowered.contains("/host ") {
-            return min(defaultTimeout, 30)
+            || lowered.contains("/host ")
+            || lowered.contains("/nslookup ")
+            || lowered.contains("/drill ") {
+            return min(defaultTimeout, 120)
         }
         return defaultTimeout
     }
 
     private func effectiveStreamingTimeout(for command: String) -> TimeInterval? {
         let lowered = command.lowercased()
-        if lowered.range(of: #"(^|[;&|()\s])(?:dig|host)(\s|$)"#, options: .regularExpression) != nil
+        if lowered.range(of: #"(^|[;&|()\s])(?:dig|host|nslookup|drill)(\s|$)"#, options: .regularExpression) != nil
             || lowered.contains("/dig ")
-            || lowered.contains("/host ") {
-            return 30
+            || lowered.contains("/host ")
+            || lowered.contains("/nslookup ")
+            || lowered.contains("/drill ") {
+            return 120
         }
         return nil
     }
@@ -3529,7 +3533,7 @@ actor LocalAlpineTerminalService {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
           _iexa_bootstrap_version=2026-07-13.1
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
-          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ -x "$_iexa_bootstrap_bin/dig" ] && [ -x "$_iexa_bootstrap_bin/host" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
+          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ -x "$_iexa_bootstrap_bin/dig" ] && [ -x "$_iexa_bootstrap_bin/host" ] && [ -x "$_iexa_bootstrap_bin/nslookup" ] && [ -x "$_iexa_bootstrap_bin/drill" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:${PATH:-}"
             export BROWSER=iexa-open
             hash -r 2>/dev/null || true
@@ -3823,7 +3827,7 @@ actor LocalAlpineTerminalService {
           exit 127
         fi
         if command -v timeout >/dev/null 2>&1; then
-          timeout 30 "$_iexa_dns_real" "$@"
+          timeout 120 "$_iexa_dns_real" "$@"
           _iexa_dns_status=$?
         else
           "$_iexa_dns_real" "$@"
@@ -3831,14 +3835,16 @@ actor LocalAlpineTerminalService {
         fi
         case "$_iexa_dns_status" in
           124|137|143)
-            printf '\nIEXA_DNS_TIMEOUT: %s exceeded 30 seconds in Local Alpine.\n' "$_iexa_dns_tool" >&2
+            printf '\nIEXA_DNS_TIMEOUT: %s exceeded 120 seconds in Local Alpine.\n' "$_iexa_dns_tool" >&2
             ;;
         esac
         exit "$_iexa_dns_status"
         IEXA_DNS_TIMEOUT_FALLBACK
-          cp "$_iexa_bootstrap_bin/dig" "$_iexa_bootstrap_bin/host" 2>/dev/null || true
+          for tool in host nslookup drill; do
+            cp "$_iexa_bootstrap_bin/dig" "$_iexa_bootstrap_bin/$tool" 2>/dev/null || true
+          done
           cp "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" 2>/dev/null || true
-          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" "$_iexa_bootstrap_bin/top" "$_iexa_bootstrap_bin/dig" "$_iexa_bootstrap_bin/host" 2>/dev/null || true
+          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" "$_iexa_bootstrap_bin/top" "$_iexa_bootstrap_bin/dig" "$_iexa_bootstrap_bin/host" "$_iexa_bootstrap_bin/nslookup" "$_iexa_bootstrap_bin/drill" 2>/dev/null || true
           printf '%s\\n' "$_iexa_bootstrap_version" > "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null || true
           export PATH="$_iexa_bootstrap_bin:${PATH:-}"
           export BROWSER=iexa-open

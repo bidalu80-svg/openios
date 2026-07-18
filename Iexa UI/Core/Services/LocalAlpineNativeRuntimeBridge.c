@@ -116,6 +116,22 @@ static bool contains_case_insensitive(const char *value, const char *needle) {
     return false;
 }
 
+static bool starts_with_case_insensitive(const char *value, const char *prefix) {
+    if (value == NULL || prefix == NULL || prefix[0] == '\0') {
+        return false;
+    }
+
+    for (size_t index = 0; prefix[index] != '\0'; index++) {
+        if (value[index] == '\0') {
+            return false;
+        }
+        if (tolower((unsigned char) value[index]) != tolower((unsigned char) prefix[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // This is only a timeout policy. It is not a command allowlist: commands are
 // still passed through to /bin/sh -c below.
 static int timeout_seconds_for_command(const char *command) {
@@ -124,6 +140,24 @@ static int timeout_seconds_for_command(const char *command) {
         contains_case_insensitive(command, "/ping ") ||
         contains_case_insensitive(command, " busybox ping ")) {
         return 20;
+    }
+    if (contains_case_insensitive(command, " dig ") ||
+        starts_with_case_insensitive(command, "dig ") ||
+        contains_case_insensitive(command, "\ndig ") ||
+        contains_case_insensitive(command, "/dig ") ||
+        contains_case_insensitive(command, " host ") ||
+        starts_with_case_insensitive(command, "host ") ||
+        contains_case_insensitive(command, "\nhost ") ||
+        contains_case_insensitive(command, "/host ") ||
+        contains_case_insensitive(command, " nslookup ") ||
+        starts_with_case_insensitive(command, "nslookup ") ||
+        contains_case_insensitive(command, "\nnslookup ") ||
+        contains_case_insensitive(command, "/nslookup ") ||
+        contains_case_insensitive(command, " drill ") ||
+        starts_with_case_insensitive(command, "drill ") ||
+        contains_case_insensitive(command, "\ndrill ") ||
+        contains_case_insensitive(command, "/drill ")) {
+        return 120;
     }
     if (contains_case_insensitive(command, "apk add") ||
         contains_case_insensitive(command, "apk upgrade") ||

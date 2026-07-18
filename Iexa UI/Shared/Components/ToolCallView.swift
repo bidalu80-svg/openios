@@ -2676,6 +2676,85 @@ private struct ToolCallArgumentsView: View {
 
 // MARK: - Tool Call View
 
+private extension View {
+    @ViewBuilder
+    func runningToolCapsuleSweep(isActive: Bool, tint: Color, cornerRadius: CGFloat) -> some View {
+        if isActive {
+            self.modifier(RunningToolCapsuleSweepModifier(tint: tint, cornerRadius: cornerRadius))
+        } else {
+            self
+        }
+    }
+}
+
+private struct RunningToolCapsuleSweepModifier: ViewModifier {
+    let tint: Color
+    let cornerRadius: CGFloat
+
+    @Environment(\.theme) private var theme
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.34 : 0.42))
+            )
+            .overlay {
+                RunningToolCapsuleSweep(tint: tint, cornerRadius: cornerRadius)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+}
+
+private struct RunningToolCapsuleSweep: View {
+    let tint: Color
+    let cornerRadius: CGFloat
+
+    @Environment(\.theme) private var theme
+    @State private var phase: CGFloat = -1
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = max(geometry.size.width, 1)
+            let height = max(geometry.size.height, 1)
+            let sweepWidth = max(width * 0.34, 96)
+
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            .clear,
+                            .white.opacity(theme.isDark ? 0.08 : 0.14),
+                            .white.opacity(theme.isDark ? 0.28 : 0.44),
+                            tint.opacity(theme.isDark ? 0.20 : 0.24),
+                            .white.opacity(theme.isDark ? 0.12 : 0.20),
+                            .clear,
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .frame(width: sweepWidth, height: height)
+                .blendMode(.screen)
+                .offset(x: -sweepWidth + phase * (width + sweepWidth * 2))
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .allowsHitTesting(false)
+        .onAppear {
+            startSweep()
+        }
+    }
+
+    private func startSweep() {
+        phase = -1
+        DispatchQueue.main.async {
+            withAnimation(.linear(duration: 1.45).repeatForever(autoreverses: false)) {
+                phase = 1
+            }
+        }
+    }
+}
+
 /// Displays a single tool call styled like the Iexa native server web interface:
 /// - Header: checkmark/spinner + tool name + chevron (tappable to expand)
 /// - When expanded: INPUT (key-value pairs) + OUTPUT (syntax-highlighted scrollable JSON)
@@ -2732,6 +2811,11 @@ struct ToolCallView: View {
                         .foregroundStyle(theme.textTertiary)
                 }
                 .padding(.vertical, 8)
+                .runningToolCapsuleSweep(
+                    isActive: !toolCall.isDone,
+                    tint: presentation.tint,
+                    cornerRadius: CornerRadius.md
+                )
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -2889,6 +2973,11 @@ private struct CollapsedToolCallGroup: View {
                         .foregroundStyle(theme.textTertiary)
                 }
                 .padding(.vertical, 8)
+                .runningToolCapsuleSweep(
+                    isActive: !allDone,
+                    tint: groupTint,
+                    cornerRadius: CornerRadius.md
+                )
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
