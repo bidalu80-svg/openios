@@ -25208,6 +25208,8 @@ final class ChatViewModel {
         [Local native tool result]
         The latest Local Native message above is a real on-device iOS tool result for device info, clipboard, local notification, location, weather, calendar, local browser/web reading, local Office document generation, or iOS Shortcuts launching. Do not emit another `iexa_native` block in this turn.
         \(continuationInstruction)
+        - Never print, quote, summarize as JSON, or expose the raw Local Native result object. It is machine-only context, not assistant-visible answer text.
+        - If the result contains `action`, `browser_use`, `browser_action`, `data`, `items`, `node_id`, `page_x`, or `selector`, use those fields only to choose the next `browser_use` call or to answer naturally from the readable page content.
         - Do not say you are opening/searching/reading/checking/running unless the user specifically asked for an execution log.
         - Do not recap tool calls, intermediate observations, or hidden loop-control reasons; the app shows tool progress separately.
         - If the local browser tool succeeded and no further browser action is required, answer from the returned page/search content and cite page titles/URLs plainly.
@@ -25217,6 +25219,29 @@ final class ChatViewModel {
         [/Local native tool result]
         """
         appendSystemInstruction(instruction, marker: "[Local native tool result]", to: &messages)
+    }
+
+    private static func shouldSuppressStreamingLocalNativeResultEcho(raw: String, visible: String) -> Bool {
+        let trimmedRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedVisible = visible.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRaw.isEmpty else { return false }
+        if trimmedVisible.isEmpty { return false }
+
+        let first = trimmedRaw.first
+        guard first == "{" || first == "[" else { return false }
+        if trimmedRaw.count < 160 {
+            return true
+        }
+
+        let lower = trimmedRaw.lowercased()
+        return lower.contains(#""action""#)
+            || lower.contains(#""browser_action""#)
+            || lower.contains(#""tool""#)
+            || lower.contains(#""data""#)
+            || lower.contains(#""items""#)
+            || lower.contains(#""node_id""#)
+            || lower.contains(#""page_x""#)
+            || lower.contains(#""selector""#)
     }
 
     private static func shouldExposeLocalDeviceNativeTools(_ text: String) -> Bool {
@@ -27487,9 +27512,17 @@ final class ChatViewModel {
         let displayContent = showInlineImageReceiveState
             ? ""
             : Self.cleanedProviderCitationArtifacts(content)
-        let safeDisplayContent = showInlineImageReceiveState
+        let initialSafeDisplayContent = showInlineImageReceiveState
             ? ""
             : Self.safeAssistantDisplayContent(displayContent)
+        let isLocalNativeContinuationDisplay = conversation?.messages
+            .first(where: { $0.id == id })?
+            .metadata?["iexa_local_native_continuation"] == "true"
+        let safeDisplayContent = isStreaming
+            && isLocalNativeContinuationDisplay
+            && Self.shouldSuppressStreamingLocalNativeResultEcho(raw: displayContent, visible: initialSafeDisplayContent)
+            ? ""
+            : initialSafeDisplayContent
         let shouldHandleLocalAlpineDisplay = terminalEnabled && selectedTerminalIsLocalAlpine
         let visibleAlpineDisplayContent: String? = {
             guard shouldHandleLocalAlpineDisplay else { return nil }
