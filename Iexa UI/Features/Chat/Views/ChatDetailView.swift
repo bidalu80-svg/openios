@@ -3294,6 +3294,18 @@ struct ChatDetailView: View {
         ) != nil {
             return ""
         }
+        if trimmed.range(
+            of: #"(?is)^[\{\[][\s\S]*"(?:action|browser_action|browser_use_action)"\s*:\s*"(?:browser_use|browser\.use|browser\.[^"]+)"[\s\S]*[\}\]]$"#,
+            options: .regularExpression
+        ) != nil {
+            return ""
+        }
+        if trimmed.range(
+            of: #"(?is)^[\{\[][\s\S]*"(?:items|focused_element|node_id|nodeId|page_x|page_center_x|selector)"\s*:[\s\S]*"(?:page_url|image_path|iexa_url|url|link)"\s*:[\s\S]*[\}\]]$"#,
+            options: .regularExpression
+        ) != nil {
+            return ""
+        }
         return trimmed
     }
 

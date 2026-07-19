@@ -15074,6 +15074,43 @@ final class ChatViewModel {
         return messages
     }
 
+    private static func localNativeToolHistoryMessages(
+        for message: ChatMessage,
+        providerType: ServerConfig.ProviderType?
+    ) -> [[String: Any]]? {
+        let nativeCalls = LocalAlpineNativeToolCall.decodeMetadata(
+            message.metadata?["iexa_local_native_tool_calls"]
+        )
+        guard !nativeCalls.isEmpty else { return nil }
+
+        let rawResult = (
+            message.metadata?["iexa_local_native_raw_result"]
+                ?? message.content
+                    .replacingOccurrences(
+                        of: #"(?is)^\s*本地\s+iOS\s+工具执行结果\s*\n*"#,
+                        with: "",
+                        options: .regularExpression
+                    )
+        )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let toolResultContent = rawResult.isEmpty
+            ? "Local Native tool completed."
+            : clippedForSystemContext(rawResult, maxCharacters: 16_000)
+
+        var messages: [[String: Any]] = [
+            toolCallAssistantMessage(for: nativeCalls, providerType: providerType)
+        ]
+        for call in nativeCalls {
+            appendToolResultMessage(
+                callID: call.id,
+                content: toolResultContent,
+                providerType: providerType,
+                to: &messages
+            )
+        }
+        return messages
+    }
+
     private static func localAlpineNativeToolEnvelopeContent(for call: LocalAlpineNativeToolCall) -> String {
         let argumentsObject: Any
         if let dict = jsonObjectFromToolArguments(call.arguments) as? [String: Any] {
@@ -22758,11 +22795,22 @@ final class ChatViewModel {
             let isNativeToolResult = Self.isLocalNativeToolResult(message)
             let isLocalAlpineResult = Self.isLocalAlpineAgentResult(message)
             if isNativeToolResult {
-                let modelContent = contentForModel(
-                    message: message,
-                    includeImageCanvasInstruction: false
-                )
-                apiMessages.append(["role": "system", "content": modelContent])
+                if (isOpenAICompatibleProvider || currentProviderType == .anthropic),
+                   let exactToolHistory = Self.localNativeToolHistoryMessages(
+                    for: message,
+                    providerType: currentProviderType
+                ) {
+                    apiMessages.append(contentsOf: exactToolHistory)
+                } else {
+                    // Legacy result messages created before structured native
+                    // history was persisted. Keep the old system-text fallback
+                    // so existing conversations remain usable.
+                    let modelContent = contentForModel(
+                        message: message,
+                        includeImageCanvasInstruction: false
+                    )
+                    apiMessages.append(["role": "system", "content": modelContent])
+                }
                 continue
             }
             if isLocalAlpineResult && Self.isLocalAlpineProtocolCorrectionMessage(message) {
@@ -23678,6 +23726,13 @@ final class ChatViewModel {
     private func executeLocalNativeTool(messageId: String, content: String) async {
         markLocalNativeToolParentHidden(messageId: messageId)
         let directCalls = Self.localNativeMarkdownFunctionToolCalls(from: content)
+        let structuredCalls = directCalls.map { call in
+            guard Self.localNativeBrowserToolKind(call) != nil else { return call }
+            return Self.normalizeBrowserAutomationToolCallIfNeeded(
+                call,
+                latestUserPrompt: latestUserBrowserAutomationPrompt()
+            )
+        }
         if let directCall = directCalls.first(where: { $0.name == "image_generation" }) {
             _ = await executeLocalImageGenerationToolCall(
                 directCall,
@@ -23695,7 +23750,8 @@ final class ChatViewModel {
             await appendLocalNativeInlineFunctionResult(
                 messageId: messageId,
                 title: directCall.name,
-                toolContent: execution.toolContent
+                toolContent: execution.toolContent,
+                toolCalls: [directCall]
             )
             return
         }
@@ -23909,13 +23965,20 @@ final class ChatViewModel {
             result.summary,
             browserVerificationCompleted: browserVerificationCompleted
         )
+        var resultMetadata: [String: String] = [
+            "iexa_local_native_result": "true",
+            "iexa_local_native_raw_result": resultContent
+        ]
+        if let toolCalls = LocalAlpineNativeToolCall.metadataString(for: structuredCalls) {
+            resultMetadata["iexa_local_native_tool_calls"] = toolCalls
+        }
         let resultMessage = ChatMessage(
             role: .system,
             content: "本地 iOS 工具执行结果\n\n\(resultContent)",
             timestamp: .now,
             model: "Local Native",
             isStreaming: false,
-            metadata: ["iexa_local_native_result": "true"]
+            metadata: resultMetadata
         )
         let resultNode = HistoryNode(
             id: resultMessage.id,
@@ -23948,17 +24011,25 @@ final class ChatViewModel {
     private func appendLocalNativeInlineFunctionResult(
         messageId: String,
         title: String,
-        toolContent: String
+        toolContent: String,
+        toolCalls: [LocalAlpineNativeToolCall]
     ) async {
         guard conversation?.messages.contains(where: { $0.id == messageId }) == true else { return }
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        var resultMetadata: [String: String] = [
+            "iexa_local_native_result": "true",
+            "iexa_local_native_raw_result": toolContent
+        ]
+        if let encodedCalls = LocalAlpineNativeToolCall.metadataString(for: toolCalls) {
+            resultMetadata["iexa_local_native_tool_calls"] = encodedCalls
+        }
         let resultMessage = ChatMessage(
             role: .system,
             content: "本地 iOS 工具执行结果\n\n\(toolContent)",
             timestamp: .now,
             model: trimmedTitle.isEmpty ? "Local Native" : trimmedTitle,
             isStreaming: false,
-            metadata: ["iexa_local_native_result": "true"]
+            metadata: resultMetadata
         )
         let resultNode = HistoryNode(
             id: resultMessage.id,
