@@ -10308,6 +10308,13 @@ final class ChatViewModel {
                     kind: directMediaKind,
                     phase: .failed
                 )
+                if directMediaKind == .image,
+                   !self.assistantMessageHasRenderableImage(messageId: assistantMessageId) {
+                    self.attachGeneratedImageFailurePlaceholder(
+                        messageId: assistantMessageId,
+                        index: 1
+                    )
+                }
                 self.updateAssistantMessage(
                     id: assistantMessageId,
                     content: "",

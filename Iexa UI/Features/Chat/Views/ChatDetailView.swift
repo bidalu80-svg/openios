@@ -10420,12 +10420,16 @@ private struct MediaGenerationProgressTitle: View {
         kind == "video" ? Self.videoWaitingStages : Self.imageWaitingStages
     }
 
+    private var isTerminalPhase: Bool {
+        phase == "failed" || phase == "stopped" || phase == "ready"
+    }
+
     private var usesMediaWaitingStoryboard: Bool {
         // Direct image and video requests both begin as an asynchronous
         // submit/poll operation.  The visual progress starts when their card
         // mounts, while transport `phase` remains responsible for real
         // completion and card removal.
-        kind == "image" || kind == "video"
+        (kind == "image" || kind == "video") && !isTerminalPhase
     }
 
     var body: some View {

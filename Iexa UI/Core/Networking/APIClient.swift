@@ -1164,14 +1164,14 @@ final class APIClient: @unchecked Sendable {
                     if let imageReference = firstImageReference(in: payload) {
                         return imageReference
                     }
-                    lastError = APIError.responseDecoding(
-                        underlying: NSError(
-                            domain: "APIClient",
-                            code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "图片生成接口没有返回图片地址。"]
-                        ),
-                        data: nil
+                    let failure = imageEndpointPayloadFailure(
+                        from: payload,
+                        fallbackMessage: "图片生成接口没有返回图片地址。"
                     )
+                    guard shouldTryNextImageEndpoint(after: failure) else {
+                        throw failure
+                    }
+                    lastError = failure
                 } catch {
                     lastError = error
                     if shouldTryNextImageEndpoint(after: error) {
@@ -1216,14 +1216,14 @@ final class APIClient: @unchecked Sendable {
                     if let imageReference = firstImageReference(in: payload) {
                         return imageReference
                     }
-                    lastError = APIError.responseDecoding(
-                        underlying: NSError(
-                            domain: "APIClient",
-                            code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Agnes 图片接口没有返回图片地址。"]
-                        ),
-                        data: nil
+                    let failure = imageEndpointPayloadFailure(
+                        from: payload,
+                        fallbackMessage: "Agnes 图片接口没有返回图片地址。"
                     )
+                    guard shouldTryNextImageEndpoint(after: failure) else {
+                        throw failure
+                    }
+                    lastError = failure
                 } catch {
                     guard shouldTryNextImageEndpoint(after: error) else {
                         throw error
@@ -1340,14 +1340,14 @@ final class APIClient: @unchecked Sendable {
                     if let imageReference = firstImageReference(in: payload) {
                         return imageReference
                     }
-                    lastError = APIError.responseDecoding(
-                        underlying: NSError(
-                            domain: "APIClient",
-                            code: -1,
-                            userInfo: [NSLocalizedDescriptionKey: "Grok 图片接口没有返回图片地址。"]
-                        ),
-                        data: nil
+                    let failure = imageEndpointPayloadFailure(
+                        from: payload,
+                        fallbackMessage: "Grok 图片接口没有返回图片地址。"
                     )
+                    guard shouldTryNextImageEndpoint(after: failure) else {
+                        throw failure
+                    }
+                    lastError = failure
                 } catch {
                     guard shouldTryNextImageEndpoint(after: error) else {
                         throw error
@@ -1375,14 +1375,14 @@ final class APIClient: @unchecked Sendable {
                         if let imageReference = firstImageReference(in: payload) {
                             return imageReference
                         }
-                        lastError = APIError.responseDecoding(
-                            underlying: NSError(
-                                domain: "APIClient",
-                                code: -1,
-                                userInfo: [NSLocalizedDescriptionKey: "Grok 图生图接口没有返回图片地址。"]
-                            ),
-                            data: nil
+                        let failure = imageEndpointPayloadFailure(
+                            from: payload,
+                            fallbackMessage: "Grok 图生图接口没有返回图片地址。"
                         )
+                        guard shouldTryNextImageEndpoint(after: failure) else {
+                            throw failure
+                        }
+                        lastError = failure
                     } catch {
                         guard shouldTryNextImageEndpoint(after: error) else {
                             throw error
@@ -1440,14 +1440,14 @@ final class APIClient: @unchecked Sendable {
                             if let imageReference = firstImageReference(in: payload) {
                                 return imageReference
                             }
-                            lastError = APIError.responseDecoding(
-                                underlying: NSError(
-                                    domain: "APIClient",
-                                    code: -1,
-                                    userInfo: [NSLocalizedDescriptionKey: "Grok multipart 图片接口没有返回图片地址。"]
-                                ),
-                                data: nil
+                            let failure = imageEndpointPayloadFailure(
+                                from: payload,
+                                fallbackMessage: "Grok multipart 图片接口没有返回图片地址。"
                             )
+                            guard shouldTryNextImageEndpoint(after: failure) else {
+                                throw failure
+                            }
+                            lastError = failure
                         } catch {
                             guard shouldTryNextImageEndpoint(after: error) else {
                                 throw error
@@ -1781,6 +1781,59 @@ final class APIClient: @unchecked Sendable {
         return nil
     }
 
+    private func imageEndpointPayloadFailure(
+        from payload: Any,
+        fallbackMessage: String
+    ) -> APIError {
+        let message = providerErrorMessage(from: payload)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedMessage: String
+        if let message, !message.isEmpty {
+            resolvedMessage = message
+        } else {
+            resolvedMessage = fallbackMessage
+        }
+        return APIError.responseDecoding(
+            underlying: NSError(
+                domain: "APIClient",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: resolvedMessage]
+            ),
+            data: nil
+        )
+    }
+
+    private func imageEndpointErrorLooksTerminal(_ message: String) -> Bool {
+        let lowercased = message.lowercased()
+        guard !lowercased.isEmpty else { return false }
+
+        let shapeCompatibilitySignals = [
+            "unknown parameter", "unsupported parameter", "unrecognized parameter",
+            "unexpected parameter", "unexpected field", "unknown field",
+            "missing required", "required field", "invalid field", "invalid schema",
+            "schema", "response_format", "aspect_ratio", "aspectratio",
+            "image_size", "imagesize", "resolution", "dimensions",
+            "width", "height", "method not allowed", "unsupported media type",
+            "not found", "no route", "route not found", "cannot post", "endpoint"
+        ]
+        if shapeCompatibilitySignals.contains(where: { lowercased.contains($0) }) {
+            return false
+        }
+
+        let terminalSignals = [
+            "invalid_api_key", "invalid api key", "api key", "unauthorized",
+            "authentication", "auth", "forbidden", "permission denied",
+            "access denied", "not authorized", "not enabled", "not allowed",
+            "quota", "insufficient_quota", "insufficient quota", "balance",
+            "billing", "payment", "credit", "credits", "账户余额", "余额",
+            "额度", "欠费", "content policy", "policy violation", "moderation",
+            "safety", "unsafe", "blocked", "sensitive", "violate",
+            "copyright", "region", "country", "地区", "区域", "风控",
+            "account suspended", "account disabled", "model access"
+        ]
+        return terminalSignals.contains(where: { lowercased.contains($0) })
+    }
+
     private func responsesImageGenerationBodyVariants(
         prompt: String,
         model: String,
@@ -1881,14 +1934,14 @@ final class APIClient: @unchecked Sendable {
                 if let imageReference = firstImageReference(in: payload) {
                     return imageReference
                 }
-                lastError = APIError.responseDecoding(
-                    underlying: NSError(
-                        domain: "APIClient",
-                        code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "Responses 图片生成接口没有返回图片地址。"]
-                    ),
-                    data: nil
+                let failure = imageEndpointPayloadFailure(
+                    from: payload,
+                    fallbackMessage: "Responses 图片生成接口没有返回图片地址。"
                 )
+                guard shouldTryNextImageEndpoint(after: failure) else {
+                    throw failure
+                }
+                lastError = failure
             } catch {
                 lastError = error
                 if shouldTryNextImageEndpoint(after: error) {
@@ -1910,9 +1963,16 @@ final class APIClient: @unchecked Sendable {
 
     private func shouldTryNextImageEndpoint(after error: Error) -> Bool {
         switch APIError.from(error) {
-        case .httpError(let statusCode, _, _):
+        case .httpError(let statusCode, let message, _):
+            if let message,
+               imageEndpointErrorLooksTerminal(message) {
+                return false
+            }
             return [400, 404, 405, 415, 422, 500, 501, 503].contains(statusCode)
-        case .responseDecoding:
+        case .responseDecoding(let underlying, _):
+            if imageEndpointErrorLooksTerminal(underlying.localizedDescription) {
+                return false
+            }
             return true
         default:
             return false
