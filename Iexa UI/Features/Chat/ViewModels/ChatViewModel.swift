@@ -2688,12 +2688,12 @@ final class ChatViewModel {
         ),
         LocalAlpineToolCapability(
             name: "browser_use",
-            description: "Operate the shared iPhone-size mobile Safari/WKWebView automation session. Every primitive action returns post_action_observation and next_action_candidates with node_id values; continue from those candidates instead of stopping after open/click/type.",
+            description: "Operate the shared WKWebView automation session using the browser mode selected in Settings. Every primitive action returns post_action_observation and next_action_candidates with node_id values; continue from those candidates instead of stopping after open/click/type.",
             arguments: ["action navigate/observe/click/type/get_text/scroll/get_page_info/execute_js/find_elements/hover/get_readable/set_user_agent/set_viewport/get_backbone/fetch/new_tab/close_tab/list_tabs/get_cookies/scroll_and_collect/wait_for_dom_stable/wait_for_image", "url?", "selector?", "node_id/nodeId from next_action_candidates?", "label/button_text?", "text?", "coordinate_x/y?", "direction?", "amount?", "find filters: text/text-contains/desc/desc-contains/id/class/package/clickable/editable/scrollable/checked/enabled", "item_selector?", "scroll_count?", "keywords?", "fuzzy?", "tab_id?", "viewport_width/height?", "reset?", "full_page?", "attach_preview?", "save_to?", "timeout?", "aliases: web_fetch/fetch_url/open_url"]
         ),
         LocalAlpineToolCapability(
             name: "web_search",
-            description: "Start a Minis-style browser search workflow in the shared iOS browser. Honor an explicitly requested search site such as 百度/Baidu, 360, 搜狗, Bing, Google, or DuckDuckGo; otherwise prefer domestic direct search pages instead of treating Bing as the default. This opens a real search page and returns an intermediate page observation; continue with browser_use to inspect, open, scroll, and read source pages before answering. Build queries from the current device date/time, not model training-cutoff dates.",
+            description: "Start a Minis-style browser search workflow in the shared iOS browser. Honor an explicitly requested search site such as 百度/Baidu, Bing, 头条/Toutiao, Google, or DuckDuckGo; otherwise prefer domestic direct search pages instead of treating Bing as the default. This opens a real search page and returns an intermediate page observation; continue with browser_use to inspect, open, scroll, and read source pages before answering. Build queries from the current device date/time, not model training-cutoff dates.",
             arguments: ["query", "queries optional", "limit optional", "screenshot optional", "then continue with browser_use", "aliases: search_web/browser_search"]
         ),
         LocalAlpineToolCapability(
@@ -2769,7 +2769,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "web_search",
-                    "description": "Start a Minis-style browser search workflow in the shared iOS browser. Honor an explicitly requested search site such as 百度/Baidu, 360, 搜狗, Bing, Google, or DuckDuckGo; otherwise prefer domestic direct search pages instead of treating Bing as the default. This opens a real search page and returns an intermediate page observation; continue with browser_use to inspect, open, scroll, and read source pages before answering. Anchor relative/current queries to the current device date/time, not model training-cutoff dates.",
+                    "description": "Start a Minis-style browser search workflow in the shared iOS browser. Honor an explicitly requested search site such as 百度/Baidu, Bing, 头条/Toutiao, Google, or DuckDuckGo; otherwise prefer domestic direct search pages instead of treating Bing as the default. This opens a real search page and returns an intermediate page observation; continue with browser_use to inspect, open, scroll, and read source pages before answering. Anchor relative/current queries to the current device date/time, not model training-cutoff dates.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2855,7 +2855,7 @@ final class ChatViewModel {
                 "type": "function",
                 "function": [
                     "name": "browser_use",
-                    "description": "Minis-style browser automation backed by the shared iOS WKWebView session. Default environment is iPhone-size mobile Safari/WKWebView, not desktop Chrome. Every primitive action auto-waits briefly and returns post_action_observation plus next_action_candidates containing node_id values. Continue with those candidates until the page task is complete; screenshots are optional visual evidence, not the only state. Fetch downloads through the current browser session. After clicking generate/export/download controls, use wait_for_image or wait_for_dom_stable before deciding the task is stuck. Switch to desktop_chrome or a wide desktop viewport only when the user explicitly asks for desktop/PC mode.",
+                    "description": "Minis-style browser automation backed by the shared iOS WKWebView session. Default User-Agent and viewport follow Settings → Chat Settings → Tools → Browser Mode. Every primitive action auto-waits briefly and returns post_action_observation plus next_action_candidates containing node_id values. Continue with those candidates until the page task is complete; screenshots are optional visual evidence, not the only state. Fetch downloads through the current browser session. After clicking generate/export/download controls, use wait_for_image or wait_for_dom_stable before deciding the task is stuck. Switch browser mode in Settings or pass an explicit allowed browser mode only when needed.",
                     "parameters": [
                         "type": "object",
                         "properties": [
@@ -2908,8 +2908,8 @@ final class ChatViewModel {
                             "tab_id": ["type": "integer", "description": "Target browser tab id."],
                             "keywords": ["type": "string", "description": "Cookie name keywords."],
                             "fuzzy": ["type": "boolean", "description": "Fuzzy cookie keyword matching."],
-                            "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport. Default mobile viewport is 390; desktop-sized widths are ignored unless allow_desktop is true and the user explicitly requested desktop/PC mode."],
-                            "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport. Default mobile viewport is 720; desktop-sized heights are ignored unless allow_desktop is true and the user explicitly requested desktop/PC mode."],
+                            "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport. Desktop-sized widths require allow_desktop or the user's Browser Mode setting to be Desktop Chrome."],
+                            "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport. Desktop-sized heights require allow_desktop or the user's Browser Mode setting to be Desktop Chrome."],
                             "reset": ["type": "boolean", "description": "Reset viewport to default."],
                             "allow_desktop": ["type": "boolean", "description": "Set true only when the user explicitly asks for desktop/PC mode. Otherwise desktop_chrome and wide viewports are blocked and reset to mobile_safari/mobile viewport."],
                             "save_to": ["type": "string", "description": "Optional output path/name for fetch/download compatibility."],
@@ -3069,7 +3069,7 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": "web_search",
-                        "description": "Start a Minis-style web search in the shared iOS browser when the answer may require current, recent, external, source-backed, or uncertain information. Honor an explicitly requested search site such as 百度/Baidu, 360, 搜狗, Bing, Google, or DuckDuckGo; otherwise prefer domestic direct search pages instead of treating Bing as the default. Infer the search query from the user's natural language and anchor relative/current queries to the current device date/time, not model training-cutoff dates; include today's date/year when freshness matters. The result is an intermediate browser page state, not final evidence: continue with browser_use to inspect/open/scroll/read source pages before answering.",
+                        "description": "Start a Minis-style web search in the shared iOS browser when the answer may require current, recent, external, source-backed, or uncertain information. Honor an explicitly requested search site such as 百度/Baidu, Bing, 头条/Toutiao, Google, or DuckDuckGo; otherwise prefer domestic direct search pages instead of treating Bing as the default. Infer the search query from the user's natural language and anchor relative/current queries to the current device date/time, not model training-cutoff dates; include today's date/year when freshness matters. The result is an intermediate browser page state, not final evidence: continue with browser_use to inspect/open/scroll/read source pages before answering.",
                         "parameters": [
                             "type": "object",
                             "properties": [
@@ -3106,7 +3106,7 @@ final class ChatViewModel {
                     "type": "function",
                     "function": [
                         "name": "browser_use",
-                        "description": "Minis-style interactive browser tool backed by the shared iOS WKWebView. Default environment is iPhone-size mobile Safari/WKWebView, not desktop Chrome. Supports up to 3 tabs and primitive actions: navigate, observe, screenshot, click, type, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, get_cookies, wait_for_dom_stable, wait_for_image, execute_js, set_user_agent, and set_viewport. Every action returns post_action_observation and next_action_candidates with reusable node_id values after an automatic settle wait. Continue from those candidates until the user task is complete; use screenshot only when visual confirmation or coordinate fallback is needed. After clicking a generate/export/download button, use wait_for_image or wait_for_dom_stable before deciding the task is stuck. Treat click/type/scroll/find success as intermediate, not as page-task completion. Switch to desktop_chrome or a wide desktop viewport only when the user explicitly asks for desktop/PC mode.",
+                        "description": "Minis-style interactive browser tool backed by the shared iOS WKWebView. Default User-Agent and viewport follow Settings → Chat Settings → Tools → Browser Mode. Supports up to 3 tabs and primitive actions: navigate, observe, screenshot, click, type, get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info, get_backbone, fetch, new_tab, close_tab, list_tabs, get_cookies, wait_for_dom_stable, wait_for_image, execute_js, set_user_agent, and set_viewport. Every action returns post_action_observation and next_action_candidates with reusable node_id values after an automatic settle wait. Continue from those candidates until the user task is complete; use screenshot only when visual confirmation or coordinate fallback is needed. After clicking a generate/export/download button, use wait_for_image or wait_for_dom_stable before deciding the task is stuck. Treat click/type/scroll/find success as intermediate, not as page-task completion.",
                         "parameters": [
                             "type": "object",
                             "properties": [
@@ -3159,8 +3159,8 @@ final class ChatViewModel {
                                 "keywords": ["type": "string", "description": "Cookie name keywords."],
                                 "fuzzy": ["type": "boolean", "description": "Fuzzy cookie keyword matching."],
                                 "timeout": ["type": "integer", "description": "Timeout in seconds."],
-                                "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport. Default mobile viewport is 390; desktop-sized widths are ignored unless allow_desktop is true and the user explicitly requested desktop/PC mode."],
-                                "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport. Default mobile viewport is 720; desktop-sized heights are ignored unless allow_desktop is true and the user explicitly requested desktop/PC mode."],
+                                "viewport_width": ["type": "integer", "description": "Viewport width for set_viewport. Desktop-sized widths require allow_desktop or the user's Browser Mode setting to be Desktop Chrome."],
+                                "viewport_height": ["type": "integer", "description": "Viewport height for set_viewport. Desktop-sized heights require allow_desktop or the user's Browser Mode setting to be Desktop Chrome."],
                                 "reset": ["type": "boolean", "description": "Reset viewport to default."],
                                 "allow_desktop": ["type": "boolean", "description": "Set true only when the user explicitly asks for desktop/PC mode. Otherwise desktop_chrome and wide viewports are blocked and reset to mobile_safari/mobile viewport."]
                             ],
@@ -14651,14 +14651,7 @@ final class ChatViewModel {
             "bing": "https://www.bing.com/",
             "bing.com": "https://www.bing.com/",
             "google": "https://www.google.com/",
-            "谷歌": "https://www.google.com/",
-            "搜狗": "https://www.sogou.com/",
-            "sogou": "https://www.sogou.com/",
-            "sogou.com": "https://www.sogou.com/",
-            "360搜索": "https://www.so.com/",
-            "好搜": "https://www.so.com/",
-            "so": "https://www.so.com/",
-            "so.com": "https://www.so.com/"
+            "谷歌": "https://www.google.com/"
         ]
         return aliases[normalized]
     }
@@ -14724,7 +14717,7 @@ final class ChatViewModel {
         }
         return [
             "百度", "百度首页", "baidu", "baidu.com",
-            "必应", "bing", "google", "谷歌", "搜狗", "sogou"
+            "必应", "bing", "google", "谷歌"
         ].contains(normalized)
     }
 
@@ -20950,7 +20943,7 @@ final class ChatViewModel {
             : ""
         let browserInstructions = includeBrowserTools ? """
 
-        Browser override: use `browser_use` like Minis. The shared browser is an iPhone-size mobile Safari/WKWebView by default, not desktop Chrome. Do not switch to `desktop_chrome` or desktop-sized viewport unless the user explicitly asks for desktop/PC mode. For interactive pages, open/navigate first, then read `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll` from every result. Prefer returned candidate `node_id` values for the next `click`, `type`, or `hover`; use `screenshot` only for visual confirmation or coordinate fallback. After pressing a page generate/export/download button, wait for the real result with `wait_for_image` or `wait_for_dom_stable`; do not stop at the click. Treat every browser action result as intermediate until the user task is complete or the tool explicitly returns `requires_user_verification:true`.
+        Browser override: use `browser_use` like Minis. The shared browser uses the User-Agent and viewport selected in Settings → Chat Settings → Tools → Browser Mode. For interactive pages, open/navigate first, then read `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll` from every result. Prefer returned candidate `node_id` values for the next `click`, `type`, or `hover`; use `screenshot` only for visual confirmation or coordinate fallback. After pressing a page generate/export/download button, wait for the real result with `wait_for_image` or `wait_for_dom_stable`; do not stop at the click. Treat every browser action result as intermediate until the user task is complete or the tool explicitly returns `requires_user_verification:true`.
 
         For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. `web_search` only opens a real search page and returns an intermediate browser state; do not answer from `web_search` alone. Continue with `browser_use` like Minis: inspect the returned observation and choose the next primitive yourself, such as opening a relevant result, reading the page with `get_readable`/`get_text`, scrolling for more content, or using `find_elements` with `scan_page:true` only when structural discovery is needed. Use `next_action_candidates` and `post_action_observation.visible_elements` first; reuse returned `nodeId`/`node_id` for the next click/type/hover; use viewport coordinates only when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or the tool explicitly returns `requires_user_verification:true`. Do not narrate intermediate browser work in chat; progress belongs in the tool card. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. If verification is required, the shared browser stays on the same page; after the user completes it, continue from the next observation result without reopening/reloading the same URL.
 

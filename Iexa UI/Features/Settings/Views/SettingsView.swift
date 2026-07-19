@@ -744,6 +744,7 @@ struct ChatSettingsView: View {
     @AppStorage("chatInput.codeEditingEnabled") private var codeEditingEnabled = false
     @AppStorage("chatInput.shortcutsEnabled") private var shortcutsEnabled = false
     @AppStorage("localAlpineToolPreviewEnabled") private var localAlpineToolPreviewEnabled = true
+    @AppStorage("browserAutomationUserAgentMode") private var browserAutomationUserAgentMode = "mobile_safari"
     @AppStorage("openAIForceResponsesAPI") private var openAIForceResponsesAPI = false
     @AppStorage("quickPills") private var quickPillsData: String = ""
     @State private var availableTools: [ToolItem] = []
@@ -818,10 +819,15 @@ struct ChatSettingsView: View {
                     .tint(theme.brandPrimary)
                 Toggle("本地工具预览浮条", isOn: $localAlpineToolPreviewEnabled)
                     .tint(theme.brandPrimary)
+                Picker("浏览器模式", selection: $browserAutomationUserAgentMode) {
+                    Text("移动 Safari").tag("mobile_safari")
+                    Text("桌面 Chrome").tag("desktop_chrome")
+                }
+                .pickerStyle(.menu)
             } header: {
                 Text("工具行为")
             } footer: {
-                Text("关闭对应工具后不会向模型注入该工具。预览浮条只影响底部预览，不影响正文步骤胶囊。")
+                Text("关闭对应工具后不会向模型注入该工具。预览浮条只影响底部预览，不影响正文步骤胶囊。浏览器模式会影响联网搜索和浏览器工具的 User-Agent 与视口。")
             }
 
             Section {

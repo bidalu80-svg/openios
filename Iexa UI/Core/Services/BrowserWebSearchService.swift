@@ -34,6 +34,8 @@ final class BrowserWebSearchService: NSObject {
     private var browserLivePreviewTask: Task<Void, Never>?
     private var browserLivePreviewFileURL: URL?
     private var lastBrowserNavigationReusedExistingPage = false
+    static let browserUserAgentModeDefaultsKey = "browserAutomationUserAgentMode"
+    private static let defaultDesktopBrowserViewport = CGSize(width: 1280, height: 900)
     private let humanVerificationPageReuseWindow: TimeInterval = 10 * 60
     private var navigationContinuation: CheckedContinuation<Bool, Never>?
     private var timeoutTask: Task<Void, Never>?
@@ -197,10 +199,6 @@ final class BrowserWebSearchService: NSObject {
             switch provider {
             case .baidu:
                 return "https://www.baidu.com/s?wd=\(encoded)&rn=10&ie=utf-8&_=\(timestamp)"
-            case .so:
-                return "https://www.so.com/s?q=\(encoded)&ie=utf-8&_=\(timestamp)"
-            case .sogou:
-                return "https://www.sogou.com/web?query=\(encoded)&ie=utf8&_=\(timestamp)"
             case .bing:
                 return needsFreshness
                     ? "https://cn.bing.com/search?q=\(encoded)&setlang=zh-Hans&filters=ex1%3a%22ez1%22&_=\(timestamp)"
@@ -225,8 +223,6 @@ final class BrowserWebSearchService: NSObject {
         let lowercased = query.lowercased()
         let explicitProviders: [(SearchProvider, [String])] = [
             (.baidu, ["百度", "baidu", "baidu.com"]),
-            (.so, ["360", "好搜", "so.com", "www.so.com"]),
-            (.sogou, ["搜狗", "sogou", "sogou.com"]),
             (.bing, ["必应", "bing", "cn.bing.com"]),
             (.toutiao, ["头条", "今日头条", "toutiao", "so.toutiao.com"]),
             (.google, ["谷歌", "google", "google.com"]),
@@ -240,8 +236,8 @@ final class BrowserWebSearchService: NSObject {
         }
 
         let fallback: [SearchProvider] = needsFreshness
-            ? [.baidu, .toutiao, .so, .sogou, .bing]
-            : [.baidu, .so, .sogou, .bing]
+            ? [.baidu, .toutiao, .bing]
+            : [.baidu, .bing]
         preferred.append(contentsOf: fallback)
         return preferred.reduce(into: [SearchProvider]()) { result, provider in
             if !result.contains(provider) {
@@ -256,12 +252,6 @@ final class BrowserWebSearchService: NSObject {
         }
         if host == "www.baidu.com" || host.hasSuffix(".baidu.com") {
             return SearchPage(url: url, timeout: 5, settleDelay: 350_000_000, resultLimit: 3)
-        }
-        if host == "www.so.com" || host.hasSuffix(".so.com") {
-            return SearchPage(url: url, timeout: 5, settleDelay: 350_000_000, resultLimit: 2)
-        }
-        if host == "www.sogou.com" || host.hasSuffix(".sogou.com") {
-            return SearchPage(url: url, timeout: 6, settleDelay: 450_000_000, resultLimit: 1)
         }
         if host == "cn.bing.com" || host.hasSuffix(".bing.com") {
             return SearchPage(url: url, timeout: 5, settleDelay: 350_000_000, resultLimit: 2)
@@ -340,7 +330,9 @@ final class BrowserWebSearchService: NSObject {
         let action = rawAction
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        let sanitizedCall = browserCallWithMobileDefaultsIfNeeded(call, action: action)
+        let preferredCall = browserCallWithPreferredModeDefaults(call)
+        applyPreferredBrowserModeIfNeeded(call: preferredCall)
+        let sanitizedCall = browserCallWithMobileDefaultsIfNeeded(preferredCall, action: action)
         if Self.browserCallAllowsDesktopMode(sanitizedCall) {
             browserDesktopModeExplicitlyEnabled = true
         } else if !browserDesktopModeExplicitlyEnabled {
@@ -446,6 +438,66 @@ final class BrowserWebSearchService: NSObject {
         boolValue(call["allow_desktop"] ?? call["allowDesktop"] ?? call["desktop_mode"] ?? call["desktopMode"] ?? call["force_desktop"] ?? call["forceDesktop"]) == true
     }
 
+    private static func preferredBrowserUserAgentMode() -> String {
+        let raw = UserDefaults.standard.string(forKey: browserUserAgentModeDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        switch raw {
+        case "desktop_chrome", "desktop":
+            return "desktop_chrome"
+        default:
+            return "mobile_safari"
+        }
+    }
+
+    private func browserCallWithPreferredModeDefaults(_ call: [String: Any]) -> [String: Any] {
+        guard Self.preferredBrowserUserAgentMode() == "desktop_chrome" else {
+            return call
+        }
+        var preferred = call
+        preferred["allow_desktop"] = true
+        if Self.firstString(in: preferred, keys: ["user_agent", "userAgent", "profile"]) == nil {
+            preferred["user_agent"] = "desktop_chrome"
+            preferred["userAgent"] = "desktop_chrome"
+            preferred["profile"] = "desktop_chrome"
+        }
+        if Self.intValue(preferred["viewport_width"] ?? preferred["viewportWidth"] ?? preferred["width"]) == nil {
+            preferred["viewport_width"] = Int(Self.defaultDesktopBrowserViewport.width.rounded())
+            preferred["width"] = Int(Self.defaultDesktopBrowserViewport.width.rounded())
+        }
+        if Self.intValue(preferred["viewport_height"] ?? preferred["viewportHeight"] ?? preferred["height"]) == nil {
+            preferred["viewport_height"] = Int(Self.defaultDesktopBrowserViewport.height.rounded())
+            preferred["height"] = Int(Self.defaultDesktopBrowserViewport.height.rounded())
+        }
+        return preferred
+    }
+
+    private func applyPreferredBrowserModeIfNeeded(call: [String: Any]) {
+        if Self.browserCallAllowsDesktopMode(call) {
+            if let profile = Self.firstString(in: call, keys: ["user_agent", "userAgent", "profile"]) {
+                applyBrowserUserAgent(profile)
+            } else if Self.preferredBrowserUserAgentMode() == "desktop_chrome" {
+                applyBrowserUserAgent("desktop_chrome")
+            }
+            if let width = Self.intValue(call["viewport_width"] ?? call["viewportWidth"] ?? call["width"]),
+               let height = Self.intValue(call["viewport_height"] ?? call["viewportHeight"] ?? call["height"]) {
+                applyBrowserViewport(width: width, height: height)
+            } else if Self.preferredBrowserUserAgentMode() == "desktop_chrome" {
+                applyBrowserViewport(
+                    width: Int(Self.defaultDesktopBrowserViewport.width.rounded()),
+                    height: Int(Self.defaultDesktopBrowserViewport.height.rounded())
+                )
+            }
+            browserDesktopModeExplicitlyEnabled = true
+            return
+        }
+
+        if Self.preferredBrowserUserAgentMode() == "mobile_safari" {
+            browserDesktopModeExplicitlyEnabled = false
+            applyMobileBrowserDefaultsIfNeeded()
+        }
+    }
+
     private func browserCallWithMobileDefaultsIfNeeded(_ call: [String: Any], action: String) -> [String: Any] {
         guard !Self.browserCallAllowsDesktopMode(call), !browserDesktopModeExplicitlyEnabled else { return call }
 
@@ -487,6 +539,29 @@ final class BrowserWebSearchService: NSObject {
         guard width >= 700 || height >= 1200 else { return }
 
         browserViewportSize = Self.defaultMobileBrowserViewport
+        for tab in browserTabs.values {
+            tab.frame = CGRect(
+                x: -10_000,
+                y: -10_000,
+                width: browserViewportSize.width,
+                height: browserViewportSize.height
+            )
+            tab.setNeedsLayout()
+            tab.layoutIfNeeded()
+        }
+        webView?.frame = CGRect(
+            x: -10_000,
+            y: -10_000,
+            width: browserViewportSize.width,
+            height: browserViewportSize.height
+        )
+    }
+
+    private func applyBrowserViewport(width: Int, height: Int) {
+        browserViewportSize = CGSize(
+            width: CGFloat(min(max(width, 240), 4096)),
+            height: CGFloat(min(max(height, 240), 4096))
+        )
         for tab in browserTabs.values {
             tab.frame = CGRect(
                 x: -10_000,
@@ -2994,8 +3069,6 @@ final class BrowserWebSearchService: NSObject {
         if joined.contains("baidu")
             || joined.contains("bing")
             || joined.contains("google")
-            || joined.contains("sogou")
-            || joined.contains("so.com")
             || joined.contains("duckduckgo")
             || joined.contains("搜索")
             || joined.contains("搜一下")
@@ -9047,8 +9120,6 @@ final class BrowserWebSearchService: NSObject {
             'bing.com', 'www.bing.com', 'cn.bing.com',
             'google.com', 'www.google.com',
             'baidu.com', 'www.baidu.com',
-            'so.com', 'www.so.com', 'm.so.com',
-            'sogou.com', 'www.sogou.com', 'm.sogou.com',
             'so.toutiao.com',
             'metaso.cn', 'www.metaso.cn',
             'quark.sm.cn', 'm.sm.cn', 'sm.cn'
@@ -9092,11 +9163,6 @@ final class BrowserWebSearchService: NSObject {
                 const q = url.searchParams.get('url') || url.searchParams.get('target') || url.searchParams.get('wd');
                 if (q && /^https?:/i.test(q)) return q;
                 return '';
-              }
-              if (url.hostname.endsWith('so.com') || url.hostname.endsWith('sogou.com')) {
-                const q = url.searchParams.get('url') || url.searchParams.get('u') || url.searchParams.get('target') || url.searchParams.get('link');
-                if (q && /^https?:/i.test(q)) return decodeURIComponent(q);
-                if (['/s', '/web', '/link', '/link2url'].includes(url.pathname)) return '';
               }
               if (url.hostname === 'so.toutiao.com') return '';
               if (url.hostname.endsWith('metaso.cn') && (url.pathname === '/' || url.pathname.startsWith('/search'))) return '';
@@ -9671,12 +9737,6 @@ final class BrowserWebSearchService: NSObject {
         if host == "baidu.com" || host.hasSuffix(".baidu.com") {
             return true
         }
-        if host == "so.com" || host.hasSuffix(".so.com") {
-            return ["/s", "/search", "/link", "/link2url", "/"].contains(url.path.lowercased())
-        }
-        if host == "sogou.com" || host.hasSuffix(".sogou.com") {
-            return ["/web", "/link", "/link2url", "/"].contains(url.path.lowercased())
-        }
         if host == "so.toutiao.com" {
             return true
         }
@@ -9889,8 +9949,6 @@ private struct BrowserPageSnapshot {
 
 private enum SearchProvider: Equatable {
     case baidu
-    case so
-    case sogou
     case bing
     case toutiao
     case google
