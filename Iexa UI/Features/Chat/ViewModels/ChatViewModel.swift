@@ -13838,8 +13838,8 @@ final class ChatViewModel {
             "tool_title": shouldOperate ? "继续操作当前网页" : "观察当前网页",
             "action": initialURL == nil ? "find_elements" : "navigate",
             "scan_page": true,
-            "screenshot": true,
-            "capture_visuals": true,
+            "screenshot": false,
+            "capture_visuals": false,
             "attach_preview": false,
             "force_reload": false,
             "forceReload": false,
@@ -14509,8 +14509,8 @@ final class ChatViewModel {
         upgraded["force_reload"] = false
         upgraded["forceReload"] = false
         upgraded["reload"] = false
-        upgraded["screenshot"] = true
-        upgraded["capture_visuals"] = true
+        upgraded["screenshot"] = false
+        upgraded["capture_visuals"] = false
         upgraded["scan_page"] = true
 
         let existingText = firstNonEmptyString(
@@ -15758,8 +15758,8 @@ final class ChatViewModel {
            requestedText != nil {
             arguments["action"] = "find_elements"
             arguments["scan_page"] = true
-            arguments["screenshot"] = true
-            arguments["capture_visuals"] = true
+            arguments["screenshot"] = false
+            arguments["capture_visuals"] = false
             arguments["target"] = "search input textarea textbox query keyword 搜索 输入"
             arguments["editable"] = true
             arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 10, 10)
@@ -15769,8 +15769,8 @@ final class ChatViewModel {
                   !requestedClickTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             arguments["action"] = "find_elements"
             arguments["scan_page"] = true
-            arguments["screenshot"] = true
-            arguments["capture_visuals"] = true
+            arguments["screenshot"] = false
+            arguments["capture_visuals"] = false
             arguments["target"] = requestedClickTarget
             arguments["button_text"] = requestedClickTarget
             arguments["clickable"] = true
@@ -15797,8 +15797,8 @@ final class ChatViewModel {
                   !requestedClickTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             arguments["action"] = "find_elements"
             arguments["scan_page"] = true
-            arguments["screenshot"] = true
-            arguments["capture_visuals"] = true
+            arguments["screenshot"] = false
+            arguments["capture_visuals"] = false
             arguments["target"] = requestedClickTarget
             arguments["button_text"] = requestedClickTarget
             arguments["clickable"] = true
@@ -15838,31 +15838,31 @@ final class ChatViewModel {
         } else if action == "browser.wait_for_dom_stable" {
             arguments["action"] = "find_elements"
             arguments["scan_page"] = true
-            arguments["capture_visuals"] = true
+            arguments["capture_visuals"] = false
             arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 12, 12)
             arguments["attach_preview"] = false
-            arguments["screenshot"] = true
+            arguments["screenshot"] = false
             arguments["continuation_stage"] = "post_action_scan"
         } else if ["browser.open", "browser.screenshot", "browser.scroll", "browser.observe", "browser.inspect"].contains(action)
             || (action == "browser.find_elements" && !lowerContent.contains("\"visual_viewports\"")) {
             arguments["action"] = "find_elements"
             arguments["scan_page"] = true
-            arguments["screenshot"] = true
-            arguments["capture_visuals"] = true
+            arguments["screenshot"] = false
+            arguments["capture_visuals"] = false
             arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 10, 10)
             arguments["continuation_stage"] = "page_scan"
         } else if action == "browser.find_elements",
                   lowerContent.contains("\"focused_element\"") {
-            arguments["action"] = "screenshot"
+            arguments["action"] = "observe"
             arguments["full_page"] = false
             arguments["attach_preview"] = false
-            arguments["screenshot"] = true
+            arguments["screenshot"] = false
             arguments["continuation_stage"] = "focused_element_view"
         } else {
-            arguments["action"] = "screenshot"
+            arguments["action"] = "observe"
             arguments["full_page"] = false
             arguments["attach_preview"] = false
-            arguments["screenshot"] = true
+            arguments["screenshot"] = false
             arguments["continuation_stage"] = "viewport_view"
         }
 

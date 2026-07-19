@@ -2367,13 +2367,6 @@ final class BrowserWebSearchService: NSObject {
     private func executeNativeAutoWorkflow(_ call: [String: Any]) async -> [String: Any] {
         var steps: [[String: Any]] = []
         var continuationCall = Self.browserContinuationCall(from: call)
-        if continuationCall["screenshot"] == nil,
-           continuationCall["visual_observation"] == nil,
-           continuationCall["visual"] == nil,
-           continuationCall["include_visual"] == nil,
-           continuationCall["includeVisual"] == nil {
-            continuationCall["visual_observation"] = true
-        }
         let maxLoops = min(max(Self.intValue(call["max_loops"] ?? call["maxLoops"] ?? call["retries"]) ?? 6, 1), 12)
         let text = Self.firstString(in: call, keys: ["text", "value", "input", "content", "message", "prompt"])
         let isImageWorkflow = Self.browserAutoWorkflowLooksLikeImageGeneration(call: call, text: text)
@@ -3341,7 +3334,7 @@ final class BrowserWebSearchService: NSObject {
                 return value
             }
         }
-        return true
+        return false
     }
 
     private static func browserMultiViewportVisualSamplingEnabled(in call: [String: Any]) -> Bool {
@@ -3899,7 +3892,7 @@ final class BrowserWebSearchService: NSObject {
         let intent = Self.findElementsIntent(in: call)
         let filters = Self.findElementsFilters(in: call)
         let scanPage = Self.boolValue(call["scan_page"] ?? call["scanPage"] ?? call["full_page"] ?? call["fullPage"]) ?? true
-        var captureVisuals = intent?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        var captureVisuals = false
         for key in [
             "capture_visuals", "captureVisuals",
             "with_screenshots", "withScreenshots",
