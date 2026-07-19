@@ -27848,13 +27848,8 @@ final class ChatViewModel {
     }
 
     private static func safeAssistantDisplayContent(_ text: String) -> String {
-        let nativeVisibleContent = LocalNativeToolService.visibleContent(from: text)
-        let textHasOnlyNativeToolPayload = nativeVisibleContent.isEmpty
-            && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let withoutNativeToolEcho = (LocalNativeToolService.containsNativeToolBlock(text) || textHasOnlyNativeToolPayload)
-            ? nativeVisibleContent
-            : text
-        let withoutLocalToolEcho = cleanedLocalAlpineMissingToolEchoes(withoutNativeToolEcho)
+        let withoutToolProtocolEcho = visibleAssistantContentBeforeDisplay(text)
+        let withoutLocalToolEcho = cleanedLocalAlpineMissingToolEchoes(withoutToolProtocolEcho)
         if shouldShowInlineImageReceiveState(for: withoutLocalToolEcho) {
             return cleanedAssistantInlineImagePayloads(withoutLocalToolEcho)
         }
@@ -27870,6 +27865,60 @@ final class ChatViewModel {
                 cleanedAssistantInlineImagePayloads(prose)
             )
         }
+    }
+
+    private static func visibleAssistantContentBeforeDisplay(_ text: String) -> String {
+        let trimmedOriginal = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOriginal.isEmpty else { return text }
+
+        var visible = LocalAlpineAgentService.visibleContent(from: text)
+        if visible.localizedCaseInsensitiveContains("iexa_workspace") {
+            let workspaceVisible = LocalWorkspaceAgentService.visibleContent(from: visible)
+            visible = workspaceVisible == "正在执行本地工作区操作..." ? "" : workspaceVisible
+        }
+
+        let nativeVisible = LocalNativeToolService.visibleContent(from: visible)
+        let withoutToolResultEcho = cleanedNativeToolResultEchoes(nativeVisible)
+        let trimmedVisible = withoutToolResultEcho.trimmingCharacters(in: .whitespacesAndNewlines)
+        let protocolDetected = visible != text
+            || nativeVisible != visible
+            || withoutToolResultEcho != nativeVisible
+            || LocalNativeToolService.containsNativeToolBlock(text)
+            || contentContainsLocalAlpineInstruction(text)
+            || containsInternalPromptLeak(text)
+            || text.localizedCaseInsensitiveContains("iexa_workspace")
+
+        if protocolDetected && trimmedVisible.isEmpty {
+            return ""
+        }
+        if protocolDetected && containsInternalPromptLeak(nativeVisible) {
+            return ""
+        }
+        return withoutToolResultEcho
+    }
+
+    private static func cleanedNativeToolResultEchoes(_ text: String) -> String {
+        guard text.contains("\"") else { return text }
+        var cleaned = text
+        let trailingToolEnvelopePatterns = [
+            #"(?is)(^|\n)\s*[\{\[](?=[\s\S]{0,4096}?"(?:action|tool|name)"\s*:\s*"(?:browser_use|browser\.use|shell_execute|file_read|file_write|file_edit|read_image|memory_write|memory_get|image_generation|iexa_native)")[\s\S]*$"#,
+            #"(?is)(^|\n)\s*[\{\[](?=[\s\S]{0,4096}?"browser_(?:use_)?action"\s*:\s*"browser\.)[\s\S]*$"#,
+            #"(?is)(^|\n)\s*[\{\[](?=[\s\S]{0,4096}?"(?:focused_element|node_id|nodeId|page_center_x|page_x|selector)"\s*:)(?=[\s\S]{0,4096}?"(?:items|page_url|image_path|iexa_url|url|link)"\s*:)[\s\S]*$"#
+        ]
+        for pattern in trailingToolEnvelopePatterns {
+            cleaned = cleaned.replacingOccurrences(
+                of: pattern,
+                with: "$1",
+                options: .regularExpression
+            )
+        }
+        if cleaned != text {
+            cleaned = cleaned
+                .replacingOccurrences(of: #"[ \t]+\n"#, with: "\n", options: .regularExpression)
+                .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return cleaned
     }
 
     private static func contentByInjectingLocalReasoning(
