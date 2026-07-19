@@ -525,6 +525,65 @@ nonisolated struct LocalAlpineToolDisplay: Hashable, Sendable {
 }
 
 nonisolated enum LocalAlpineToolDisplayRegistry {
+    static func androidCapsuleColorHex(for toolName: String) -> UInt32 {
+        let trimmed = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+
+        switch normalized {
+        case "memory_get", "memory_write":
+            return 0xff2d55
+        case "web_search", "search_web", "browser_search", "file_read",
+             "read_file", "read_files", "read", "open_file", "cat":
+            return 0x32ade6
+        case "read_image", "image_read", "inspect_image":
+            return 0xaf52de
+        case "shell_execute", "shell", "bash", "exec", "command", "run", "run_script":
+            return 0x34c759
+        case "browser_use", "browser", "browse", "file_write", "write_file",
+             "write_files", "write", "create_file", "create_files", "new_file", "touch":
+            return 0x007aff
+        case "file_edit", "edit_file", "edit_files", "replace_file", "edit",
+             "patch_file", "patch_files", "apply_patch", "patch":
+            return 0xff9500
+        default:
+            return 0x8e8e93
+        }
+    }
+
+    static func androidCapsuleIcon(for toolName: String) -> String {
+        let trimmed = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+
+        switch normalized {
+        case "memory_get", "memory_write":
+            return "brain.head.profile"
+        case "web_search", "search_web", "browser_search":
+            return "magnifyingglass"
+        case "read_image", "image_read", "inspect_image":
+            return "photo"
+        case "browser_use", "browser", "browse":
+            return "globe"
+        case "file_read", "read_file", "read_files", "read", "open_file", "cat":
+            return "doc.text"
+        case "file_edit", "edit_file", "edit_files", "replace_file", "edit",
+             "patch_file", "patch_files", "apply_patch", "patch":
+            return "square.and.pencil"
+        case "file_write", "write_file", "write_files", "write", "create_file",
+             "create_files", "new_file", "touch":
+            return "doc.badge.plus"
+        case "shell_execute", "shell", "bash", "exec", "command", "run", "run_script":
+            return "terminal.fill"
+        case "":
+            return "sparkles"
+        default:
+            return display(for: trimmed).icon
+        }
+    }
+
     static func display(for toolName: String) -> LocalAlpineToolDisplay {
         switch toolName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "read_file", "read_files", "read", "file_read":

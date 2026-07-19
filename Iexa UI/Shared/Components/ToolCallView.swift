@@ -3170,11 +3170,14 @@ struct ToolCallsContainer: View {
 /// then collapses automatically once thinking completes.
 struct ReasoningView: View {
     let reasoning: ReasoningData
+    let reasoningEffort: String?
     @State private var isExpanded: Bool
+    @State private var loadingRotation: Double = 0
     @Environment(\.theme) private var theme
 
-    init(reasoning: ReasoningData) {
+    init(reasoning: ReasoningData, reasoningEffort: String? = nil) {
         self.reasoning = reasoning
+        self.reasoningEffort = reasoningEffort
         // Expanded while thinking is in progress, collapsed once done.
         // ReasoningData.id is a stable hash so SwiftUI reuses this view across
         // streaming ticks — @State persists, so user taps are preserved mid-stream.
@@ -3197,16 +3200,29 @@ struct ReasoningView: View {
                         .foregroundStyle(theme.textTertiary)
                         .frame(width: 12)
 
-                    Image(systemName: "brain.head.profile")
-                        .scaledFont(size: 12, weight: .medium)
-                        .foregroundStyle(theme.brandPrimary.opacity(0.7))
+                    reasoningIcon
 
-                    Text(reasoning.summary)
+                    Text(reasoningTitle)
                         .scaledFont(size: 12, weight: .medium)
                         .foregroundStyle(theme.textTertiary)
                         .lineLimit(1)
 
                     Spacer()
+
+                    Text("\(reasoning.content.count)")
+                        .scaledFont(size: 11, weight: .semibold, design: .rounded)
+                        .foregroundStyle(theme.textTertiary.opacity(0.78))
+                        .monospacedDigit()
+
+                    Text(thinkingLevelLabel)
+                        .scaledFont(size: 10, weight: .semibold, design: .rounded)
+                        .foregroundStyle(theme.brandPrimary.opacity(theme.isDark ? 0.88 : 0.76))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(theme.brandPrimary.opacity(theme.isDark ? 0.16 : 0.10))
+                        )
                 }
                 .padding(.vertical, Spacing.xs)
                 .contentShape(Rectangle())
@@ -3235,6 +3251,12 @@ struct ReasoningView: View {
                 isExpanded = false
             }
         }
+        .onAppear {
+            guard !reasoning.isDone else { return }
+            withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                loadingRotation = 360
+            }
+        }
         .background(
             RoundedRectangle(cornerRadius: CornerRadius.sm, style: .continuous)
                 .fill(theme.surfaceContainer.opacity(0.3))
@@ -3244,6 +3266,58 @@ struct ReasoningView: View {
                 .strokeBorder(theme.brandPrimary.opacity(0.1), lineWidth: 0.5)
         )
     }
+
+    @ViewBuilder
+    private var reasoningIcon: some View {
+        if reasoning.isDone {
+            Image(systemName: "brain.head.profile")
+                .scaledFont(size: 12, weight: .medium)
+                .foregroundStyle(theme.brandPrimary.opacity(0.7))
+        } else {
+            ZStack {
+                Circle()
+                    .stroke(theme.brandPrimary.opacity(0.18), lineWidth: 1.5)
+                Circle()
+                    .trim(from: 0.15, to: 0.72)
+                    .stroke(theme.brandPrimary.opacity(0.82), style: StrokeStyle(lineWidth: 1.7, lineCap: .round))
+                    .rotationEffect(.degrees(loadingRotation))
+            }
+            .frame(width: 13, height: 13)
+        }
+    }
+
+    private var reasoningTitle: String {
+        let summary = reasoning.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = summary.lowercased()
+        if lower == "thinking" || lower == "deep thinking" || summary == "思考" {
+            return reasoning.isDone ? "深度思考" : "思考中..."
+        }
+        return summary.isEmpty ? (reasoning.isDone ? "深度思考" : "思考中...") : summary
+    }
+
+    private var thinkingLevelLabel: String {
+        let raw = reasoningEffort?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        ?? UserDefaults.standard.string(forKey: "reasoning_effort")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        ?? "medium"
+        switch raw {
+        case "off", "none", "false":
+            return "关闭"
+        case "low":
+            return "低"
+        case "high":
+            return "高"
+        case "xhigh", "max", "maximum", "极高":
+            return "极高"
+        case "medium", "default", "":
+            return "中"
+        default:
+            return raw
+        }
+    }
 }
 
 // MARK: - Reasoning Container
@@ -3251,12 +3325,13 @@ struct ReasoningView: View {
 /// Renders a list of reasoning blocks.
 struct ReasoningContainer: View {
     let blocks: [ReasoningData]
+    let reasoningEffort: String?
 
     var body: some View {
         if !blocks.isEmpty {
             VStack(alignment: .leading, spacing: Spacing.xs) {
                 ForEach(blocks) { block in
-                    ReasoningView(reasoning: block)
+                    ReasoningView(reasoning: block, reasoningEffort: reasoningEffort)
                 }
             }
         }
@@ -3289,6 +3364,7 @@ struct AssistantMessageContent: View {
     var messageEmbeds: [String] = []
     var localReasoningContent: String? = nil
     var localReasoningDone: Bool? = nil
+    var reasoningEffort: String? = nil
     var localStructuredPartsJSON: String? = nil
     /// Passed down to Rich UI embeds for auth token injection and base URL resolution.
     var authToken: String? = nil
@@ -3513,7 +3589,7 @@ struct AssistantMessageContent: View {
                         )
 
                     case .reasoningBlocks(let blocks):
-                        ReasoningContainer(blocks: blocks)
+                        ReasoningContainer(blocks: blocks, reasoningEffort: reasoningEffort)
 
                     case .standaloneEmbeds(let embeds):
                         // Standalone embeds: no tool call to attach to.

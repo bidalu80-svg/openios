@@ -13150,6 +13150,27 @@ final class ChatViewModel {
                     kind: officeKind,
                     phase: phase
                 )
+            },
+            toolProgress: { [weak self] action, statusKey, phase in
+                guard let self, officeKind == nil, browserAction == nil else { return }
+                let displayTitle = Self.localNativeToolTitle(from: nil, fallbackAction: action)
+                switch phase {
+                case .started:
+                    self.markLocalNativeToolStarted(
+                        messageId: assistantMessageId,
+                        action: action,
+                        statusKey: statusKey,
+                        displayTitle: displayTitle
+                    )
+                case .finished(let succeeded):
+                    self.finishLocalNativeToolStep(
+                        messageId: assistantMessageId,
+                        action: action,
+                        statusKey: statusKey,
+                        displayTitle: displayTitle,
+                        succeeded: succeeded
+                    )
+                }
             }
         )
         var browserVerificationCompleted = false
@@ -23798,12 +23819,6 @@ final class ChatViewModel {
                 actionName: browserAction,
                 displayTitle: Self.localNativeToolTitle(from: directCalls.first, fallbackAction: browserAction)
             )
-        } else if usesGenericNativeStep {
-            markLocalNativeToolStarted(
-                messageId: messageId,
-                action: nativeAction,
-                displayTitle: Self.localNativeToolTitle(from: directCalls.first, fallbackAction: nativeAction)
-            )
         }
         var result = await LocalNativeToolService.shared.executeBlocks(
             in: executableContent,
@@ -23814,6 +23829,30 @@ final class ChatViewModel {
                     kind: officeKind,
                     phase: phase
                 )
+            },
+            toolProgress: { [weak self] action, statusKey, phase in
+                guard let self,
+                      officeKind == nil,
+                      browserAction == nil,
+                      usesGenericNativeStep else { return }
+                let displayTitle = Self.localNativeToolTitle(from: nil, fallbackAction: action)
+                switch phase {
+                case .started:
+                    self.markLocalNativeToolStarted(
+                        messageId: messageId,
+                        action: action,
+                        statusKey: statusKey,
+                        displayTitle: displayTitle
+                    )
+                case .finished(let succeeded):
+                    self.finishLocalNativeToolStep(
+                        messageId: messageId,
+                        action: action,
+                        statusKey: statusKey,
+                        displayTitle: displayTitle,
+                        succeeded: succeeded
+                    )
+                }
             }
         )
         var browserVerificationCompleted = false
@@ -23916,14 +23955,6 @@ final class ChatViewModel {
                 files: []
             )
             return
-        }
-        if usesGenericNativeStep {
-            finishLocalNativeToolStep(
-                messageId: messageId,
-                action: nativeAction,
-                displayTitle: Self.localNativeToolTitle(from: directCalls.first, fallbackAction: nativeAction),
-                succeeded: !Self.localNativeToolSummaryContainsFailure(result.summary)
-            )
         }
         var inheritedStatusHistory: [ChatStatusUpdate] = []
         if let browserDocument = result.browserDocument {
@@ -24297,11 +24328,13 @@ final class ChatViewModel {
     private func markLocalNativeToolStarted(
         messageId: String,
         action: String,
+        statusKey: String? = nil,
         displayTitle: String? = nil
     ) {
         updateLocalNativeToolStepMessage(
             messageId: messageId,
             action: action,
+            statusKey: statusKey,
             description: Self.localNativeToolStepTitle(for: action, completed: false, displayTitle: displayTitle),
             done: false
         )
@@ -24310,12 +24343,14 @@ final class ChatViewModel {
     private func finishLocalNativeToolStep(
         messageId: String,
         action: String,
+        statusKey: String? = nil,
         displayTitle: String? = nil,
         succeeded: Bool
     ) {
         updateLocalNativeToolStepMessage(
             messageId: messageId,
             action: action,
+            statusKey: statusKey,
             description: Self.localNativeToolStepTitle(for: action, completed: true, succeeded: succeeded, displayTitle: displayTitle),
             done: true
         )
@@ -24324,16 +24359,23 @@ final class ChatViewModel {
     private func updateLocalNativeToolStepMessage(
         messageId: String,
         action: String,
+        statusKey: String? = nil,
         description: String,
         done: Bool
     ) {
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
         let normalizedAction = action.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedStatusKey = (statusKey ?? normalizedAction)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: ".", with: "_")
+            .lowercased()
         var metadata = conversation?.messages[index].metadata ?? [:]
         metadata["iexa_local_native_tool_parent"] = "true"
         let status = ChatStatusUpdate(
             action: "local_native_tool",
-            status: "local_native.\(normalizedAction.replacingOccurrences(of: " ", with: "_"))",
+            status: "local_native.\(normalizedStatusKey)",
             description: description,
             done: done,
             occurredAt: .now
@@ -26056,12 +26098,16 @@ final class ChatViewModel {
                 : "本地输入已取消",
             done: true
         )
+        let finalStatusHistory = Self.appendingToolStatus(
+            doneStatus,
+            to: conversation?.messages.first(where: { $0.id == resultMessageId })?.statusHistory ?? []
+        )
         let visibleResultContent = Self.lightweightLocalAlpineResultContent(for: result)
         updateAssistantMessage(
             id: resultMessageId,
             content: visibleResultContent,
             isStreaming: false,
-            statusHistory: [doneStatus]
+            statusHistory: finalStatusHistory
         )
         let finalToolCalls = localAlpineToolCallsPreservingContentOffsets(
             result.toolCalls,
@@ -26105,7 +26151,7 @@ final class ChatViewModel {
         conversation?.history.updateNode(id: resultMessageId) { node in
             node.content = visibleResultContent
             node.done = true
-            node.statusHistory = [doneStatus]
+            node.statusHistory = finalStatusHistory
             node.metadata = resultMetadata
             if let files = resultFiles {
                 node.files = files
@@ -27769,9 +27815,13 @@ final class ChatViewModel {
                 }
             }
             if let statusHistory = effectiveStatusHistory {
-                conversation?.messages[index].statusHistory = statusHistory
+                var mergedStatusHistory = conversation?.messages[index].statusHistory
+                for status in statusHistory {
+                    mergedStatusHistory = Self.appendingToolStatus(status, to: mergedStatusHistory)
+                }
+                conversation?.messages[index].statusHistory = mergedStatusHistory
                 conversation?.history.updateNode(id: id) { node in
-                    node.statusHistory = statusHistory
+                    node.statusHistory = mergedStatusHistory
                 }
             }
             if let error {
@@ -28346,6 +28396,7 @@ final class ChatViewModel {
             ?? localAlpineLiveToolCallsByMessageId[messageId]
             ?? []
         let existingOffset = calls.first(where: { $0.id == event.call.id })?.contentOffset
+        let hadExistingCall = calls.contains { $0.id == event.call.id }
         let uiCall = localAlpineLiveToolUICall(
             event.call,
             contentOffset: existingOffset ?? localAlpineCurrentContentOffset(messageId: messageId)
@@ -28360,6 +28411,7 @@ final class ChatViewModel {
 
         let status = ChatStatusUpdate(
             action: "local_alpine_tool",
+            status: Self.localAlpineToolStatusKey(for: uiCall),
             description: uiCall.statusDescription,
             done: uiCall.phase == .result,
             occurredAt: .now
@@ -28368,9 +28420,10 @@ final class ChatViewModel {
 
         let isLiveProgressUpdate = uiCall.phase == .start
             && uiCall.outputPreview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        let isFreshStepStart = uiCall.phase == .start && !hadExistingCall
         flushLocalAlpineToolEventIfNeeded(
             messageId: messageId,
-            immediate: uiCall.phase == .result || (uiCall.phase == .start && !isLiveProgressUpdate)
+            immediate: uiCall.phase == .result || isFreshStepStart || (uiCall.phase == .start && !isLiveProgressUpdate)
         )
 
         Task {
@@ -28390,6 +28443,24 @@ final class ChatViewModel {
             return streamingStore.displayContent.count
         }
         return conversation?.messages.first(where: { $0.id == messageId })?.content.count
+    }
+
+    private static func localAlpineToolStatusKey(for call: LocalAlpineToolCall) -> String {
+        let tool = call.name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: ".", with: "_")
+            .lowercased()
+        let id = call.id
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: ".", with: "_")
+            .lowercased()
+        let normalizedTool = tool.isEmpty ? "tool" : tool
+        guard !id.isEmpty else { return "local_alpine.\(normalizedTool)" }
+        return "local_alpine.\(normalizedTool).\(id)"
     }
 
     private func localAlpineLiveToolUICall(
@@ -28512,13 +28583,10 @@ final class ChatViewModel {
         guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else {
             return
         }
-        var history = conversation?.messages[index].statusHistory ?? []
-        if let last = history.last,
-           Self.sameLiveToolStatus(last, status) {
-            history[history.count - 1] = status
-        } else {
-            history.append(status)
-        }
+        var history = Self.appendingToolStatus(
+            status,
+            to: conversation?.messages[index].statusHistory ?? []
+        )
         if history.count > 60 {
             history = Array(history.suffix(60))
         }

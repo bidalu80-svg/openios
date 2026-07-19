@@ -17,6 +17,15 @@ import Darwin
 
 private let agentToolWebPreviewPrefix = "web-preview:"
 
+private func androidToolCapsuleTint(for toolName: String) -> Color {
+    let hex = LocalAlpineToolDisplayRegistry.androidCapsuleColorHex(for: toolName)
+    return Color(
+        red: Double((hex >> 16) & 0xff) / 255.0,
+        green: Double((hex >> 8) & 0xff) / 255.0,
+        blue: Double(hex & 0xff) / 255.0
+    )
+}
+
 private func agentToolWebPreviewReference(for target: String) -> String {
     agentToolWebPreviewPrefix + target
 }
@@ -80,6 +89,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
     let id: String
     let sortOrder: Double
     let kind: Kind
+    let toolName: String
     let title: String
     let detail: String
     let isRunning: Bool
@@ -147,6 +157,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
         lhs.id == rhs.id
             && lhs.sortOrder == rhs.sortOrder
             && lhs.kind == rhs.kind
+            && lhs.toolName == rhs.toolName
             && lhs.title == rhs.title
             && lhs.detail == rhs.detail
             && lhs.isRunning == rhs.isRunning
@@ -172,6 +183,7 @@ private struct AgentActivityStep: Identifiable, Hashable {
         hasher.combine(id)
         hasher.combine(sortOrder)
         hasher.combine(kind)
+        hasher.combine(toolName)
         hasher.combine(title)
         hasher.combine(detail)
         hasher.combine(isRunning)
@@ -269,6 +281,7 @@ private struct OrderedAgentTranscriptBlock: Identifiable {
     enum Content {
         case text(String)
         case steps(AgentActivityItem)
+        case reasoning(String, Bool)
     }
 
     let id: String
@@ -408,6 +421,29 @@ private struct AgentActivityItem: Identifiable, Hashable {
             if reference?.isEmpty == false,
                reference?.lowercased().hasPrefix(agentToolWebPreviewPrefix) != true {
                 return reference
+            }
+        }
+        return nil
+    }
+
+    func nearestBrowserOpenURL(beforeOrAt targetStep: AgentActivityStep?) -> String? {
+        guard !steps.isEmpty else { return nil }
+        let targetIndex: Int
+        if let targetStep,
+           let index = steps.firstIndex(where: { $0.id == targetStep.id }) {
+            targetIndex = index
+        } else if let currentStep,
+                  let index = steps.firstIndex(where: { $0.id == currentStep.id }) {
+            targetIndex = index
+        } else {
+            targetIndex = steps.count - 1
+        }
+
+        for index in stride(from: targetIndex, through: 0, by: -1) {
+            let step = steps[index]
+            guard step.isInteractiveBrowserStatusStep || Self.stepLooksLikeBrowserTool(step) else { continue }
+            if let target = Self.normalizedPreviewTarget(step.previewOpenURL) {
+                return target
             }
         }
         return nil
@@ -565,6 +601,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             id: step.id,
             sortOrder: step.sortOrder,
             kind: step.kind,
+            toolName: step.toolName,
             title: step.title,
             detail: clippedFloatingText(step.detail, limit: floatingDetailLimit),
             isRunning: step.isRunning,
@@ -654,6 +691,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
             id: block.id,
             sortOrder: block.sortOrder,
             kind: stepKind,
+            toolName: block.toolName,
             title: block.title,
             detail: detail,
             isRunning: block.status?.isRunning == true,
@@ -802,6 +840,11 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let output = statusPreviewText(for: group.statuses)
             let statusValue = statusBlockStatus(for: group.statuses)
             let previewFile = action.contains("local_office_agent") ? officeDocumentFiles.first : nil
+            let capsuleToolName = statusCapsuleToolName(
+                for: status,
+                action: action,
+                groupKey: group.groupKey
+            )
 
             return AgentToolBlock(
                 id: "status-\(group.startIndex)-\(group.key)",
@@ -809,7 +852,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 content: output.isEmpty ? detail : output,
                 status: statusValue,
                 title: title,
-                toolName: action,
+                toolName: capsuleToolName,
                 toolArgs: detail,
                 sortOrder: statusSortOrder(group),
                 durationText: durationText(for: group.statuses, isRunning: statusValue.isRunning),
@@ -851,6 +894,11 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 ?? status.status?.trimmingCharacters(in: .whitespacesAndNewlines)
                 ?? title
             let statusValue = statusBlockStatus(for: group.statuses)
+            let capsuleToolName = statusCapsuleToolName(
+                for: status,
+                action: action,
+                groupKey: group.groupKey
+            )
 
             return AgentToolBlock(
                 id: "local-status-\(group.startIndex)-\(group.key)",
@@ -858,7 +906,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
                 content: detail,
                 status: statusValue,
                 title: title,
-                toolName: action,
+                toolName: capsuleToolName,
                 toolArgs: detail == title ? "" : detail,
                 sortOrder: statusSortOrder(group),
                 durationText: durationText(for: group.statuses, isRunning: statusValue.isRunning),
@@ -1114,17 +1162,23 @@ private struct AgentActivityItem: Identifiable, Hashable {
             )
             let previewURL = statusOpenURL(for: group.statuses, groupKey: group.groupKey)
             let previewFile = action.contains("local_office_agent") ? officeDocumentFiles.first : nil
-            let isRunning = status.done != true
+            let statusValue = statusBlockStatus(for: group.statuses)
+            let isRunning = statusValue.isRunning
             let startedAt: Date? = isRunning ? group.statuses.compactMap(\.occurredAt).first : nil
             let duration = durationText(for: group.statuses, isRunning: isRunning)
             return AgentActivityStep(
                 id: "status-\(group.startIndex)-\(group.key)",
                 sortOrder: statusSortOrder(group),
                 kind: .status,
+                toolName: statusCapsuleToolName(
+                    for: status,
+                    action: action,
+                    groupKey: group.groupKey
+                ),
                 title: title,
                 detail: detail,
                 isRunning: isRunning,
-                failed: false,
+                failed: statusValue.isFailure,
                 outputPreview: output.isEmpty ? detail : output,
                 fullOutput: output.isEmpty ? detail : output,
                 outputReference: nil,
@@ -1159,17 +1213,23 @@ private struct AgentActivityItem: Identifiable, Hashable {
             let detail = status.description?.trimmingCharacters(in: .whitespacesAndNewlines)
                 ?? status.status?.trimmingCharacters(in: .whitespacesAndNewlines)
                 ?? title
-            let isRunning = status.done != true
+            let statusValue = statusBlockStatus(for: group.statuses)
+            let isRunning = statusValue.isRunning
             let startedAt: Date? = isRunning ? group.statuses.compactMap(\.occurredAt).first : nil
             let duration = durationText(for: group.statuses, isRunning: isRunning)
             return AgentActivityStep(
                 id: "local-status-\(group.startIndex)-\(group.key)",
                 sortOrder: statusSortOrder(group),
                 kind: .status,
+                toolName: statusCapsuleToolName(
+                    for: status,
+                    action: action,
+                    groupKey: group.groupKey
+                ),
                 title: title,
                 detail: detail == title ? "" : detail,
                 isRunning: isRunning,
-                failed: false,
+                failed: statusValue.isFailure,
                 outputPreview: detail,
                 fullOutput: detail,
                 outputReference: nil,
@@ -1361,6 +1421,79 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return "tool:\(normalized)"
     }
 
+    private static func statusCapsuleToolName(
+        for status: ChatStatusUpdate,
+        action: String,
+        groupKey: String
+    ) -> String {
+        let normalizedAction = action
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+        let normalizedStep = status.status?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased() ?? ""
+
+        switch groupKey {
+        case "tool:web_browser":
+            if normalizedAction.contains("web_search")
+                || normalizedAction.contains("browser_web_search")
+                || normalizedStep.contains("web.search")
+                || normalizedStep.contains("web_search") {
+                return "web_search"
+            }
+            return "browser_use"
+        case "tool:image_generation":
+            return "read_image"
+        case "tool:code_interpreter":
+            return "shell_execute"
+        case "tool:local_native":
+            return capsuleToolName(fromStatusStep: normalizedStep, prefix: "local_native.")
+        case "tool:local_alpine":
+            return capsuleToolName(fromStatusStep: normalizedStep, prefix: "local_alpine.")
+        default:
+            return ""
+        }
+    }
+
+    private static func capsuleToolName(fromStatusStep normalizedStep: String, prefix: String) -> String {
+        guard normalizedStep.hasPrefix(prefix) else { return "" }
+        let value = String(normalizedStep.dropFirst(prefix.count))
+        let knownToolNames = [
+            "shell_execute",
+            "browser_use",
+            "web_search",
+            "read_image",
+            "memory_write",
+            "memory_get",
+            "file_write",
+            "file_edit",
+            "file_read",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "read_files",
+            "write_files",
+            "edit_files",
+            "apply_patch",
+            "patch_file",
+            "run_script",
+            "command",
+            "shell",
+            "bash",
+            "exec"
+        ]
+        if let known = knownToolNames.first(where: { value == $0 || value.hasPrefix("\($0)_") || value.hasPrefix("\($0).") }) {
+            return known
+        }
+        if let range = value.range(of: #"[_\.]\d+$"#, options: .regularExpression) {
+            let trimmed = String(value[..<range.lowerBound])
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return value
+    }
+
     private static func shouldKeepStatusStepKey(_ stepKey: String, for groupKey: String) -> Bool {
         guard !stepKey.isEmpty else { return false }
         switch groupKey {
@@ -1368,9 +1501,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
              "tool:code_interpreter",
              "tool:image_generation",
              "tool:video_generation",
-             "tool:office",
-             "tool:local_native",
-             "tool:local_alpine":
+             "tool:office":
             return false
         default:
             return true
@@ -1876,6 +2007,21 @@ private struct AgentActivityItem: Identifiable, Hashable {
             return trimmed
         }
         return nil
+    }
+
+    static func stepLooksLikeBrowserTool(_ step: AgentActivityStep) -> Bool {
+        let haystack = [
+            step.id,
+            step.toolName,
+            step.title
+        ]
+        .joined(separator: " ")
+        .replacingOccurrences(of: "-", with: "_")
+        .lowercased()
+        return haystack.contains("browser_use")
+            || haystack.contains("browser.")
+            || haystack.contains("browser_")
+            || haystack.contains("web_browser")
     }
 
     private static func isPreviewableLocalResource(_ value: String) -> Bool {
@@ -3615,10 +3761,6 @@ struct ChatDetailView: View {
                 openMessageFile(file)
                 return true
             }
-            if let urlString = step.previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-               openPreviewURLString(urlString) {
-                return true
-            }
             if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
                 return false
             }
@@ -3627,11 +3769,6 @@ struct ChatDetailView: View {
 
         if let file = item.firstPreviewFile {
             openMessageFile(file)
-            return true
-        }
-
-        if let urlString = item.firstPreviewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-           openPreviewURLString(urlString) {
             return true
         }
 
@@ -3908,10 +4045,7 @@ struct ChatDetailView: View {
             return nil
         }
 
-        let visible = stripNativeToolProtocolBlocks(
-            from: LocalAlpineAgentService.visibleContent(from: message.content)
-        )
-        .trimmingCharacters(in: .whitespacesAndNewlines)
+        let visible = orderedVisibleAssistantText(from: message.content)
 
         if !activityItem.id.hasPrefix("turn-"),
            let orderedLocalBlocks = orderedLocalAlpineTranscriptBlocks(
@@ -3922,6 +4056,7 @@ struct ChatDetailView: View {
         }
 
         var blocks: [OrderedAgentTranscriptBlock] = []
+        appendOrderedReasoningBlockIfNeeded(for: message, to: &blocks)
         if isLocalAlpineResultMessage(message) {
             blocks.append(
                 OrderedAgentTranscriptBlock(
@@ -3965,6 +4100,59 @@ struct ChatDetailView: View {
             )
         }
         return blocks
+    }
+
+    private func appendOrderedReasoningBlockIfNeeded(
+        for message: ChatMessage,
+        to blocks: inout [OrderedAgentTranscriptBlock]
+    ) {
+        guard let metadata = message.metadata,
+              let content = metadata["iexa_local_reasoning_content"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !content.isEmpty else {
+            return
+        }
+        blocks.append(
+            OrderedAgentTranscriptBlock(
+                id: "\(message.id)-agent-reasoning",
+                content: .reasoning(content, metadata["iexa_local_reasoning_done"] == "true")
+            )
+        )
+    }
+
+    private func orderedVisibleAssistantText(from rawText: String) -> String {
+        let visible = stripNativeToolProtocolBlocks(
+            from: LocalAlpineAgentService.visibleContent(from: rawText)
+        )
+        return removingOrderedReasoningArtifacts(from: visible)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func removingOrderedReasoningArtifacts(from text: String) -> String {
+        guard !text.isEmpty else { return text }
+        var cleaned = text
+        let patterns = [
+            #"<details\b(?=[^>]*(?:type\s*=\s*["']reasoning["']|reasoning))[\s\S]*?</details>"#,
+            #"<thinking\b[^>]*>[\s\S]*?</thinking>"#,
+            #"<think\b[^>]*>[\s\S]*?</think>"#,
+            #"<reasoning\b[^>]*>[\s\S]*?</reasoning>"#,
+            #"<reason\b[^>]*>[\s\S]*?</reason>"#,
+            #"<thought\b[^>]*>[\s\S]*?</thought>"#,
+            #"<\|begin_of_thought\|>[\s\S]*?<\|end_of_thought\|>"#,
+            #"◁think▷[\s\S]*?◁/think▷"#
+        ]
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                cleaned = regex.stringByReplacingMatches(
+                    in: cleaned,
+                    range: NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned),
+                    withTemplate: ""
+                )
+            }
+        }
+        return cleaned
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func shouldHideProcessOnlyAgentText(
@@ -4030,13 +4218,11 @@ struct ChatDetailView: View {
 
         let stepGroups = localAlpineStepGroups(activityItem.steps, for: spans)
         var blocks: [OrderedAgentTranscriptBlock] = []
+        appendOrderedReasoningBlockIfNeeded(for: message, to: &blocks)
         var cursor = message.content.startIndex
 
         func appendTextBlock(_ rawText: String, ordinal: Int) {
-            let visible = stripNativeToolProtocolBlocks(
-                from: LocalAlpineAgentService.visibleContent(from: rawText)
-            )
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            let visible = orderedVisibleAssistantText(from: rawText)
             guard !visible.isEmpty,
                   visible != "正在准备本地执行，结果会自动回来。" else {
                 return
@@ -4085,9 +4271,7 @@ struct ChatDetailView: View {
         for message: ChatMessage,
         activityItem: AgentActivityItem
     ) -> [OrderedAgentTranscriptBlock]? {
-        let content = stripNativeToolProtocolBlocks(
-            from: LocalAlpineAgentService.visibleContent(from: message.content)
-        )
+        let content = orderedVisibleAssistantText(from: message.content)
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
@@ -4112,6 +4296,7 @@ struct ChatDetailView: View {
         guard !orderedPairs.isEmpty else { return nil }
 
         var blocks: [OrderedAgentTranscriptBlock] = []
+        appendOrderedReasoningBlockIfNeeded(for: message, to: &blocks)
         var cursorOffset = 0
 
         func stringIndex(for offset: Int) -> String.Index {
@@ -4683,7 +4868,11 @@ struct ChatDetailView: View {
         .sheet(item: $agentFloatingStepPreview) { item in
             AgentFloatingStepPreviewSheet(
                 item: item,
-                liveActivity: agentFloatingDisplayItem
+                liveActivity: agentFloatingDisplayItem,
+                liveBrowserThumbnailReference: automationBrowserLivePreviewReference,
+                onOpenPreviewURL: { urlString in
+                    _ = openPreviewURLString(urlString)
+                }
             )
                 .themed()
         }
@@ -5140,6 +5329,9 @@ struct ChatDetailView: View {
                     conversationId: viewModel.conversationId ?? viewModel.conversation?.id,
                     fallbackItem: agentFloatingDisplayItem,
                     liveBrowserThumbnailReference: automationBrowserLivePreviewReference,
+                    onOpenPreviewURL: { urlString in
+                        _ = openPreviewURLString(urlString)
+                    },
                     onPreviewTap: { item, index in
                         openAgentFloatingPreview(item: item, initialIndex: index)
                     }
@@ -6356,6 +6548,10 @@ struct ChatDetailView: View {
             if case .text = block.content { return true }
             return false
         }?.id
+        let hasReasoningBlock = blocks.contains { block in
+            if case .reasoning = block.content { return true }
+            return false
+        }
 
         ForEach(blocks) { block in
             switch block.content {
@@ -6363,7 +6559,8 @@ struct ChatDetailView: View {
                 assistantTextBubble(
                     for: message,
                     content: content,
-                    includeMessagePayload: block.id == lastTextBlockId
+                    includeMessagePayload: block.id == lastTextBlockId,
+                    includeLocalReasoning: !hasReasoningBlock
                 )
                 .transition(.opacity)
             case .steps(let item):
@@ -6373,6 +6570,13 @@ struct ChatDetailView: View {
                 )
                     .padding(.horizontal, Spacing.screenPadding)
                     .padding(.top, Spacing.xs)
+            case .reasoning(let content, let done):
+                assistantReasoningBubble(
+                    for: message,
+                    content: content,
+                    done: done
+                )
+                .transition(.opacity)
             }
         }
     }
@@ -6381,7 +6585,8 @@ struct ChatDetailView: View {
     private func assistantTextBubble(
         for message: ChatMessage,
         content: String,
-        includeMessagePayload: Bool
+        includeMessagePayload: Bool,
+        includeLocalReasoning: Bool = true
     ) -> some View {
         ChatMessageBubble(
             role: .assistant,
@@ -6392,9 +6597,37 @@ struct ChatDetailView: View {
                 content: content,
                 isStreaming: false,
                 messageEmbeds: includeMessagePayload ? message.embeds : [],
-                localReasoningContent: includeMessagePayload ? message.metadata?["iexa_local_reasoning_content"] : nil,
-                localReasoningDone: includeMessagePayload ? (message.metadata?["iexa_local_reasoning_done"] == "true") : nil,
+                localReasoningContent: includeMessagePayload && includeLocalReasoning ? message.metadata?["iexa_local_reasoning_content"] : nil,
+                localReasoningDone: includeMessagePayload && includeLocalReasoning ? (message.metadata?["iexa_local_reasoning_done"] == "true") : nil,
+                reasoningEffort: currentReasoningEffort,
                 localStructuredPartsJSON: includeMessagePayload ? message.metadata?["iexa_local_content_parts"] : nil,
+                authToken: viewModel.serverAuthToken,
+                serverBaseURL: viewModel.serverBaseURL,
+                apiClient: dependencies.apiClient,
+                useAssistantReadingGlass: shouldUseAssistantReadingGlass
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func assistantReasoningBubble(
+        for message: ChatMessage,
+        content: String,
+        done: Bool
+    ) -> some View {
+        ChatMessageBubble(
+            role: .assistant,
+            showTimestamp: activeActionMessageId == message.id,
+            timestamp: message.timestamp
+        ) {
+            AssistantMessageContent(
+                content: "",
+                isStreaming: !done,
+                messageEmbeds: [],
+                localReasoningContent: content,
+                localReasoningDone: done,
+                reasoningEffort: currentReasoningEffort,
+                localStructuredPartsJSON: nil,
                 authToken: viewModel.serverAuthToken,
                 serverBaseURL: viewModel.serverBaseURL,
                 apiClient: dependencies.apiClient,
@@ -6419,6 +6652,7 @@ struct ChatDetailView: View {
                         messageEmbeds: message.embeds,
                         localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
                         localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true",
+                        reasoningEffort: currentReasoningEffort,
                         localStructuredPartsJSON: message.metadata?["iexa_local_content_parts"],
                         authToken: viewModel.serverAuthToken,
                         serverBaseURL: viewModel.serverBaseURL,
@@ -6463,6 +6697,12 @@ struct ChatDetailView: View {
     private var shouldUseAssistantReadingGlass: Bool {
         dependencies.appearanceManager.hasChatBackground
             && dependencies.appearanceManager.useChatReadingGlass
+    }
+
+    private var currentReasoningEffort: String? {
+        viewModel.conversation?.chatParams?.reasoningEffort
+            ?? viewModel.pendingChatParams?.reasoningEffort
+            ?? ChatAdvancedParams.savedDefault?.reasoningEffort
     }
 
     private func isLocalAlpineResultMessage(_ message: ChatMessage) -> Bool {
@@ -6599,6 +6839,7 @@ struct ChatDetailView: View {
                 showEmptyThinkingCapsule: true,
                 keyboardIsVisible: keyboard.isVisible,
                 visualizationRevealDelayNanoseconds: visualizationRevealDelayNanoseconds,
+                reasoningEffort: currentReasoningEffort,
                 serverBaseURL: viewModel.serverBaseURL,
                 authToken: viewModel.serverAuthToken,
                 apiClient: dependencies.apiClient,
@@ -11005,6 +11246,7 @@ private struct IsolatedAssistantMessage: View {
     var showEmptyThinkingCapsule: Bool = true
     var keyboardIsVisible: Bool = false
     var visualizationRevealDelayNanoseconds: UInt64 = 120_000_000
+    var reasoningEffort: String? = nil
     let serverBaseURL: String
     /// Auth token passed down to Rich UI embed webviews for localStorage injection.
     var authToken: String? = nil
@@ -11132,6 +11374,7 @@ private struct IsolatedAssistantMessage: View {
                             messageEmbeds: message.embeds,
                             localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
                             localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true",
+                            reasoningEffort: reasoningEffort,
                             localStructuredPartsJSON: message.metadata?["iexa_local_content_parts"],
                             authToken: authToken,
                             serverBaseURL: serverBaseURL,
@@ -11249,6 +11492,7 @@ private struct IsolatedAssistantMessage: View {
                         messageEmbeds: message.embeds,
                         localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
                         localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true",
+                        reasoningEffort: reasoningEffort,
                         localStructuredPartsJSON: message.metadata?["iexa_local_content_parts"],
                         authToken: authToken,
                         serverBaseURL: serverBaseURL,
@@ -11962,54 +12206,94 @@ private struct LocalAlpineResultCard: View {
 
 }
 
+private struct AndroidToolCapsuleStateIcon: View {
+    let iconName: String
+    let tint: Color
+    let isRunning: Bool
+    let size: CGFloat
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        ZStack {
+            Image(systemName: iconName)
+                .font(.system(size: size * 0.48, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: size, height: size)
+
+            if isRunning {
+                AgentRotatingProgressIcon(
+                    size: size,
+                    lineWidth: max(1.8, size * 0.10),
+                    tint: tint
+                )
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct AndroidToolCapsuleCompletionIcon: View {
+    let failed: Bool
+    let size: CGFloat
+
+    private var tint: Color {
+        failed
+            ? Color(red: 0.898, green: 0.224, blue: 0.208)
+            : Color(red: 0.298, green: 0.686, blue: 0.314)
+    }
+
+    var body: some View {
+        Image(systemName: failed ? "xmark" : "checkmark")
+            .font(.system(size: size, weight: .bold))
+            .foregroundStyle(tint)
+            .frame(width: size + 2, height: size + 2)
+            .accessibilityHidden(true)
+    }
+}
+
 private struct AgentToolStepPill: View {
     let call: LocalAlpineToolCall
     var detail: String = ""
 
     @Environment(\.theme) private var theme
 
-    private var display: LocalAlpineToolDisplay {
-        LocalAlpineToolDisplayRegistry.display(for: call.name)
-    }
-
     private var title: String {
-        AgentActivityItem.displayTitle(for: call)
-    }
-
-    private var tint: Color {
-        if call.failed { return .orange }
-        return call.isRunning ? theme.brandPrimary : theme.success
+        let displayTitle = AgentActivityItem.displayTitle(for: call)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !displayTitle.isEmpty {
+            return displayTitle
+        }
+        return call.name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var iconName: String {
-        if call.failed { return "exclamationmark.circle.fill" }
-        if title.contains("搜索") || title.contains("网页") || title.contains("摘要") {
-            return "globe"
-        }
-        if call.isRunning { return display.icon }
-        return "checkmark.circle.fill"
+        LocalAlpineToolDisplayRegistry.androidCapsuleIcon(for: call.name)
+    }
+
+    private var tint: Color {
+        androidToolCapsuleTint(for: call.name)
     }
 
     var body: some View {
         HStack(spacing: 9) {
-            if call.isRunning && !call.failed {
-                AgentRotatingProgressIcon(size: 25, lineWidth: 3)
-            } else {
-                ZStack {
-                    Circle()
-                        .fill(tint.opacity(theme.isDark ? 0.20 : 0.13))
-                        .frame(width: 25, height: 25)
-                    Image(systemName: iconName)
-                        .scaledFont(size: 13, weight: .semibold)
-                        .foregroundStyle(tint)
-                }
-            }
+            AndroidToolCapsuleStateIcon(
+                iconName: iconName,
+                tint: tint,
+                isRunning: call.isRunning,
+                size: 25
+            )
 
             Text(title)
                 .scaledFont(size: 14, weight: .semibold)
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+
+            if !call.isRunning {
+                AndroidToolCapsuleCompletionIcon(failed: call.failed, size: 10.5)
+            }
 
             if !call.displayLineDelta.isEmpty {
                 Text(call.displayLineDelta)
@@ -12040,6 +12324,7 @@ private struct AgentToolStepPill: View {
 private struct AgentRotatingProgressIcon: View {
     let size: CGFloat
     let lineWidth: CGFloat
+    let tint: Color
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -12052,11 +12337,11 @@ private struct AgentRotatingProgressIcon: View {
             ZStack {
                 Circle()
                     .fill(theme.isDark ? Color.white.opacity(0.08) : Color.white.opacity(0.92))
-                    .shadow(color: theme.brandPrimary.opacity(theme.isDark ? 0.22 : 0.16), radius: 3, x: 0, y: 1)
+                    .shadow(color: tint.opacity(theme.isDark ? 0.22 : 0.16), radius: 3, x: 0, y: 1)
 
                 Circle()
                     .stroke(
-                        theme.brandPrimary.opacity(theme.isDark ? 0.16 : 0.10),
+                        tint.opacity(theme.isDark ? 0.16 : 0.10),
                         style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
                     )
                     .padding(lineWidth / 2)
@@ -12066,9 +12351,9 @@ private struct AgentRotatingProgressIcon: View {
                     .stroke(
                         AngularGradient(
                             colors: [
-                                theme.brandPrimary,
+                                tint,
                                 Color.purple.opacity(0.95),
-                                theme.brandPrimary.opacity(0.18)
+                                tint.opacity(0.18)
                             ],
                             center: .center
                         ),
@@ -12248,6 +12533,7 @@ private struct AgentStepFloatingBarHost: View {
     let conversationId: String?
     let fallbackItem: AgentActivityItem?
     let liveBrowserThumbnailReference: String?
+    let onOpenPreviewURL: (String) -> Void
     let onPreviewTap: (AgentActivityItem, Int) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -12269,6 +12555,7 @@ private struct AgentStepFloatingBarHost: View {
                     item: item,
                     taskCount: item.totalStepCount,
                     liveBrowserThumbnailReference: liveBrowserThumbnailReference,
+                    onOpenPreviewURL: onOpenPreviewURL,
                     onPreviewTap: onPreviewTap
                 )
                 .padding(.horizontal, 18)
@@ -12310,6 +12597,7 @@ private struct AgentStepFloatingBar: View {
     let item: AgentActivityItem
     let taskCount: Int
     let liveBrowserThumbnailReference: String?
+    let onOpenPreviewURL: (String) -> Void
     let onPreviewTap: (AgentActivityItem, Int) -> Void
 
     @Environment(\.theme) private var theme
@@ -12381,6 +12669,11 @@ private struct AgentStepFloatingBar: View {
             return selected
         }
         if shouldUseBrowserStepThumbnail,
+           let liveBrowserThumbnailReference = liveBrowserThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !liveBrowserThumbnailReference.isEmpty {
+            return liveBrowserThumbnailReference
+        }
+        if shouldUseBrowserStepThumbnail,
            let reference = item.nearestBrowserPreviewThumbnailReference(beforeOrAt: selectedStep) {
             return reference
         }
@@ -12399,6 +12692,14 @@ private struct AgentStepFloatingBar: View {
             return current
         }
         return item.firstPreviewThumbnailReference
+    }
+
+    private var previewOpenURL: String? {
+        let selected = selectedStep?.previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if selected?.isEmpty == false {
+            return selected
+        }
+        return item.firstPreviewOpenURL
     }
 
     private var shouldUseBrowserStepThumbnail: Bool {
@@ -12439,7 +12740,7 @@ private struct AgentStepFloatingBar: View {
         let isRunning = selectedStep?.isRunning == true
         let dotTint: Color = tint
         if isRunning {
-            return AnyView(AgentRotatingProgressIcon(size: 17, lineWidth: 2.2))
+            return AnyView(AgentRotatingProgressIcon(size: 17, lineWidth: 2.2, tint: dotTint))
         }
         return AnyView(
             ZStack {
@@ -12521,25 +12822,23 @@ private struct AgentStepFloatingBar: View {
 
     private var previewCardButton: AnyView {
         AnyView(
-            Button {
+            AgentToolPreviewPop(
+                previewTitle: previewTitle,
+                previewSubtitle: previewSubtitle,
+                previewText: previewText,
+                diffLines: previewDiffLines,
+                thumbnailReference: previewThumbnailReference
+            )
+            .frame(
+                width: AgentStepFloatingMetrics.previewSize.width,
+                height: AgentStepFloatingMetrics.previewSize.height,
+                alignment: .topLeading
+            )
+            .clipShape(RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.previewCornerRadius, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.previewCornerRadius, style: .continuous))
+            .onTapGesture {
                 onPreviewTap(item, clampedIndex)
-            } label: {
-                AgentToolPreviewPop(
-                    previewTitle: previewTitle,
-                    previewSubtitle: previewSubtitle,
-                    previewText: previewText,
-                    diffLines: previewDiffLines,
-                    thumbnailReference: previewThumbnailReference
-                )
-                .frame(
-                    width: AgentStepFloatingMetrics.previewSize.width,
-                    height: AgentStepFloatingMetrics.previewSize.height,
-                    alignment: .topLeading
-                )
-                .clipShape(RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.previewCornerRadius, style: .continuous))
-                .contentShape(RoundedRectangle(cornerRadius: AgentStepFloatingMetrics.previewCornerRadius, style: .continuous))
             }
-            .buttonStyle(.plain)
             .offset(
                 x: AgentStepFloatingMetrics.previewOffset.width,
                 y: AgentStepFloatingMetrics.previewOffset.height
@@ -13179,38 +13478,17 @@ private struct AgentActivityStepPill: View, Equatable {
 
     private var tint: Color {
         if step.failed { return .orange }
-        return step.isRunning ? theme.brandPrimary : theme.success
+        let toolName = step.toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return androidToolCapsuleTint(for: toolName.isEmpty ? step.title : toolName)
     }
 
-    private var iconName: String {
-        if step.failed { return "exclamationmark.circle.fill" }
-        let title = step.title.lowercased()
-        if title.contains("搜索") || title.contains("网页") || title.contains("browse") || title.contains("search") {
-            return "globe"
-        }
-        if title.contains("读取") || title.contains("read") {
-            return "doc.text"
-        }
-        if title.contains("编辑") || title.contains("写入") || title.contains("创建") {
-            return "square.and.pencil"
-        }
-        if title.contains("打开") || title.contains("预览") || title.contains("open") {
-            return "eye"
-        }
-        if title.contains("命令") || title.contains("脚本") || title.contains("shell") || title.contains("terminal") || title.contains("run") {
-            return "terminal.fill"
-        }
-        if step.isRunning { return "progress.indicator" }
-        switch step.kind {
-        case .file:
-            return "doc.text"
-        case .command:
-            return "terminal.fill"
-        case .status:
-            return step.title.contains("搜索") || step.title.contains("网页") ? "globe" : "checkmark.circle.fill"
-        case .tool:
-            return "checkmark.circle.fill"
-        }
+    private var capsuleTitle: String {
+        step.title.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var capsuleIconName: String {
+        let toolName = step.toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return LocalAlpineToolDisplayRegistry.androidCapsuleIcon(for: toolName.isEmpty ? step.title : toolName)
     }
 
     private func displayDurationText(asOf date: Date) -> String {
@@ -13246,21 +13524,23 @@ private struct AgentActivityStepPill: View, Equatable {
         let canStop = step.isRunning && onStopRunningStep != nil
 
         HStack(spacing: 8) {
-            if step.isRunning && !step.failed {
-                AgentRotatingProgressIcon(size: 17, lineWidth: 2.2)
-            } else {
-                Image(systemName: iconName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 17, height: 17)
-            }
+            AndroidToolCapsuleStateIcon(
+                iconName: capsuleIconName,
+                tint: tint,
+                isRunning: step.isRunning,
+                size: 17
+            )
 
-            Text(step.title)
+            Text(capsuleTitle)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .layoutPriority(1)
+
+            if !step.isRunning {
+                AndroidToolCapsuleCompletionIcon(failed: step.failed, size: 9.5)
+            }
 
             if step.isRunning, step.durationStartedAt != nil {
                 TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
@@ -13946,15 +14226,24 @@ private struct LocalAlpineDiffPreviewView: View {
 private struct AgentFloatingStepPreviewSheet: View {
     let item: AgentFloatingStepPreviewItem
     let liveActivity: AgentActivityItem?
+    let liveBrowserThumbnailReference: String?
+    let onOpenPreviewURL: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
     @State private var selectedIndex: Int
     @State private var copied = false
 
-    init(item: AgentFloatingStepPreviewItem, liveActivity: AgentActivityItem?) {
+    init(
+        item: AgentFloatingStepPreviewItem,
+        liveActivity: AgentActivityItem?,
+        liveBrowserThumbnailReference: String?,
+        onOpenPreviewURL: @escaping (String) -> Void
+    ) {
         self.item = item
         self.liveActivity = liveActivity
+        self.liveBrowserThumbnailReference = liveBrowserThumbnailReference
+        self.onOpenPreviewURL = onOpenPreviewURL
         let maxIndex = max(0, item.activity.steps.count - 1)
         _selectedIndex = State(initialValue: min(max(item.initialIndex, 0), maxIndex))
     }
@@ -13989,67 +14278,124 @@ private struct AgentFloatingStepPreviewSheet: View {
         "\(clampedIndex + 1) / \(max(steps.count, 1))"
     }
 
+    private var selectedPreviewOpenURL: String? {
+        guard let selectedStep,
+              isBrowserPreviewStep(selectedStep) else {
+            return nil
+        }
+        return activity.nearestBrowserOpenURL(beforeOrAt: selectedStep)
+    }
+
+    private var selectedCommand: String? {
+        let command = selectedStep?.command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return command.isEmpty ? nil : command
+    }
+
     var body: some View {
-        NavigationStack {
+        ZStack(alignment: .topLeading) {
             VStack(spacing: 0) {
+                topActionBar
+                Divider()
                 previewArea
                 Divider()
                 controlPanel
             }
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .scaledFont(size: 16, weight: .bold)
-                    }
-                }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    if let step = selectedStep,
-                       let command = step.command?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !command.isEmpty {
-                        Button {
-                            NotificationCenter.default.post(
-                                name: .openIexaTerminalBrowser,
-                                object: nil,
-                                userInfo: [
-                                    "command": command,
-                                    "cwd": step.cwd ?? ""
-                                ]
-                            )
-                            dismiss()
-                        } label: {
-                            Image(systemName: "terminal.fill")
-                                .scaledFont(size: 14, weight: .medium)
-                        }
-                    }
-                    Button {
-                        UIPasteboard.general.string = copyText(for: selectedStep)
-                        Haptics.notify(.success)
-                        withAnimation(MicroAnimation.snappy) { copied = true }
-                        Task {
-                            try? await Task.sleep(nanoseconds: 1_500_000_000)
-                            await MainActor.run {
-                                withAnimation(MicroAnimation.snappy) { copied = false }
-                            }
-                        }
-                    } label: {
-                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                            .scaledFont(size: 14, weight: .medium)
-                    }
-                }
+            .background(theme.background)
+            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(theme.isDark ? 0.14 : 0.08), lineWidth: 0.8)
+            )
+
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .scaledFont(size: 16, weight: .semibold)
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.72)))
             }
+            .buttonStyle(.plain)
+            .padding(.leading, 16)
+            .padding(.top, 16)
         }
-        .presentationDetents([.large])
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(theme.background.opacity(theme.isDark ? 0.98 : 1.0))
+        .presentationDetents([.fraction(0.82), .large])
         .presentationDragIndicator(.hidden)
         .onChange(of: steps.count) { _, count in
             selectedIndex = min(max(selectedIndex, 0), max(count - 1, 0))
         }
     }
 
-    private var title: String {
-        "Iexa 电脑"
+    private var topActionBar: some View {
+        HStack(spacing: 10) {
+            Spacer(minLength: 34)
+
+            Text("IEXA 电脑")
+                .scaledFont(size: 17, weight: .bold)
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            if let selectedCommand {
+                Button {
+                    NotificationCenter.default.post(
+                        name: .openIexaTerminalBrowser,
+                        object: nil,
+                        userInfo: [
+                            "command": selectedCommand,
+                            "cwd": selectedStep?.cwd ?? ""
+                        ]
+                    )
+                    dismiss()
+                } label: {
+                    topActionIcon("terminal.fill", accessibilityLabel: "Open in terminal")
+                }
+                .buttonStyle(.plain)
+            }
+
+            if let selectedPreviewOpenURL {
+                Button {
+                    onOpenPreviewURL(selectedPreviewOpenURL)
+                    dismiss()
+                } label: {
+                    topActionIcon("globe", accessibilityLabel: "Open in session browser")
+                }
+                .buttonStyle(.plain)
+            }
+
+            Button {
+                copySelectedStep()
+            } label: {
+                topActionIcon(copied ? "checkmark" : "doc.on.doc", accessibilityLabel: copied ? "Copied" : "Copy")
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.92 : 0.98))
+    }
+
+    private func topActionIcon(_ systemName: String, accessibilityLabel: String) -> some View {
+        Image(systemName: systemName)
+            .scaledFont(size: 14, weight: .semibold)
+            .foregroundStyle(theme.textPrimary)
+            .frame(width: 34, height: 34)
+            .background(
+                Circle()
+                    .fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.78))
+            )
+            .overlay(
+                Circle()
+                    .strokeBorder(Color.primary.opacity(theme.isDark ? 0.10 : 0.07), lineWidth: 0.6)
+            )
+            .accessibilityLabel(accessibilityLabel)
     }
 
     private var previewArea: some View {
@@ -14081,7 +14427,9 @@ private struct AgentFloatingStepPreviewSheet: View {
 
     @ViewBuilder
     private func stepPreview(_ step: AgentActivityStep) -> some View {
-        if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+        if isBrowserPreviewStep(step) {
+            browserStepPreview(step)
+        } else if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
            let outputReference = step.outputReference?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !outputReference.isEmpty {
             LocalAlpineFullTerminalOutputPreview(
@@ -14115,6 +14463,77 @@ private struct AgentFloatingStepPreviewSheet: View {
         } else {
             textPreview(step)
         }
+    }
+
+    private func isBrowserPreviewStep(_ step: AgentActivityStep) -> Bool {
+        step.isInteractiveBrowserStatusStep || AgentActivityItem.stepLooksLikeBrowserTool(step)
+    }
+
+    @ViewBuilder
+    private func browserStepPreview(_ step: AgentActivityStep) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let reference = browserPreviewReference(for: step) {
+                AgentToolPreviewThumbnail(reference: reference)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 260)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(theme.isDark ? 0.18 : 0.12), lineWidth: 0.8)
+                    )
+                    .shadow(color: Color.black.opacity(theme.isDark ? 0.22 : 0.10), radius: 10, x: 0, y: 4)
+            }
+
+            browserResultCard(step)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func browserPreviewReference(for step: AgentActivityStep) -> String? {
+        if let liveBrowserThumbnailReference = liveBrowserThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !liveBrowserThumbnailReference.isEmpty {
+            return liveBrowserThumbnailReference
+        }
+        if let reference = step.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !reference.isEmpty {
+            return reference
+        }
+        if let reference = activity.nearestBrowserPreviewThumbnailReference(beforeOrAt: step) {
+            return reference
+        }
+        if let url = activity.nearestBrowserOpenURL(beforeOrAt: step) {
+            return agentToolWebPreviewReference(for: url)
+        }
+        return nil
+    }
+
+    private func browserResultCard(_ step: AgentActivityStep) -> some View {
+        let text = copyText(for: step)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "globe")
+                    .scaledFont(size: 14, weight: .semibold)
+                    .foregroundStyle(theme.textSecondary)
+                Text("Result")
+                    .scaledFont(size: 16, weight: .semibold)
+                    .foregroundStyle(theme.textSecondary)
+                Spacer(minLength: 0)
+            }
+            Text(text.isEmpty ? "（无内容）" : text)
+                .font(.system(size: 15, weight: .medium, design: .monospaced))
+                .foregroundStyle(theme.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(theme.surfaceContainer.opacity(theme.isDark ? 0.62 : 0.78))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.primary.opacity(theme.isDark ? 0.20 : 0.12), lineWidth: 0.8)
+        )
     }
 
     @ViewBuilder
@@ -14165,7 +14584,7 @@ private struct AgentFloatingStepPreviewSheet: View {
                 controlStatusIcon
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Iexa is using \(toolCategory(for: selectedStep))")
+                    Text(statusTitle(for: selectedStep))
                         .scaledFont(size: 17, weight: .bold)
                         .foregroundStyle(theme.textPrimary)
                     Text(selectedStep?.title ?? item.activity.summary)
@@ -14223,7 +14642,7 @@ private struct AgentFloatingStepPreviewSheet: View {
     @ViewBuilder
     private var controlStatusIcon: some View {
         if selectedStep?.isRunning == true && selectedStep?.failed != true {
-            AgentRotatingProgressIcon(size: 27, lineWidth: 3)
+            AgentRotatingProgressIcon(size: 27, lineWidth: 3, tint: theme.brandPrimary)
                 .accessibilityLabel("运行中")
         } else {
             let failed = selectedStep?.failed == true
@@ -14281,11 +14700,35 @@ private struct AgentFloatingStepPreviewSheet: View {
         }
     }
 
+    private func copySelectedStep() {
+        UIPasteboard.general.string = copyText(for: selectedStep)
+        Haptics.notify(.success)
+        withAnimation(MicroAnimation.snappy) { copied = true }
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await MainActor.run {
+                withAnimation(MicroAnimation.snappy) { copied = false }
+            }
+        }
+    }
+
     private func toolCategory(for step: AgentActivityStep?) -> String {
         guard let step else { return "Agent" }
+        if isBrowserPreviewStep(step) { return "Browser" }
         if step.file != nil { return "Editor" }
         if step.command?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { return "Shell" }
         return "Tool"
+    }
+
+    private func statusTitle(for step: AgentActivityStep?) -> String {
+        guard let step else { return "Agent" }
+        if step.isRunning && step.failed != true {
+            return "运行中 · \(toolCategory(for: step))"
+        }
+        if step.failed == true {
+            return "执行失败 · \(toolCategory(for: step))"
+        }
+        return "已完成 · \(toolCategory(for: step))"
     }
 
     private func outputText(for step: AgentActivityStep) -> String {

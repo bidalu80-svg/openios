@@ -80,6 +80,13 @@ enum LocalOfficeProgressPhase: Sendable {
 
 typealias LocalOfficeProgressHandler = @MainActor (LocalOfficeProgressPhase) async -> Void
 
+enum LocalNativeToolProgressPhase: Sendable {
+    case started
+    case finished(succeeded: Bool)
+}
+
+typealias LocalNativeToolProgressHandler = @MainActor (String, String, LocalNativeToolProgressPhase) async -> Void
+
 @MainActor
 final class LocalNativeToolService {
     static let shared = LocalNativeToolService()
@@ -91,7 +98,8 @@ final class LocalNativeToolService {
 
     func executeBlocks(
         in content: String,
-        officeProgress: LocalOfficeProgressHandler? = nil
+        officeProgress: LocalOfficeProgressHandler? = nil,
+        toolProgress: LocalNativeToolProgressHandler? = nil
     ) async -> LocalNativeToolRunResult {
         let calls = Self.parsedToolCalls(in: content)
         guard !calls.isEmpty else {
@@ -106,9 +114,18 @@ final class LocalNativeToolService {
         }
 
         var results: [[String: Any]] = []
-        for call in calls {
+        for (index, call) in calls.enumerated() {
+            let action = (call["action"] as? String ?? call["name"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let progressKey = Self.progressStatusKey(for: action, index: index)
+            if let toolProgress, !action.isEmpty {
+                await toolProgress(action, progressKey, .started)
+            }
             let result = await execute(call, officeProgress: officeProgress)
             results.append(result)
+            if let toolProgress, !action.isEmpty {
+                await toolProgress(action, progressKey, .finished(succeeded: Self.resultSucceeded(result)))
+            }
         }
 
         let payload: [String: Any] = [
@@ -123,6 +140,30 @@ final class LocalNativeToolService {
             browserDocument: Self.browserDocument(from: results),
             openRequests: Self.openRequests(from: results)
         )
+    }
+
+    private static func resultSucceeded(_ result: [String: Any]) -> Bool {
+        if let ok = result["ok"] as? Bool {
+            return ok
+        }
+        if let success = result["success"] as? Bool {
+            return success
+        }
+        if let error = result["error"] as? String {
+            return error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return true
+    }
+
+    private static func progressStatusKey(for action: String, index: Int) -> String {
+        let normalized = action
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: ".", with: "_")
+            .lowercased()
+        guard !normalized.isEmpty else { return "tool.\(index)" }
+        return "\(normalized).\(index)"
     }
 
     static func visibleContent(from content: String) -> String {
