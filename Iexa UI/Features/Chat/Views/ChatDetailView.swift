@@ -14120,22 +14120,7 @@ private struct AgentFloatingStepPreviewSheet: View {
     @ViewBuilder
     private var stepStartTimeView: some View {
         if let startedAt = selectedStepStartedAt {
-            Text(Self.stepStartTimeString(from: startedAt))
-                .scaledFont(size: 13, weight: .semibold, design: .rounded)
-                .monospacedDigit()
-                .foregroundStyle(theme.isDark ? Color.white.opacity(0.74) : Color.black.opacity(0.66))
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.055))
-                )
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.07), lineWidth: 0.6)
-                )
-                .accessibilityLabel("开始运行时间 \(Self.stepStartTimeString(from: startedAt))")
-                .fixedSize(horizontal: true, vertical: false)
+            AgentStepStartTimeBadge(date: startedAt)
         }
     }
 
@@ -14151,9 +14136,6 @@ private struct AgentFloatingStepPreviewSheet: View {
         return Date(timeIntervalSince1970: step.sortOrder)
     }
 
-    private static func stepStartTimeString(from date: Date) -> String {
-        date.formatted(.dateTime.hour().minute())
-    }
     private var previewScrollSignature: Int {
         guard let step = selectedStep else { return 0 }
         var signature = step.id.hashValue
@@ -14247,6 +14229,47 @@ private struct AgentFloatingStepPreviewSheet: View {
     }
 }
 
+
+private struct AgentStepStartTimeBadge: View {
+    let date: Date
+
+    @Environment(\.theme) private var theme
+
+    private var text: String {
+        date.formatted(.dateTime.hour().minute())
+    }
+
+    private var foreground: Color {
+        theme.isDark ? Color.white.opacity(0.74) : Color.black.opacity(0.66)
+    }
+
+    private var fill: Color {
+        theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.055)
+    }
+
+    private var stroke: Color {
+        theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.07)
+    }
+
+    var body: some View {
+        Text(text)
+            .scaledFont(size: 13, weight: .semibold, design: .rounded)
+            .monospacedDigit()
+            .foregroundStyle(foreground)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(fill)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(stroke, lineWidth: 0.6)
+            )
+            .accessibilityLabel("开始运行时间 \(text)")
+            .fixedSize(horizontal: true, vertical: false)
+    }
+}
 private struct AgentLazyOutputPreview: View {
     enum Style {
         case terminal
