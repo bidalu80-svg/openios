@@ -27815,7 +27815,7 @@ final class ChatViewModel {
                 }
             }
             if let statusHistory = effectiveStatusHistory {
-                var mergedStatusHistory = conversation?.messages[index].statusHistory
+                var mergedStatusHistory = conversation?.messages[index].statusHistory ?? []
                 for status in statusHistory {
                     mergedStatusHistory = Self.appendingToolStatus(status, to: mergedStatusHistory)
                 }
