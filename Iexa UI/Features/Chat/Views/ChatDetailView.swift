@@ -12328,7 +12328,7 @@ private struct AgentStepFloatingBar: View {
 
     private var previewThumbnailReference: String? {
         let liveBrowser = liveBrowserThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isBrowserStep = (selectedStep?.isInteractiveBrowserStatusStep == true) || item.hasInteractiveBrowserStatusSteps
+        let isBrowserStep = shouldUseLiveBrowserThumbnail
         if liveBrowser?.isEmpty == false,
            isBrowserStep {
             return liveBrowser
@@ -12352,6 +12352,18 @@ private struct AgentStepFloatingBar: View {
             return current
         }
         return item.firstPreviewThumbnailReference
+    }
+
+    private var shouldUseLiveBrowserThumbnail: Bool {
+        if selectedStep?.isInteractiveBrowserStatusStep == true || item.hasInteractiveBrowserStatusSteps {
+            return true
+        }
+        if selectedStep?.isWebSearchStatusStep == true || item.hasOnlyWebSearchStatusSteps {
+            return true
+        }
+        return item.steps.contains { step in
+            step.isInteractiveBrowserStatusStep || step.isWebSearchStatusStep
+        }
     }
 
     private var selectedTitle: String {
