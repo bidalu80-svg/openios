@@ -12630,7 +12630,10 @@ final class ChatViewModel {
                     acc.replace("")
                     updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
                 }
-                calls = [continuationCall]
+                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage(
+                    suggestedCall: continuationCall
+                ))
+                continue
             } else if !calls.isEmpty {
                 pendingBrowserContinuationCall = nil
             }
@@ -12907,7 +12910,10 @@ final class ChatViewModel {
                     acc.replace("")
                     updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
                 }
-                calls = [continuationCall]
+                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage(
+                    suggestedCall: continuationCall
+                ))
+                continue
             } else if !calls.isEmpty {
                 pendingBrowserContinuationCall = nil
             }
@@ -13115,6 +13121,13 @@ final class ChatViewModel {
                 toolContent: "Local iOS Shortcuts tools are disabled for this chat.",
                 completedAssistantTurn: false,
                 visibleContent: nil
+            )
+        }
+
+        if browserAction != nil {
+            BrowserWebSearchService.shared.setBrowserArtifactScope(
+                conversationId: conversationId ?? conversation?.id,
+                sessionId: sessionId
             )
         }
 
@@ -13955,6 +13968,10 @@ final class ChatViewModel {
         let content = Self.localNativeFunctionToolEnvelopeContent(for: effectiveCall)
         let actionName = Self.localAlpineBrowserActionName(from: effectiveCall)
         let toolTitle = Self.localNativeToolTitle(from: effectiveCall, fallbackAction: actionName)
+        BrowserWebSearchService.shared.setBrowserArtifactScope(
+            conversationId: conversationId ?? conversation?.id,
+            sessionId: sessionId
+        )
         let startingStatus = ChatStatusUpdate(
             action: Self.localBrowserToolStatusAction(for: actionName),
             status: Self.localBrowserToolPhaseStatusKey(for: actionName, phase: .start),
@@ -14054,6 +14071,9 @@ final class ChatViewModel {
             call: effectiveCall,
             browserVerificationCompleted: browserVerificationCompleted
         )
+        let browserThumbnailReference = browserDocument?.previewImages
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
         return executeLocalAlpineSyntheticToolCall(
             effectiveCall,
             assistantMessageId: assistantMessageId,
@@ -14062,6 +14082,7 @@ final class ChatViewModel {
             output: output,
             openRequests: result.openRequests,
             browserURL: browserDocument?.url,
+            imageFilePath: browserThumbnailReference,
             failed: failed
         )
     }
@@ -15684,9 +15705,32 @@ final class ChatViewModel {
         toolContent: String,
         latestUserPrompt: String?
     ) -> LocalAlpineNativeToolCall? {
-        if call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "web_search",
-           anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
-            return nil
+        if call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "web_search" {
+            guard anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true),
+                  !localNativeBrowserToolResultShouldStop(call, toolContent: toolContent) else {
+                return nil
+            }
+            var arguments: [String: Any] = [
+                "tool_title": "查看搜索结果",
+                "action": "find_elements",
+                "target": "search result result-title source link title snippet 搜索结果 来源 标题",
+                "clickable": true,
+                "scan_page": true,
+                "capture_visuals": false,
+                "screenshot": false,
+                "max_scrolls": 8,
+                "continuation_stage": "search_results_scan"
+            ]
+            if let query = firstJSONStringValue(in: toolContent, key: "query"),
+               !query.isEmpty {
+                arguments["query"] = query
+            }
+            let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
+            return LocalAlpineNativeToolCall(
+                id: "browser_continue_\(UUID().uuidString)",
+                name: "browser_use",
+                arguments: String(data: data, encoding: .utf8) ?? "{}"
+            )
         }
 
         let effectiveCall = normalizeBrowserAutomationToolCallIfNeeded(
@@ -15709,13 +15753,11 @@ final class ChatViewModel {
 
         let lowerContent = toolContent.lowercased()
         let action = browserResultActionName(from: effectiveCall, toolContent: toolContent)
-        guard action == "browser.auto" || action == "browser.complete.task" else {
-            return nil
-        }
-        if lowerContent.contains("自动流程未能输入文本")
-            || lowerContent.contains("自动流程未能点击目标按钮")
-            || lowerContent.contains("点击后没有验证到生成已开始")
-            || lowerContent.contains("自动流程已持续尝试") {
+        if (action == "browser.auto" || action == "browser.complete.task")
+            && (lowerContent.contains("自动流程未能输入文本")
+                || lowerContent.contains("自动流程未能点击目标按钮")
+                || lowerContent.contains("点击后没有验证到生成已开始")
+                || lowerContent.contains("自动流程已持续尝试")) {
             return nil
         }
 
@@ -15735,16 +15777,6 @@ final class ChatViewModel {
         let focusedNodeID = browserFocusedNodeID(in: toolContent)
         let hasExplicitContinuationTarget = requestedText != nil
             || (requestedClickTarget?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
-        if !hasExplicitContinuationTarget,
-           action == "browser.find_elements",
-           lowerContent.contains("\"visual_viewports\"") || lowerContent.contains("\"focused_element\"") {
-            return nil
-        }
-        if !hasExplicitContinuationTarget,
-           action == "browser.screenshot",
-           ["focused_element_view", "viewport_view", "page_scan", "post_action_scan"].contains(continuationStage) {
-            return nil
-        }
         for key in ["url", "link", "href", "page_url", "source", "input_url"] {
             arguments.removeValue(forKey: key)
         }
@@ -15856,6 +15888,14 @@ final class ChatViewModel {
             arguments["attach_preview"] = false
             arguments["screenshot"] = false
             arguments["continuation_stage"] = "focused_element_view"
+        } else if !hasExplicitContinuationTarget,
+                  action == "browser.find_elements",
+                  lowerContent.contains("\"items\"") {
+            arguments["action"] = "screenshot"
+            arguments["full_page"] = false
+            arguments["attach_preview"] = false
+            arguments["screenshot"] = false
+            arguments["continuation_stage"] = "search_results_visual_check"
         } else {
             arguments["action"] = "observe"
             arguments["full_page"] = false
@@ -21271,6 +21311,10 @@ final class ChatViewModel {
         queries: [String],
         assistantMessageId: String
     ) async throws -> (result: WebSearchResponse, queries: [String]) {
+        BrowserWebSearchService.shared.setBrowserArtifactScope(
+            conversationId: conversationId ?? conversation?.id,
+            sessionId: sessionId
+        )
         let result = try await ClientWebSearchService(apiClient: manager?.apiClient).search(queries: queries, originalQuery: query)
         return (result, queries)
     }
@@ -23630,6 +23674,12 @@ final class ChatViewModel {
         }
         if shortcutsAction != nil, !shortcutsEnabled {
             return
+        }
+        if browserAction != nil {
+            BrowserWebSearchService.shared.setBrowserArtifactScope(
+                conversationId: conversationId ?? conversation?.id,
+                sessionId: sessionId
+            )
         }
         if let officeKind {
             markLocalOfficeGenerationStarted(messageId: messageId, kind: officeKind)

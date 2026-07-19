@@ -388,6 +388,31 @@ private struct AgentActivityItem: Identifiable, Hashable {
         }.last
     }
 
+    func nearestBrowserPreviewThumbnailReference(beforeOrAt targetStep: AgentActivityStep?) -> String? {
+        guard !steps.isEmpty else { return nil }
+        let targetIndex: Int
+        if let targetStep,
+           let index = steps.firstIndex(where: { $0.id == targetStep.id }) {
+            targetIndex = index
+        } else if let currentStep,
+                  let index = steps.firstIndex(where: { $0.id == currentStep.id }) {
+            targetIndex = index
+        } else {
+            targetIndex = steps.count - 1
+        }
+
+        for index in stride(from: targetIndex, through: 0, by: -1) {
+            let step = steps[index]
+            guard step.isInteractiveBrowserStatusStep else { continue }
+            let reference = step.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if reference?.isEmpty == false,
+               reference?.lowercased().hasPrefix(agentToolWebPreviewPrefix) != true {
+                return reference
+            }
+        }
+        return nil
+    }
+
     var firstPreviewOpenURL: String? {
         steps.compactMap { step in
             let value = step.previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1592,9 +1617,6 @@ private struct AgentActivityItem: Identifiable, Hashable {
             }).first {
                 return thumbnail
             }
-            if let url = statusOpenURL(for: status, groupKey: groupKey) {
-                return agentToolWebPreviewReference(for: url)
-            }
         }
         if groupKey == "tool:image_generation" {
             if let thumbnail = status.items.compactMap({ item in
@@ -1639,6 +1661,10 @@ private struct AgentActivityItem: Identifiable, Hashable {
         for call: LocalAlpineToolCall,
         file: LocalAlpineWrittenFile?
     ) -> String? {
+        let normalizedToolName = call.name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
         if let imageFilePath = call.imageFilePath?.trimmingCharacters(in: .whitespacesAndNewlines),
            !imageFilePath.isEmpty {
             return imageFilePath
@@ -1652,6 +1678,9 @@ private struct AgentActivityItem: Identifiable, Hashable {
             .first(where: isImagePath(_:))
         if let imagePath {
             return imagePath
+        }
+        if isBrowserToolThumbnailName(normalizedToolName) {
+            return nil
         }
         if let browserURL = call.browserURL?.trimmingCharacters(in: .whitespacesAndNewlines),
            let reference = webThumbnailReference(for: browserURL) {
@@ -1676,6 +1705,14 @@ private struct AgentActivityItem: Identifiable, Hashable {
         return call.filePaths
             .compactMap { webThumbnailReference(for: $0) }
             .first
+    }
+
+    private static func isBrowserToolThumbnailName(_ name: String) -> Bool {
+        name == "browser_use"
+            || name == "web_search"
+            || name == "browser_readable"
+            || name.hasPrefix("browser_")
+            || name.hasPrefix("web_")
     }
 
     private static func webThumbnailReference(for target: String) -> String? {
@@ -12327,15 +12364,13 @@ private struct AgentStepFloatingBar: View {
     }
 
     private var previewThumbnailReference: String? {
-        let liveBrowser = liveBrowserThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isBrowserStep = shouldUseLiveBrowserThumbnail
-        if liveBrowser?.isEmpty == false,
-           isBrowserStep {
-            return liveBrowser
-        }
         let selected = selectedStep?.previewThumbnailReference?.trimmingCharacters(in: .whitespacesAndNewlines)
         if selected?.isEmpty == false {
             return selected
+        }
+        if shouldUseBrowserStepThumbnail,
+           let reference = item.nearestBrowserPreviewThumbnailReference(beforeOrAt: selectedStep) {
+            return reference
         }
         guard let selectedStep else {
             return item.firstPreviewThumbnailReference
@@ -12354,16 +12389,14 @@ private struct AgentStepFloatingBar: View {
         return item.firstPreviewThumbnailReference
     }
 
-    private var shouldUseLiveBrowserThumbnail: Bool {
-        if selectedStep?.isInteractiveBrowserStatusStep == true || item.hasInteractiveBrowserStatusSteps {
+    private var shouldUseBrowserStepThumbnail: Bool {
+        if selectedStep?.isInteractiveBrowserStatusStep == true {
             return true
         }
-        if selectedStep?.isWebSearchStatusStep == true || item.hasOnlyWebSearchStatusSteps {
+        if selectedStep == nil && item.hasInteractiveBrowserStatusSteps {
             return true
         }
-        return item.steps.contains { step in
-            step.isInteractiveBrowserStatusStep || step.isWebSearchStatusStep
-        }
+        return false
     }
 
     private var selectedTitle: String {
@@ -12765,8 +12798,8 @@ private struct AgentToolPreviewThumbnail: View {
 
     private static let localImageCache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
-        cache.countLimit = 80
-        cache.totalCostLimit = 12 * 1024 * 1024
+        cache.countLimit = 24
+        cache.totalCostLimit = 4 * 1024 * 1024
         return cache
     }()
 

@@ -834,8 +834,20 @@ final class LocalNativeToolService {
             let query = result["query"] as? String
             let summary = (result["summary"] as? String)
                 ?? (ok ? "搜索完成。" : "搜索失败。")
-            let previewImages = result["preview_images"] as? [String] ?? []
+            let previewImages = Self.browserPreviewImages(in: result)
             var items = browserItems(from: result["items"])
+            if !previewImages.isEmpty {
+                items = items.map { item in
+                    let thumbnail = item.thumbnailURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard thumbnail?.isEmpty != false else { return item }
+                    return ChatStatusItem(
+                        title: item.title,
+                        link: item.link,
+                        snippet: item.snippet,
+                        thumbnailURL: previewImages.first
+                    )
+                }
+            }
             if items.isEmpty, let url {
                 items = [
                     ChatStatusItem(
@@ -859,6 +871,51 @@ final class LocalNativeToolService {
                 error: result["error"] as? String,
                 requiresUserVerification: false
             )
+        }
+        return nil
+    }
+
+    private static func browserPreviewImages(in result: [String: Any]) -> [String] {
+        var references: [String] = []
+        if let reference = firstBrowserVisualReference(in: result) {
+            references.append(reference)
+        }
+        if let previewImages = result["preview_images"] as? [String] {
+            references.append(contentsOf: previewImages)
+        }
+        return references
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .reduce(into: []) { output, reference in
+                if !output.contains(reference) {
+                    output.append(reference)
+                }
+            }
+    }
+
+    private static func firstBrowserVisualReference(in value: Any?) -> String? {
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let dictionary = value as? [String: Any] {
+            for key in ["file_path", "screenshot_path", "image_path", "file_url", "screenshot_url", "image_url"] {
+                if let reference = firstBrowserVisualReference(in: dictionary[key]) {
+                    return reference
+                }
+            }
+            for key in ["visual_observation", "visual_viewports"] {
+                if let reference = firstBrowserVisualReference(in: dictionary[key]) {
+                    return reference
+                }
+            }
+        }
+        if let array = value as? [Any] {
+            for item in array {
+                if let reference = firstBrowserVisualReference(in: item) {
+                    return reference
+                }
+            }
         }
         return nil
     }

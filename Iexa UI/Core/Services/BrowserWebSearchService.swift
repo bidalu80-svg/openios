@@ -14,7 +14,34 @@ struct BrowserWebSearchTabSnapshot: Identifiable, Equatable {
 final class BrowserWebSearchService: NSObject {
     static let shared = BrowserWebSearchService()
 
+    private final class BrowserArtifactScopeStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var sessionID = "default"
+        private var didPruneLegacyCache = false
+
+        func setSessionID(_ value: String) {
+            lock.lock()
+            sessionID = value
+            lock.unlock()
+        }
+
+        func currentSessionID() -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            return sessionID
+        }
+
+        func claimLegacyCachePruneIfNeeded() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !didPruneLegacyCache else { return false }
+            didPruneLegacyCache = true
+            return true
+        }
+    }
+
     private let logger = Logger(subsystem: "com.openui", category: "BrowserWebSearch")
+    nonisolated(unsafe) private static let browserArtifactScopeStore = BrowserArtifactScopeStore()
     private var webView: WKWebView?
     private var browserTabs: [Int: WKWebView] = [:]
     private var activeBrowserTabID = 1
@@ -45,6 +72,13 @@ final class BrowserWebSearchService: NSObject {
 
     private override init() {
         super.init()
+    }
+
+    func setBrowserArtifactScope(conversationId: String?, sessionId: String?) {
+        let raw = [conversationId, sessionId]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? "default"
+        Self.browserArtifactScopeStore.setSessionID(Self.safeBrowserArtifactComponent(raw))
     }
 
     var hasActiveBrowserPageForContinuation: Bool {
@@ -422,17 +456,18 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private static func browserActionPublishesLivePreview(_ action: String) -> Bool {
-        if action.hasPrefix("browser.") || action.hasPrefix("browser_") {
-            return action != "browser.search" && action != "browser_search"
+        let normalized = action
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ".", with: "_")
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+        if normalized.hasPrefix("browser_") {
+            return browserActionPublishesLivePreview(String(normalized.dropFirst("browser_".count)))
         }
         return [
-            "open", "navigate", "read_webpage", "get_readable",
-            "observe", "get_state", "inspect", "page_inspect",
-            "click", "type", "hover", "scroll", "scroll_and_collect",
-            "find_elements", "get_backbone", "execute_js", "eval_js",
-            "wait_for_dom_stable", "wait_for_image", "screenshot",
-            "new_tab", "close_tab", "list_tabs", "set_viewport"
-        ].contains(action)
+            "open", "navigate", "navigate_url",
+            "click", "type", "hover", "scroll"
+        ].contains(normalized)
     }
 
     private static func browserCallAllowsDesktopMode(_ call: [String: Any]) -> Bool {
@@ -630,6 +665,18 @@ final class BrowserWebSearchService: NSObject {
                     enriched["suggested_next_browser_action"] = candidates.first?["action"] as? String ?? "browser.observe"
                 }
             }
+        }
+        if Self.browserActionPublishesLivePreview(requestedAction),
+           enriched["visual_observation"] == nil,
+           let screenshot = await captureViewportScreenshot(prefix: "browser_snapshot") {
+            enriched["screenshot_path"] = screenshot.path
+            enriched["visual_observation"] = [
+                "screenshot_url": screenshot.absoluteString,
+                "file_path": screenshot.path,
+                "image_path": screenshot.path,
+                "tool_only": true,
+                "note": "Tool-only current viewport snapshot after browser action."
+            ]
         }
         return enriched
     }
@@ -7497,7 +7544,7 @@ final class BrowserWebSearchService: NSObject {
                     let folder = try self.browserOutputDirectory()
                     let fileURL = folder.appendingPathComponent("\(prefix)_\(Int(Date().timeIntervalSince1970 * 1000)).jpg")
                     try data.write(to: fileURL, options: [.atomic])
-                    try? Self.pruneTemporaryBrowserOutputFiles(in: folder.deletingLastPathComponent())
+                    try? Self.pruneTemporaryBrowserOutputFiles(in: folder)
                     continuation.resume(returning: fileURL)
                 } catch {
                     self.logger.debug("Browser snapshot write failed: \(error.localizedDescription, privacy: .public)")
@@ -7552,7 +7599,7 @@ final class BrowserWebSearchService: NSObject {
             browserLivePreviewRevision = revision
             browserLivePreviewLastPublishedAt = Date()
             browserLivePreviewFileURL = fileURL
-            try? Self.pruneTemporaryBrowserOutputFiles(in: folder.deletingLastPathComponent())
+            try? Self.pruneTemporaryBrowserOutputFiles(in: folder)
             NotificationCenter.default.post(
                 name: .browserWebSearchServiceLivePreviewDidChange,
                 object: wv,
@@ -7648,7 +7695,7 @@ final class BrowserWebSearchService: NSObject {
             let folder = try browserOutputDirectory()
             let fileURL = folder.appendingPathComponent("\(prefix)_\(Int(Date().timeIntervalSince1970 * 1000)).jpg")
             try data.write(to: fileURL, options: [.atomic])
-            try? Self.pruneTemporaryBrowserOutputFiles(in: folder.deletingLastPathComponent())
+            try? Self.pruneTemporaryBrowserOutputFiles(in: folder)
             return fileURL
         } catch {
             logger.debug("Browser viewport snapshot write failed: \(error.localizedDescription, privacy: .public)")
@@ -7753,7 +7800,7 @@ final class BrowserWebSearchService: NSObject {
             let suffix = contentHeight > maxCaptureHeight ? "_truncated" : ""
             let fileURL = folder.appendingPathComponent("\(prefix)\(suffix)_\(Int(Date().timeIntervalSince1970 * 1000)).jpg")
             try data.write(to: fileURL, options: [.atomic])
-            try? Self.pruneTemporaryBrowserOutputFiles(in: folder.deletingLastPathComponent())
+            try? Self.pruneTemporaryBrowserOutputFiles(in: folder)
             return fileURL
         } catch {
             logger.debug("Browser full-page snapshot write failed: \(error.localizedDescription, privacy: .public)")
@@ -7798,18 +7845,32 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private nonisolated func browserOutputDirectory() throws -> URL {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
-        let root = base.appendingPathComponent("iexa-browser-tool", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try? Self.pruneTemporaryBrowserOutputFiles(in: root)
+        if Self.browserArtifactScopeStore.claimLegacyCachePruneIfNeeded(),
+           let legacyBase = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            let legacyRoot = legacyBase.appendingPathComponent("iexa-browser-tool", isDirectory: true)
+            try? Self.pruneTemporaryBrowserOutputFiles(
+                in: legacyRoot,
+                maxTemporaryFiles: 0,
+                maxTemporaryBytes: 0
+            )
+        }
+        let root = base.appendingPathComponent("iexa-sessions", isDirectory: true)
+        let sessionID = Self.browserArtifactScopeStore.currentSessionID()
         let folder = root
-            .appendingPathComponent(Self.dateFolderName(), isDirectory: true)
+            .appendingPathComponent(sessionID, isDirectory: true)
+            .appendingPathComponent("browser", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? Self.pruneTemporaryBrowserOutputFiles(in: folder)
         return folder
     }
 
-    private nonisolated static func pruneTemporaryBrowserOutputFiles(in root: URL) throws {
+    private nonisolated static func pruneTemporaryBrowserOutputFiles(
+        in root: URL,
+        maxTemporaryFiles: Int = 14,
+        maxTemporaryBytes: Int64 = 8 * 1024 * 1024
+    ) throws {
         let fileManager = FileManager.default
         let tempPrefixes = [
             "browser_live_",
@@ -7826,13 +7887,11 @@ final class BrowserWebSearchService: NSObject {
             "browser_dom_stable_timeout_",
             "browser_find_focus_",
             "browser_full_",
+            "browser_snapshot_",
             "browser_image_timeout_",
             "search_",
             "configured_search_"
         ]
-        let maxTemporaryFiles = 36
-        let maxTemporaryBytes: Int64 = 24 * 1024 * 1024
-        let cutoff = Date().addingTimeInterval(-6 * 60 * 60)
         guard let enumerator = fileManager.enumerator(
             at: root,
             includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey, .isRegularFileKey, .fileSizeKey],
@@ -7854,12 +7913,8 @@ final class BrowserWebSearchService: NSObject {
                 continue
             }
             temporaryFiles.append((url, modified, Int64(values?.fileSize ?? 0)))
-            if modified < cutoff {
-                try? fileManager.removeItem(at: url)
-            }
         }
         let retained = temporaryFiles
-            .filter { $0.modified >= cutoff }
             .sorted { $0.modified > $1.modified }
         var keptCount = 0
         var keptBytes: Int64 = 0
@@ -7879,6 +7934,16 @@ final class BrowserWebSearchService: NSObject {
             }
             try? fileManager.removeItem(at: directory)
         }
+    }
+
+    private nonisolated static func safeBrowserArtifactComponent(_ raw: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let sanitized = raw.unicodeScalars.map { scalar -> String in
+            allowed.contains(scalar) ? String(scalar) : "_"
+        }.joined()
+        let value = sanitized
+            .trimmingCharacters(in: CharacterSet(charactersIn: "._- "))
+        return value.isEmpty ? "default" : String(value.prefix(96))
     }
 
     private static func itemPayload(from item: WebSearchResultItem) -> [String: Any] {
@@ -8225,13 +8290,6 @@ final class BrowserWebSearchService: NSObject {
         if type.contains("webp") { return "webp" }
         if type.contains("text") { return "txt" }
         return "bin"
-    }
-
-    private nonisolated static func dateFolderName() -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd"
-        return formatter.string(from: Date())
     }
 
     private func searchItems(for query: String) async -> [WebSearchResultItem] {
