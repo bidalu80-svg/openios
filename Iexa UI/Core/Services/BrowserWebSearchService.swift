@@ -842,8 +842,6 @@ final class BrowserWebSearchService: NSObject {
         navigatePayload["visible_answer_allowed"] = false
         navigatePayload["suggested_next_browser_action"] = "browser.find_elements"
         navigatePayload["next_action_reason"] = "Search page is open. Continue with browser_use to inspect results, open relevant pages, scroll/read them, and only then answer the user."
-        navigatePayload["model_instruction"] = "Intermediate web search page. Do not answer from this search page alone. Continue with browser_use: inspect/click a relevant result, then get_readable/get_text/scroll_and_collect on the opened source page before final answer."
-        navigatePayload["final_answer_instruction"] = "Do not answer the user yet. Emit the next browser_use tool call."
         navigatePayload["summary"] = items.isEmpty
             ? "已打开搜索结果页，等待继续浏览网页。"
             : "已打开搜索结果页，识别到 \(items.count) 个候选结果，等待继续打开/读取来源。"

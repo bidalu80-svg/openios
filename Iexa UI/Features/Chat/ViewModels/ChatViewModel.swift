@@ -15136,6 +15136,13 @@ final class ChatViewModel {
             return browserSearchCount >= Self.localAlpineBrowserSearchSoftLimit
         }
         guard name == "browser_use" else { return false }
+        let action = localAlpineBrowserActionName(from: call, result: result)
+        let terminalActions: Set<String> = [
+            "browser.fetch", "browser.wait_for_image"
+        ]
+        if terminalActions.contains(action) {
+            return true
+        }
         if anyJSONBoolValue(in: result.summary, key: "next_action_required", equals: true) {
             return false
         }
@@ -15143,13 +15150,6 @@ final class ChatViewModel {
             return false
         }
         if browserToolResultLooksComplete(call: call, toolContent: result.summary) {
-            return true
-        }
-        let action = localAlpineBrowserActionName(from: call, result: result)
-        let terminalActions: Set<String> = [
-            "browser.fetch", "browser.wait_for_image"
-        ]
-        if terminalActions.contains(action) {
             return true
         }
         let hasSavedFile = result.summary.localizedCaseInsensitiveContains("已下载网页资源")
@@ -15581,19 +15581,22 @@ final class ChatViewModel {
         call: LocalAlpineNativeToolCall,
         toolContent: String
     ) -> Bool {
-        if anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
+        let action = browserResultActionName(from: call, toolContent: toolContent)
+        if browserToolResultNeedsMoreLoading(call: call, toolContent: toolContent) {
             return false
         }
-        if toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
-            return true
-        }
-
-        let action = browserResultActionName(from: call, toolContent: toolContent)
         if action == "browser.fetch" || action == "browser.wait_for_image" {
             return true
         }
         if action == "browser.screenshot",
            anyJSONBoolValue(in: toolContent, key: "attach_preview", equals: true) {
+            return true
+        }
+
+        if anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
+            return false
+        }
+        if toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
             return true
         }
 
@@ -15616,12 +15619,63 @@ final class ChatViewModel {
         return false
     }
 
+    private static func browserToolResultNeedsMoreLoading(
+        call: LocalAlpineNativeToolCall,
+        toolContent: String
+    ) -> Bool {
+        let action = browserResultActionName(from: call, toolContent: toolContent)
+        let loadingActions: Set<String> = [
+            "browser.open",
+            "browser.readable",
+            "browser.observe",
+            "browser.inspect",
+            "browser.find_elements",
+            "browser.scroll",
+            "browser.scroll_and_collect",
+            "browser.click",
+            "browser.type",
+            "browser.execute_js"
+        ]
+        guard loadingActions.contains(action) else { return false }
+
+        if let json = Self.firstJSONObjectString(in: toolContent),
+           let data = json.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) {
+            if let readyState = Self.firstJSONStringValue(in: object, key: "browser_ready_state")?.lowercased(),
+               readyState != "complete",
+               !readyState.isEmpty {
+                return true
+            }
+            if let readyState = Self.firstJSONStringValue(in: object, key: "ready_state")?.lowercased(),
+               readyState != "complete",
+               !readyState.isEmpty {
+                return true
+            }
+            if Self.anyJSONBoolValue(in: object, key: "stable", equals: false) {
+                return true
+            }
+        }
+
+        let lowered = toolContent.lowercased()
+        if lowered.contains("\"browser_ready_state\":\"loading\"")
+            || lowered.contains("\"browser_ready_state\": \"loading\"")
+            || lowered.contains("\"ready_state\":\"loading\"")
+            || lowered.contains("\"ready_state\": \"loading\"")
+            || lowered.contains("\"stable\": false") {
+            return true
+        }
+        return false
+    }
+
     private static func browserToolResultLooksLikeInteractiveIntermediate(
         call: LocalAlpineNativeToolCall,
         toolContent: String
     ) -> Bool {
         if browserToolResultLooksComplete(call: call, toolContent: toolContent) {
             return false
+        }
+        if browserToolResultNeedsMoreLoading(call: call, toolContent: toolContent) {
+            return true
         }
         if anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
             return true
@@ -15784,7 +15838,11 @@ final class ChatViewModel {
         arguments["forceReload"] = false
         arguments["reload"] = false
 
-        if continuationStage == "automation_start",
+        if browserToolResultNeedsMoreLoading(call: effectiveCall, toolContent: toolContent) {
+            arguments["action"] = "wait_for_dom_stable"
+            arguments["timeout"] = max(nativeToolIntValue(arguments["timeout"]) ?? 8, 8)
+            arguments["continuation_stage"] = "wait_for_loading"
+        } else if continuationStage == "automation_start",
            requestedText != nil {
             arguments["action"] = "find_elements"
             arguments["scan_page"] = true
@@ -16388,19 +16446,8 @@ final class ChatViewModel {
             "summary": nextActionRequired ? "" : sourceSummary,
             "next_action_required": nextActionRequired,
             "visible_answer_allowed": !nextActionRequired,
-            "page_state": localNativeBrowserPageState(from: modelResult, browserAction: browserAction),
-            "available_primitive_actions": [
-                "navigate", "screenshot", "find_elements", "click", "type", "scroll",
-                "get_text", "get_readable", "get_backbone", "scroll_and_collect",
-                "wait_for_dom_stable", "fetch", "execute_js"
-            ]
+            "page_state": localNativeBrowserPageState(from: modelResult, browserAction: browserAction)
         ]
-        if nextActionRequired {
-            payloadData["model_instruction"] = "Intermediate browser observation. Decide the next browser_use primitive from the page_state, focused_element, items, viewport_contexts, and screenshots. Do not ask the user to send a continuation unless credentials, payment, or a destructive action is required."
-            payloadData["final_answer_instruction"] = "Do not answer the user yet. Emit the next browser_use tool call."
-        } else {
-            payloadData["final_answer_instruction"] = "Answer the user with the final page result only. Do not recap intermediate browser steps and do not embed browser screenshots unless the user explicitly asked for a screenshot."
-        }
         if let title = firstNonEmptyString(in: modelResult, keys: ["title", "name"]) {
             payloadData["title"] = title
         }
@@ -16436,6 +16483,12 @@ final class ChatViewModel {
         }
         if let visualViewports = modelResult["visual_viewports"] as? [[String: Any]], !visualViewports.isEmpty {
             payloadData["visual_viewports"] = visualViewports.prefix(4).map { localNativeBrowserCompactVisualReference($0) }
+        }
+        if let fetchedPath = firstNonEmptyString(in: modelResult, keys: ["fetched_path"]) {
+            payloadData["fetched_path"] = fetchedPath
+        }
+        if let fetchedURL = firstNonEmptyString(in: modelResult, keys: ["fetched_iexa_url"]) {
+            payloadData["fetched_iexa_url"] = fetchedURL
         }
         if localNativeBrowserAllowsVisibleFileReference(result: modelResult, browserAction: browserAction) {
             if let fileURL = firstNonEmptyString(in: modelResult, keys: ["file_url", "display_url"]) {
@@ -24630,6 +24683,9 @@ final class ChatViewModel {
         if Self.anyJSONBoolValue(in: content, key: "next_action_required", equals: true) {
             return true
         }
+        if Self.localNativeBrowserContentNeedsMoreLoading(content) {
+            return true
+        }
 
         if lowered.contains("do not answer the user yet")
             || lowered.contains("emit the next browser_use tool call")
@@ -24645,6 +24701,9 @@ final class ChatViewModel {
             if Self.anyJSONBoolValue(in: object, key: "next_action_required", equals: true) {
                 return true
             }
+            if Self.localNativeBrowserObjectNeedsMoreLoading(object) {
+                return true
+            }
             if let instruction = Self.firstJSONStringValue(in: object, key: "final_answer_instruction")?.lowercased(),
                instruction.contains("do not answer"),
                instruction.contains("browser_use") {
@@ -24653,6 +24712,34 @@ final class ChatViewModel {
         }
 
         return false
+    }
+
+    private static func localNativeBrowserContentNeedsMoreLoading(_ content: String) -> Bool {
+        guard let json = Self.firstJSONObjectString(in: content),
+              let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else {
+            let lowered = content.lowercased()
+            return lowered.contains("\"browser_ready_state\":\"loading\"")
+                || lowered.contains("\"browser_ready_state\": \"loading\"")
+                || lowered.contains("\"ready_state\":\"loading\"")
+                || lowered.contains("\"ready_state\": \"loading\"")
+                || lowered.contains("\"stable\": false")
+        }
+        return localNativeBrowserObjectNeedsMoreLoading(object)
+    }
+
+    private static func localNativeBrowserObjectNeedsMoreLoading(_ object: Any) -> Bool {
+        if let readyState = Self.firstJSONStringValue(in: object, key: "browser_ready_state")?.lowercased(),
+           !readyState.isEmpty,
+           readyState != "complete" {
+            return true
+        }
+        if let readyState = Self.firstJSONStringValue(in: object, key: "ready_state")?.lowercased(),
+           !readyState.isEmpty,
+           readyState != "complete" {
+            return true
+        }
+        return Self.anyJSONBoolValue(in: object, key: "stable", equals: false)
     }
 
     private func startLocalNativeContinuation(parentId: String) async {
