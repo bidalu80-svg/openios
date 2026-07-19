@@ -2901,7 +2901,7 @@ final class ChatViewModel {
                             "full_page": ["type": "boolean", "description": "For screenshot: capture the full scrollable page instead of the current viewport."],
                             "attach_preview": ["type": "boolean", "description": "For screenshot: attach the image to chat. Defaults to false for browser observation screenshots."],
                             "script": ["type": "string", "description": "JavaScript body for execute_js."],
-                            "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile. Default is mobile_safari. Do not use desktop_chrome unless the user explicitly asks for desktop/PC mode."],
+                            "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile. Omit this unless the user asks to switch browser mode; the app applies the selected Browser Mode/default search policy."],
                             "max_depth": ["type": "integer", "description": "DOM backbone depth."],
                             "scroll_count": ["type": "integer", "description": "Number of scroll/collect iterations."],
                             "item_selector": ["type": "string", "description": "Selector for scroll_and_collect items."],
@@ -2989,7 +2989,7 @@ final class ChatViewModel {
         - Tool call style: when a listed tool can complete the user's request, call it directly instead of explaining that you could do it. Infer intent from the user's latest wording, prior tool results, current page/workspace context, and reasonable safe defaults. Ask only when the target/action is genuinely ambiguous, needs private credentials, or could affect data outside the requested scope.
         - Use `web_search` to start live web search in the shared iOS browser, then continue with `browser_use` to inspect/open/scroll/read real source pages before answering. Use `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
         - Browser override: use `browser_use` like Minis, but prefer the app's automation observation fields over guessing. After every `navigate`, `click`, `type`, `scroll`, `execute_js`, viewport, or tab action, inspect `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll`. Continue with candidate `node_id` values for `click`/`type`/`hover`; use screenshots only when visual confirmation or coordinate fallback is needed. After pressing a generate/export/download button, wait for the real result with `wait_for_image`, `wait_for_dom_stable`, or `fetch`; do not stop at the click.
-        - Browser interaction: treat click/type/scroll/find success as intermediate only. Continue bounded primitive `browser_use` steps in the same turn until the user's page task is complete, a final file/result is available, or the tool explicitly returns `requires_user_verification:true`. Choose the next primitive from the latest observation like Minis: use `get_readable`/`get_text` when the page is ready to read, `click` when a relevant result/control is visible, `scroll` when more page content is needed, and `find_elements` with `scan_page:true` only when structural discovery is needed. When an item returns `nodeId`/`node_id`, pass that id to the next click/type/hover instead of inventing a selector. If DOM matching misses a visible control, scroll it into view and click by viewport coordinates from the screenshot. Use `get_readable`, `get_text`, or `scroll_and_collect` before summarizing long pages; do not conclude from the first viewport. Screenshots are tool-only by default; do not set `attach_preview`, `show_in_chat`, or `attach_file` unless the user asks to save/download/show a screenshot. Human-verification words visible on the page are not a failure; pause only when the tool explicitly returns `requires_user_verification:true`. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. After the user completes verification, continue from the same shared page using the next screenshot/read result; do not reopen or reload the same URL unless required.
+        - Browser interaction: treat click/type/scroll/find success as intermediate only. Continue bounded primitive `browser_use` steps in the same turn until the user's page task is complete, a final file/result is available, or credentials, payment, or a destructive action requires user input. Choose the next primitive from the latest observation like Android Iexa: use `screenshot` to see the page when visual state matters, `get_readable`/`get_text` when the page is ready to read, `click` when a relevant result/control is visible, `scroll` when more page content is needed, and `find_elements` with `scan_page:true` only when structural discovery is needed. When an item returns `nodeId`/`node_id`, pass that id to the next click/type/hover instead of inventing a selector. If DOM matching misses a visible control, scroll it into view and click by viewport coordinates from the screenshot. Use `get_readable`, `get_text`, or `scroll_and_collect` before summarizing long pages; do not conclude from the first viewport. Screenshots are tool-only by default; do not set `attach_preview`, `show_in_chat`, or `attach_file` unless the user asks to save/download/show a screenshot. Human-verification words visible on the page are ordinary page content, not an app-level stop condition. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. Do not reopen or reload the same URL unless required.
         - Browser auth limits: if `browser_use` reaches Google/OAuth login pages (`accounts.google.com`, `signin.google.com`, `myaccount.google.com`, `oauth2.googleapis.com`) or the page says `disallowed_useragent`, 403, or "browser is not secure", do not retry login loops. Tell the user this must be completed in system Safari/Chrome, provide the https link as a normal Markdown link, and ask them to paste the needed result back into chat.
         - Iexa URLs: `iexa://` links are app-internal deep links. Do not pass settings/action deep links to `browser_use`; render them as Markdown links or use `iexa_open` for previewable resources. Use `browser_use` for http/https/file pages and interactive web browsing.
         - For image generation requests, use the app image-generation tool when available instead of turning `browser_use` into a generated-image-only workflow.
@@ -3003,6 +3003,7 @@ final class ChatViewModel {
     }
 
     private static func localNativeFunctionToolSchemas(
+        includeDeviceTools: Bool,
         includeBrowserTools: Bool,
         includeImageTools: Bool,
         includeOfficeTools: Bool,
@@ -3010,6 +3011,20 @@ final class ChatViewModel {
         includeMemoryTools: Bool
     ) -> [[String: Any]] {
         var tools: [[String: Any]] = []
+
+        if includeDeviceTools {
+            tools.append([
+                "type": "function",
+                "function": [
+                    "name": "get_location",
+                    "description": "Get the user's current iOS system location from the app-side LocationManager. Use only when the user asks for their current location, nearby places, coordinates, local context, or location-aware help. This may request/require iOS When In Use location permission and returns a fresh cached fix when available.",
+                    "parameters": [
+                        "type": "object",
+                        "properties": [String: Any]()
+                    ]
+                ]
+            ])
+        }
 
         if includeMemoryTools {
             tools.append(contentsOf: [
@@ -3151,7 +3166,7 @@ final class ChatViewModel {
                                 "full_page": ["type": "boolean", "description": "For screenshot: capture the full scrollable page instead of the current viewport."],
                                 "attach_preview": ["type": "boolean", "description": "For screenshot: attach the image to chat. Defaults to false for browser observation screenshots."],
                                 "script": ["type": "string", "description": "JavaScript body for execute_js."],
-                                "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile. Default is mobile_safari. Do not use desktop_chrome unless the user explicitly asks for desktop/PC mode."],
+                                "user_agent": ["type": "string", "enum": ["mobile_safari", "mobile_chrome", "desktop_chrome"], "description": "Optional user-agent profile. Omit this unless the user asks to switch browser mode; the app applies the selected Browser Mode/default search policy."],
                                 "max_depth": ["type": "integer", "description": "DOM backbone depth."],
                                 "scroll_count": ["type": "integer", "description": "Number of scroll/collect iterations."],
                                 "item_selector": ["type": "string", "description": "Selector for scroll_and_collect items."],
@@ -15100,14 +15115,6 @@ final class ChatViewModel {
             return browserSearchCount >= Self.localAlpineBrowserSearchSoftLimit
         }
         guard name == "browser_use" else { return false }
-        let userVerificationCompleted = result.summary.localizedCaseInsensitiveContains("Browser human verification was completed")
-            || result.summary.localizedCaseInsensitiveContains("人机验证已完成")
-        let needsUserVerification = anyJSONBoolValue(in: result.summary, key: "requires_user_verification", equals: true)
-            || result.summary.localizedCaseInsensitiveContains("human verification is not complete")
-            || result.summary.localizedCaseInsensitiveContains("网页需要先完成人机验证")
-        if needsUserVerification && !userVerificationCompleted {
-            return true
-        }
         if anyJSONBoolValue(in: result.summary, key: "next_action_required", equals: true) {
             return false
         }
@@ -15321,6 +15328,7 @@ final class ChatViewModel {
 
     private static let localNativeFunctionToolNames: Set<String> = [
         "image_generation",
+        "get_location",
         "memory_write",
         "memory_get",
         "web_search",
@@ -15466,7 +15474,7 @@ final class ChatViewModel {
             "content": """
             The previous browser result was an intermediate page-operation state, but the assistant did not issue the next browser tool call. The app is continuing the same shared browser session automatically.
             Treat any previous prose as premature and discarded. Emit exactly one `browser_use` tool call now, with no visible prose before or after the tool call.
-            Continue from the current screenshot/read/result state. Do not navigate/reload the same URL unless explicitly required. Stop only after the user's page task is complete, a final file/result exists, or the tool explicitly reports requires_user_verification.
+            Continue from the current screenshot/read/result state. Do not navigate/reload the same URL unless explicitly required. Stop only after the user's page task is complete, a final file/result exists, or credentials, payment, or a destructive action requires user input.
             If the suggested primitive matches the page state, use it as the next browser_use arguments; otherwise choose the next primitive from the current page evidence yourself.\(suggestedInstruction)
             """
         ]
@@ -15591,9 +15599,6 @@ final class ChatViewModel {
         call: LocalAlpineNativeToolCall,
         toolContent: String
     ) -> Bool {
-        if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
-            return false
-        }
         if browserToolResultLooksComplete(call: call, toolContent: toolContent) {
             return false
         }
@@ -15671,9 +15676,6 @@ final class ChatViewModel {
         if browserToolResultLooksComplete(call: call, toolContent: toolContent) {
             return true
         }
-        if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
-            return false
-        }
         return false
     }
 
@@ -15683,8 +15685,7 @@ final class ChatViewModel {
         latestUserPrompt: String?
     ) -> LocalAlpineNativeToolCall? {
         if call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "web_search",
-           anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true),
-           !anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
+           anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
             return nil
         }
 
@@ -15700,9 +15701,6 @@ final class ChatViewModel {
             toolContent: toolContent
         )
         guard isInteractiveIntermediate else {
-            return nil
-        }
-        if anyJSONBoolValue(in: toolContent, key: "requires_user_verification", equals: true) {
             return nil
         }
         guard !localNativeBrowserToolResultShouldStop(effectiveCall, toolContent: toolContent) else {
@@ -16253,6 +16251,8 @@ final class ChatViewModel {
             return "memory_write"
         case "memory.get", "memory_get":
             return "memory_get"
+        case "get_location", "location.get", "location_get", "ios.location", "ios_location", "device.location", "device_location":
+            return "get_location"
         case "web.search", "web_search", "search_web", "browser.search", "browser_search":
             return "web_search"
         case "browser.readable", "browser_readable", "browser.get_readable", "browser_get_readable", "get_readable":
@@ -16286,6 +16286,8 @@ final class ChatViewModel {
             return "memory_write"
         case "memory_get":
             return "memory_get"
+        case "get_location":
+            return "get_location"
         case "web_search":
             return "web.search"
         case "browser_readable":
@@ -16332,22 +16334,21 @@ final class ChatViewModel {
         ) ?? localAlpineBrowserActionName(from: call)
         let browserAction = normalizedBrowserResultActionName(rawAction)
         let ok = nativeToolBoolValue(result["ok"]) ?? false
-        let requiresUserVerification = nativeToolBoolValue(result["requires_user_verification"]) ?? false
-        let resultToolContent = localNativeBrowserPrettyJSONString(result) ?? trimmed
-        let nextActionRequired = !requiresUserVerification
-            && !browserToolResultLooksComplete(call: call, toolContent: resultToolContent)
+        let modelResult = (localNativeBrowserResultForModel(result) as? [String: Any]) ?? result
+        let resultToolContent = localNativeBrowserPrettyJSONString(modelResult) ?? trimmed
+        let nextActionRequired = !browserToolResultLooksComplete(call: call, toolContent: resultToolContent)
 
-        let sourceSummary = firstNonEmptyString(in: result, keys: ["summary", "description"]) ?? ""
+        let sourceSummary = firstNonEmptyString(in: modelResult, keys: ["summary", "description"]) ?? ""
         var payloadData: [String: Any] = [
             "success": ok,
             "text": localNativeBrowserObservationText(
-                from: result,
+                from: modelResult,
                 includeProcessSummary: !nextActionRequired
             ),
             "summary": nextActionRequired ? "" : sourceSummary,
             "next_action_required": nextActionRequired,
             "visible_answer_allowed": !nextActionRequired,
-            "page_state": localNativeBrowserPageState(from: result, browserAction: browserAction),
+            "page_state": localNativeBrowserPageState(from: modelResult, browserAction: browserAction),
             "available_primitive_actions": [
                 "navigate", "screenshot", "find_elements", "click", "type", "scroll",
                 "get_text", "get_readable", "get_backbone", "scroll_and_collect",
@@ -16355,55 +16356,52 @@ final class ChatViewModel {
             ]
         ]
         if nextActionRequired {
-            payloadData["model_instruction"] = "Intermediate browser observation. Decide the next browser_use primitive from the page_state, focused_element, items, viewport_contexts, and screenshots. Do not ask the user to send a continuation unless credentials, payment, destructive action, or explicit human verification is required."
+            payloadData["model_instruction"] = "Intermediate browser observation. Decide the next browser_use primitive from the page_state, focused_element, items, viewport_contexts, and screenshots. Do not ask the user to send a continuation unless credentials, payment, or a destructive action is required."
             payloadData["final_answer_instruction"] = "Do not answer the user yet. Emit the next browser_use tool call."
         } else {
             payloadData["final_answer_instruction"] = "Answer the user with the final page result only. Do not recap intermediate browser steps and do not embed browser screenshots unless the user explicitly asked for a screenshot."
         }
-        if let title = firstNonEmptyString(in: result, keys: ["title", "name"]) {
+        if let title = firstNonEmptyString(in: modelResult, keys: ["title", "name"]) {
             payloadData["title"] = title
         }
-        if let pageURL = firstNonEmptyString(in: result, keys: ["page_url", "url", "link", "href"]) {
+        if let pageURL = firstNonEmptyString(in: modelResult, keys: ["page_url", "url", "link", "href"]) {
             payloadData["page_url"] = pageURL
         }
-        if let error = firstNonEmptyString(in: result, keys: ["error", "message"]) {
+        if let error = firstNonEmptyString(in: modelResult, keys: ["error", "message"]) {
             payloadData["error"] = error
         }
-        if requiresUserVerification {
-            payloadData["requires_user_verification"] = true
-        }
-        if let items = result["items"] as? [[String: Any]], !items.isEmpty {
+        if let items = modelResult["items"] as? [[String: Any]], !items.isEmpty {
             payloadData["items"] = items.prefix(24).map { localNativeBrowserCompactElement($0) }
         }
-        if let visibleElements = result["visible_elements"] as? [[String: Any]], !visibleElements.isEmpty {
+        if let visibleElements = modelResult["visible_elements"] as? [[String: Any]], !visibleElements.isEmpty {
             payloadData["visible_elements"] = visibleElements.prefix(24).map { localNativeBrowserCompactElement($0) }
         }
-        if let candidates = result["next_action_candidates"] as? [[String: Any]], !candidates.isEmpty {
+        if let candidates = modelResult["next_action_candidates"] as? [[String: Any]], !candidates.isEmpty {
             payloadData["next_action_candidates"] = candidates.prefix(16).map { localNativeBrowserCompactElement($0) }
         }
-        if let observation = result["post_action_observation"] as? [String: Any] {
+        if let observation = modelResult["post_action_observation"] as? [String: Any] {
             payloadData["post_action_observation"] = localNativeBrowserCompactObservation(observation)
         }
-        if let focused = result["focused_element"] as? [String: Any] {
+        if let focused = modelResult["focused_element"] as? [String: Any] {
             payloadData["focused_element"] = localNativeBrowserCompactElement(focused)
         }
-        if let contexts = result["viewport_contexts"] as? [[String: Any]], !contexts.isEmpty {
+        if let contexts = modelResult["viewport_contexts"] as? [[String: Any]], !contexts.isEmpty {
             payloadData["viewport_contexts"] = contexts.prefix(8).map { localNativeBrowserCompactViewportContext($0) }
         }
-        if let interactive = result["interactive_elements"] as? [[String: Any]], !interactive.isEmpty {
+        if let interactive = modelResult["interactive_elements"] as? [[String: Any]], !interactive.isEmpty {
             payloadData["interactive_elements"] = interactive.prefix(24).map { localNativeBrowserCompactElement($0) }
         }
-        if let visual = result["visual_observation"] as? [String: Any] {
+        if let visual = modelResult["visual_observation"] as? [String: Any] {
             payloadData["visual_observation"] = localNativeBrowserCompactVisualReference(visual)
         }
-        if let visualViewports = result["visual_viewports"] as? [[String: Any]], !visualViewports.isEmpty {
+        if let visualViewports = modelResult["visual_viewports"] as? [[String: Any]], !visualViewports.isEmpty {
             payloadData["visual_viewports"] = visualViewports.prefix(4).map { localNativeBrowserCompactVisualReference($0) }
         }
-        if localNativeBrowserAllowsVisibleFileReference(result: result, browserAction: browserAction) {
-            if let fileURL = firstNonEmptyString(in: result, keys: ["file_url", "display_url"]) {
+        if localNativeBrowserAllowsVisibleFileReference(result: modelResult, browserAction: browserAction) {
+            if let fileURL = firstNonEmptyString(in: modelResult, keys: ["file_url", "display_url"]) {
                 payloadData["file_url"] = fileURL
             }
-            if let imagePath = firstNonEmptyString(in: result, keys: ["image_path", "file_path"]) {
+            if let imagePath = firstNonEmptyString(in: modelResult, keys: ["image_path", "file_path"]) {
                 payloadData["image_path"] = imagePath
             }
         }
@@ -16575,9 +16573,6 @@ final class ChatViewModel {
                 }
             }
         }
-        if let requiresVerification = nativeToolBoolValue(result["requires_user_verification"]) {
-            state["requires_user_verification"] = requiresVerification
-        }
         if let ok = nativeToolBoolValue(result["ok"]) {
             state["ok"] = ok
         }
@@ -16643,7 +16638,7 @@ final class ChatViewModel {
 
     private static func localNativeBrowserCompactObservation(_ raw: [String: Any]) -> [String: Any] {
         var compact: [String: Any] = [:]
-        for key in ["title", "url", "ready_state", "state_label", "visible_text", "visible_element_count", "total_detected_element_count", "action_candidate_count", "requires_user_verification"] {
+        for key in ["title", "url", "ready_state", "state_label", "visible_text", "visible_element_count", "total_detected_element_count", "action_candidate_count"] {
             if let value = raw[key] {
                 if let text = value as? String {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -16739,6 +16734,30 @@ final class ChatViewModel {
             return nil
         }
         return json
+    }
+
+    private static func localNativeBrowserResultForModel(_ value: Any) -> Any? {
+        if let dictionary = value as? [String: Any] {
+            var cleaned: [String: Any] = [:]
+            for (key, nestedValue) in dictionary {
+                switch key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                case "requires_user_verification",
+                     "human_verification",
+                     "blocked_by_human_verification",
+                     "challenge_blocking":
+                    continue
+                default:
+                    if let sanitized = localNativeBrowserResultForModel(nestedValue) {
+                        cleaned[key] = sanitized
+                    }
+                }
+            }
+            return cleaned
+        }
+        if let array = value as? [Any] {
+            return array.compactMap { localNativeBrowserResultForModel($0) }
+        }
+        return value
     }
 
     private static func localNativeFunctionToolResultContent(
@@ -18576,7 +18595,12 @@ final class ChatViewModel {
                     officeRevisionContext: localOfficeContextForNativeTools
                 ))
         let shouldExposeShortcutsTools = shortcutsEnabled && !shouldPrioritizeImageRoute
+        let shouldExposeDeviceTools = !shouldPrioritizeImageRoute
+            && (exposeAllEnabledTools
+                ? true
+                : (latestUserTextForLocalNativeTools.map(Self.shouldExposeLocalDeviceNativeTools) ?? false))
         let shouldExposeLocalNativeTools = shouldExposeImageTools
+            || shouldExposeDeviceTools
             || shouldExposeBrowserTools
             || shouldExposeMemoryTools
             || shouldExposeOfficeTools
@@ -18587,6 +18611,7 @@ final class ChatViewModel {
            request.responsesTools?.isEmpty != false,
            !nativeToolsDisabled {
             request.tools = Self.localNativeFunctionToolSchemas(
+                includeDeviceTools: shouldExposeDeviceTools,
                 includeBrowserTools: shouldExposeBrowserTools,
                 includeImageTools: shouldExposeImageTools,
                 includeOfficeTools: shouldExposeOfficeTools,
@@ -20904,6 +20929,7 @@ final class ChatViewModel {
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
         let functionToolNames = [
+            includeDeviceTools ? "`get_location`" : nil,
             includeImageTools ? "`image_generation`" : nil,
             includeBrowserTools ? "`web_search`, `browser_readable`, `browser_use`" : nil,
             includeMemoryTools ? "`memory_write`, `memory_get`" : nil,
@@ -20943,9 +20969,9 @@ final class ChatViewModel {
             : ""
         let browserInstructions = includeBrowserTools ? """
 
-        Browser override: use `browser_use` like Minis. The shared browser uses the User-Agent and viewport selected in Settings → Chat Settings → Tools → Browser Mode. For interactive pages, open/navigate first, then read `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll` from every result. Prefer returned candidate `node_id` values for the next `click`, `type`, or `hover`; use `screenshot` only for visual confirmation or coordinate fallback. After pressing a page generate/export/download button, wait for the real result with `wait_for_image` or `wait_for_dom_stable`; do not stop at the click. Treat every browser action result as intermediate until the user task is complete or the tool explicitly returns `requires_user_verification:true`.
+        Browser override: use `browser_use` like Android Iexa. The shared browser uses the User-Agent and viewport selected in Settings → Chat Settings → Tools → Browser Mode. For interactive pages, open/navigate first, then read `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll` from every result. Prefer returned candidate `node_id` values for the next `click`, `type`, or `hover`; use `screenshot` to see the page when visual confirmation or coordinate fallback is needed. After pressing a page generate/export/download button, wait for the real result with `wait_for_image` or `wait_for_dom_stable`; do not stop at the click. Treat every browser action result as intermediate until the user task is complete, a final file/result exists, or credentials, payment, or a destructive action requires user input.
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. `web_search` only opens a real search page and returns an intermediate browser state; do not answer from `web_search` alone. Continue with `browser_use` like Minis: inspect the returned observation and choose the next primitive yourself, such as opening a relevant result, reading the page with `get_readable`/`get_text`, scrolling for more content, or using `find_elements` with `scan_page:true` only when structural discovery is needed. Use `next_action_candidates` and `post_action_observation.visible_elements` first; reuse returned `nodeId`/`node_id` for the next click/type/hover; use viewport coordinates only when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or the tool explicitly returns `requires_user_verification:true`. Do not narrate intermediate browser work in chat; progress belongs in the tool card. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. If verification is required, the shared browser stays on the same page; after the user completes it, continue from the next observation result without reopening/reloading the same URL.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. `web_search` only opens a real search page and returns an intermediate browser state; do not answer from `web_search` alone. Continue with `browser_use` like Android Iexa: inspect the returned observation and choose the next primitive yourself, such as opening a relevant result, reading the page with `get_readable`/`get_text`, scrolling for more content, or using `find_elements` with `scan_page:true` only when structural discovery is needed. Use `next_action_candidates` and `post_action_observation.visible_elements` first; reuse returned `nodeId`/`node_id` for the next click/type/hover; use viewport coordinates only when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or credentials, payment, or a destructive action requires user input. Do not narrate intermediate browser work in chat; progress belongs in the tool card. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn.
 
         Tool call style: when a real or fallback browser/native tool can satisfy the user's request, call it directly instead of only explaining. Infer the search query, URL target, page control, or follow-up intent from the latest user message and visible context; use reasonable safe defaults; ask only when the request is genuinely ambiguous, needs credentials, or would affect data outside the requested scope.
 
@@ -23953,7 +23979,6 @@ final class ChatViewModel {
         let combined = "\(trimmed)\n\(status.description ?? "")".lowercased()
         let shouldShow = combined.contains("人机验证")
             || combined.contains("验证码")
-            || combined.contains("requires_user_verification")
             || combined.contains("失败")
             || combined.contains("错误")
             || combined.contains("error")
@@ -24552,9 +24577,6 @@ final class ChatViewModel {
             return false
         }
 
-        if Self.anyJSONBoolValue(in: content, key: "requires_user_verification", equals: true) {
-            return false
-        }
         if Self.anyJSONBoolValue(in: content, key: "next_action_required", equals: true) {
             return true
         }
@@ -24570,9 +24592,6 @@ final class ChatViewModel {
         if let json = Self.firstJSONObjectString(in: content),
            let data = json.data(using: .utf8),
            let object = try? JSONSerialization.jsonObject(with: data) {
-            if Self.anyJSONBoolValue(in: object, key: "requires_user_verification", equals: true) {
-                return false
-            }
             if Self.anyJSONBoolValue(in: object, key: "next_action_required", equals: true) {
                 return true
             }
@@ -24691,6 +24710,7 @@ final class ChatViewModel {
                    self.shouldUseLocalNativeFunctionTools(for: modelId),
                    self.isLocalBrowserNativeToolsEnabled {
                     request.tools = Self.localNativeFunctionToolSchemas(
+                        includeDeviceTools: false,
                         includeBrowserTools: true,
                         includeImageTools: false,
                         includeOfficeTools: false,
@@ -25042,7 +25062,7 @@ final class ChatViewModel {
     ) {
         let continuationInstruction = allowBrowserContinuation
             ? """
-            The latest Local Native browser result is an intermediate browser state, not the final user-visible answer. Continue with real `browser_use` function tool calls in this same turn until the page task is complete, a final readable/file result exists, or the tool explicitly reports `requires_user_verification:true`. Do not answer with prose while `next_action_required:true` is present.
+            The latest Local Native browser result is an intermediate browser state, not the final user-visible answer. Continue with real `browser_use` function tool calls in this same turn until the page task is complete, a final readable/file result exists, or credentials, payment, or a destructive action requires user input. Do not answer with prose while `next_action_required:true` is present.
             """
             : """
             Reply to the user in normal language only, using Minis-style brevity: final result first, no process narration.

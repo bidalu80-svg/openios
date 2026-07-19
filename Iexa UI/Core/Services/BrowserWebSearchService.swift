@@ -417,7 +417,8 @@ final class BrowserWebSearchService: NSObject {
             payload["desktop_viewport_blocked"] = Self.boolValue(sanitizedCall["desktop_viewport_blocked"]) == true
         }
         payload["desktop_mode_active"] = browserDesktopModeExplicitlyEnabled
-        return await enrichNativeBrowserToolPayload(payload, requestedAction: action, call: sanitizedCall)
+        let enrichedPayload = await enrichNativeBrowserToolPayload(payload, requestedAction: action, call: sanitizedCall)
+        return Self.browserPayloadWithoutHumanVerificationProtocol(enrichedPayload) as? [String: Any] ?? enrichedPayload
     }
 
     private static func browserActionPublishesLivePreview(_ action: String) -> Bool {
@@ -3194,7 +3195,6 @@ final class BrowserWebSearchService: NSObject {
 
     private static func isScannedElementDisabled(_ item: [String: Any]) -> Bool {
         Self.boolValue(item["disabled"]) == true
-            || Self.boolValue(item["blocked_by_human_verification"]) == true
     }
 
     private static func scannedElementPageCenterX(_ item: [String: Any]) -> Int? {
@@ -8092,40 +8092,35 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private static func humanVerificationRequiresUser(_ verification: [String: Any]) -> Bool {
-        let detected = boolValue(verification["detected"]) == true
-        let completed = boolValue(verification["completed"]) == true
-        guard detected && !completed else { return false }
-
-        if boolValue(verification["blocking"] ?? verification["challenge_blocking"]) == true {
-            return true
-        }
-
-        let hasDetailedProbe = verification.keys.contains("page_usable")
-            || verification.keys.contains("challenge_visible")
-            || verification.keys.contains("pending_state")
-            || verification.keys.contains("failed_state")
-        guard hasDetailedProbe else {
-            return false
-        }
-
-        let failed = boolValue(verification["failed_state"]) == true
-        let pending = boolValue(verification["pending_state"]) == true
-        let pageUsable = boolValue(verification["page_usable"]) == true
-        let challengeVisible = boolValue(verification["challenge_visible"]) == true
-        return !(pageUsable && !challengeVisible && !pending && !failed)
+        false
     }
 
     private static func toolPayloadRequiresHumanVerification(_ payload: [String: Any]) -> Bool {
-        guard boolValue(payload["requires_user_verification"]) == true else { return false }
-        if let verification = payload["human_verification"] as? [String: Any] {
-            if boolValue(payload["disabled"]) == true,
-               boolValue(verification["detected"]) == true,
-               boolValue(verification["completed"]) != true {
-                return true
+        false
+    }
+
+    private static func browserPayloadWithoutHumanVerificationProtocol(_ value: Any) -> Any? {
+        if let dictionary = value as? [String: Any] {
+            var cleaned: [String: Any] = [:]
+            for (key, nestedValue) in dictionary {
+                switch key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                case "requires_user_verification",
+                     "human_verification",
+                     "blocked_by_human_verification",
+                     "challenge_blocking":
+                    continue
+                default:
+                    if let sanitized = browserPayloadWithoutHumanVerificationProtocol(nestedValue) {
+                        cleaned[key] = sanitized
+                    }
+                }
             }
-            return humanVerificationRequiresUser(verification)
+            return cleaned
         }
-        return true
+        if let array = value as? [Any] {
+            return array.compactMap { browserPayloadWithoutHumanVerificationProtocol($0) }
+        }
+        return value
     }
 
     private static func unique(_ values: [String]) -> [String] {
@@ -8762,20 +8757,7 @@ final class BrowserWebSearchService: NSObject {
     }
 
     private func currentBlockingHumanVerification() async -> [String: Any]? {
-        guard var probe = await evaluateJSONObject(Self.visibleChallengeProbeScript()) else {
-            return nil
-        }
-        let detected = Self.boolValue(probe["detected"]) == true
-        let completed = Self.boolValue(probe["completed"]) == true
-        let failed = Self.boolValue(probe["failed_state"]) == true
-        let pending = Self.boolValue(probe["pending_state"]) == true
-        let pageUsable = Self.boolValue(probe["page_usable"]) == true
-        let challengeVisible = Self.boolValue(probe["challenge_visible"]) == true
-        guard detected && !completed && !(pageUsable && !challengeVisible && !pending && !failed) else { return nil }
-        _ = await scrollToVisibleHumanVerification()
-        scheduleLiveBrowserPreview(reason: "verification_required", minimumInterval: 0.2)
-        probe["requires_user_verification"] = true
-        return probe
+        nil
     }
 
     private func browserHumanVerificationPayload(

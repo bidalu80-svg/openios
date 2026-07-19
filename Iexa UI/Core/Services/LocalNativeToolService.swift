@@ -11,8 +11,7 @@ struct LocalNativeToolRunResult: Sendable {
     let openRequests: [LocalAlpineOpenRequest]
 
     var requiresBrowserUserVerification: Bool {
-        browserDocument?.requiresUserVerification == true
-            || openRequests.contains { $0.target == "iexa://automation-browser" }
+        false
     }
 }
 
@@ -144,8 +143,7 @@ final class LocalNativeToolService {
             #""action"\s*:\s*"browser\.use""#,
             #""browser_action"\s*:\s*"browser\."#,
             #""browser_use_action"\s*:\s*"browser\."#,
-            #""focused_element"\s*:"#,
-            #""blocked_by_human_verification"\s*:"#
+            #""focused_element"\s*:"#
         ]
         return toolMarkers.contains { pattern in
             trimmed.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
@@ -300,7 +298,7 @@ final class LocalNativeToolService {
         let action = (call["action"] as? String ?? call["name"] as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         switch action {
-        case "get_location", "location.get":
+        case "get_location", "location.get", "location_get", "ios.location", "ios_location", "device.location", "device_location":
             return executeGetLocation()
         case "get_weather", "weather.get":
             return await executeGetWeather()
@@ -859,7 +857,7 @@ final class LocalNativeToolService {
                 items: items,
                 previewImages: previewImages,
                 error: result["error"] as? String,
-                requiresUserVerification: boolValue(result["requires_user_verification"])
+                requiresUserVerification: false
             )
         }
         return nil
@@ -896,9 +894,6 @@ final class LocalNativeToolService {
         var requests = results.compactMap { result in
             firstString(in: result, keys: ["open_preview_target", "preview_target", "local_preview"])
                 .map { LocalAlpineOpenRequest(target: $0) }
-        }
-        if results.contains(where: { boolValue($0["requires_user_verification"]) }) {
-            requests.append(LocalAlpineOpenRequest(target: "iexa://automation-browser"))
         }
         return requests
     }
@@ -1987,6 +1982,8 @@ final class LocalNativeToolService {
             return "browser.observe"
         case "browser.wait_for_image", "browser_wait_for_image", "wait_for_image", "wait_image", "image_result":
             return "browser.wait_for_image"
+        case "get_location", "location.get", "location_get", "ios.location", "ios_location", "device.location", "device_location":
+            return "get_location"
         case "update_calendar_event", "calendar.update_event":
             return "calendar.update_event"
         case "calendar.free_busy", "calendar.freebusy", "calendar.availability":
@@ -2030,7 +2027,8 @@ final class LocalNativeToolService {
         guard !action.isEmpty else { return false }
         switch action {
         case "image_generation", "memory_write", "memory_get",
-             "get_location", "location.get", "get_weather", "weather.get",
+             "get_location", "location.get", "location_get", "ios.location", "ios_location", "device.location", "device_location",
+             "get_weather", "weather.get",
              "list_calendar_events", "calendar.list_events",
              "create_calendar_event", "calendar.create_event",
              "delete_calendar_event", "calendar.delete_event",
