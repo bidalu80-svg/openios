@@ -60,6 +60,7 @@ final class BrowserWebSearchService: NSObject {
     private var browserLivePreviewRevision = 0
     private var browserLivePreviewTask: Task<Void, Never>?
     private var browserLivePreviewFileURL: URL?
+    private let browserLivePreviewMinimumInterval: TimeInterval = 3.0
     private var lastBrowserNavigationReusedExistingPage = false
     static let browserUserAgentModeDefaultsKey = "browserAutomationUserAgentMode"
     private static let defaultDesktopBrowserViewport = CGSize(width: 1280, height: 900)
@@ -374,11 +375,11 @@ final class BrowserWebSearchService: NSObject {
         }
         let publishesLivePreview = Self.browserActionPublishesLivePreview(action)
         if publishesLivePreview {
-            scheduleLiveBrowserPreview(reason: "before_\(action)", minimumInterval: 0.35)
+            scheduleLiveBrowserPreview(reason: "before_\(action)")
         }
         defer {
             if publishesLivePreview {
-                scheduleLiveBrowserPreview(reason: "after_\(action)", minimumInterval: 0.9)
+                scheduleLiveBrowserPreview(reason: "after_\(action)")
             }
         }
         var payload: [String: Any]
@@ -7360,7 +7361,7 @@ final class BrowserWebSearchService: NSObject {
     func recordAutomationBrowserUserInteraction(kind: String) {
         browserLastUserInteractionAt = Date()
         browserLastUserInteractionKind = kind
-        scheduleLiveBrowserPreview(reason: "user_\(kind)", minimumInterval: 0.25)
+        scheduleLiveBrowserPreview(reason: "user_\(kind)")
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 220_000_000)
             guard let self,
@@ -7379,7 +7380,7 @@ final class BrowserWebSearchService: NSObject {
         resolveNavigation(true)
         notifyActiveBrowserDidChange()
         notifyHumanVerificationStateIfNeeded(from: source)
-        scheduleLiveBrowserPreview(reason: "navigation_finished", minimumInterval: 0.25)
+        scheduleLiveBrowserPreview(reason: "navigation_finished")
     }
 
     func browserWebViewDidFailNavigation(_ source: WKWebView) {
@@ -7387,7 +7388,7 @@ final class BrowserWebSearchService: NSObject {
         resolveNavigation(false)
         notifyActiveBrowserDidChange()
         notifyHumanVerificationStateIfNeeded(from: source)
-        scheduleLiveBrowserPreview(reason: "navigation_failed", minimumInterval: 0.25)
+        scheduleLiveBrowserPreview(reason: "navigation_failed")
     }
 
     func currentAutomationBrowserURL() -> URL {
@@ -7407,7 +7408,7 @@ final class BrowserWebSearchService: NSObject {
         lastScrollAt = Date()
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            scheduleLiveBrowserPreview(reason: "verification_poll", minimumInterval: 1.2)
+            scheduleLiveBrowserPreview(reason: "verification_poll")
             if let probe = await evaluateJSONObject(Self.visibleChallengeProbeScript()) {
                 let detected = Self.boolValue(probe["detected"]) == true
                 let completed = Self.boolValue(probe["completed"]) == true
@@ -7435,7 +7436,7 @@ final class BrowserWebSearchService: NSObject {
                     completedProbe["completed"] = true
                     completedProbe["detected"] = false
                     notifyHumanVerificationState(completedProbe)
-                    scheduleLiveBrowserPreview(reason: "verification_completed", minimumInterval: 0.2)
+                    scheduleLiveBrowserPreview(reason: "verification_completed")
                     return true
                 }
 
@@ -7449,7 +7450,7 @@ final class BrowserWebSearchService: NSObject {
                     completedProbe["detected"] = false
                     completedProbe["completed"] = true
                     notifyHumanVerificationState(completedProbe)
-                    scheduleLiveBrowserPreview(reason: "verification_completed", minimumInterval: 0.2)
+                    scheduleLiveBrowserPreview(reason: "verification_completed")
                     return true
                 }
 
@@ -7555,7 +7556,8 @@ final class BrowserWebSearchService: NSObject {
     private func scheduleLiveBrowserPreview(reason: String, minimumInterval: TimeInterval = 1.0) {
         guard webView != nil else { return }
         guard browserLivePreviewTask == nil else { return }
-        let delay = max(0, minimumInterval - Date().timeIntervalSince(browserLivePreviewLastPublishedAt))
+        let effectiveMinimumInterval = max(minimumInterval, browserLivePreviewMinimumInterval)
+        let delay = max(0, effectiveMinimumInterval - Date().timeIntervalSince(browserLivePreviewLastPublishedAt))
         browserLivePreviewTask = Task { @MainActor [weak self] in
             if delay > 0 {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -7589,20 +7591,18 @@ final class BrowserWebSearchService: NSObject {
         do {
             let folder = try browserOutputDirectory()
             let revision = browserLivePreviewRevision + 1
-            let fileURL = folder.appendingPathComponent("browser_live_\(activeBrowserTabID)_\(revision).jpg")
+            let fileURL = folder.appendingPathComponent("browser_live_\(activeBrowserTabID).jpg")
             try data.write(to: fileURL, options: [.atomic])
-            if let previous = browserLivePreviewFileURL, previous != fileURL {
-                try? FileManager.default.removeItem(at: previous)
-            }
             browserLivePreviewRevision = revision
             browserLivePreviewLastPublishedAt = Date()
             browserLivePreviewFileURL = fileURL
             try? Self.pruneTemporaryBrowserOutputFiles(in: folder)
+            let stableReference = fileURL.absoluteString + "#rev=\(revision)"
             NotificationCenter.default.post(
                 name: .browserWebSearchServiceLivePreviewDidChange,
                 object: wv,
                 userInfo: [
-                    "thumbnail_url": fileURL.absoluteString,
+                    "thumbnail_url": stableReference,
                     "thumbnail_path": fileURL.path,
                     "revision": revision,
                     "reason": reason,
@@ -9161,7 +9161,7 @@ final class BrowserWebSearchService: NSObject {
                 "tabs": browserTabSnapshots()
             ]
         )
-        scheduleLiveBrowserPreview(reason: "active_browser_changed", minimumInterval: 0.45)
+        scheduleLiveBrowserPreview(reason: "active_browser_changed")
     }
 
     private func browserTabSnapshots() -> [BrowserWebSearchTabSnapshot] {
@@ -10012,10 +10012,10 @@ extension BrowserWebSearchService: WKNavigationDelegate, WKUIDelegate {
                 self.mountActiveBrowserIfPresented()
                 tab.load(URLRequest(url: url))
                 self.notifyActiveBrowserDidChange()
-                self.scheduleLiveBrowserPreview(reason: "popup_new_tab", minimumInterval: 0.25)
+                self.scheduleLiveBrowserPreview(reason: "popup_new_tab")
             } else {
                 source.load(URLRequest(url: url))
-                self.scheduleLiveBrowserPreview(reason: "popup_same_tab", minimumInterval: 0.25)
+                self.scheduleLiveBrowserPreview(reason: "popup_same_tab")
             }
         }
         return nil
