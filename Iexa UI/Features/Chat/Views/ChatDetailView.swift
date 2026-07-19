@@ -14045,9 +14045,7 @@ private struct AgentFloatingStepPreviewSheet: View {
     private var controlPanel: some View {
         VStack(spacing: 14) {
             HStack(spacing: 12) {
-                Image(systemName: selectedStep?.failed == true ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
-                    .scaledFont(size: 27, weight: .semibold)
-                    .foregroundStyle(selectedStep?.failed == true ? .orange : theme.success)
+                controlStatusIcon
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Iexa is using \(toolCategory(for: selectedStep))")
@@ -14061,6 +14059,8 @@ private struct AgentFloatingStepPreviewSheet: View {
                 }
 
                 Spacer(minLength: 0)
+
+                stepStartTimeView
             }
 
             HStack {
@@ -14102,6 +14102,58 @@ private struct AgentFloatingStepPreviewSheet: View {
         .background(theme.surfaceContainer.opacity(theme.isDark ? 0.92 : 0.98))
     }
 
+
+    @ViewBuilder
+    private var controlStatusIcon: some View {
+        if selectedStep?.isRunning == true && selectedStep?.failed != true {
+            AgentRotatingProgressIcon(size: 27, lineWidth: 3)
+                .accessibilityLabel("运行中")
+        } else {
+            let failed = selectedStep?.failed == true
+            Image(systemName: failed ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                .scaledFont(size: 27, weight: .semibold)
+                .foregroundStyle(failed ? .orange : theme.success)
+                .accessibilityLabel(failed ? "执行失败" : "已完成")
+        }
+    }
+
+    @ViewBuilder
+    private var stepStartTimeView: some View {
+        if let startedAt = selectedStepStartedAt {
+            Text(Self.stepStartTimeString(from: startedAt))
+                .scaledFont(size: 13, weight: .semibold, design: .rounded)
+                .monospacedDigit()
+                .foregroundStyle(theme.isDark ? Color.white.opacity(0.74) : Color.black.opacity(0.66))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(theme.isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.055))
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.07), lineWidth: 0.6)
+                )
+                .accessibilityLabel("开始运行时间 \(Self.stepStartTimeString(from: startedAt))")
+                .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    private var selectedStepStartedAt: Date? {
+        guard let step = selectedStep else { return nil }
+        if let durationStartedAt = step.durationStartedAt {
+            return durationStartedAt
+        }
+        guard step.sortOrder > 1_500_000_000,
+              step.sortOrder < 4_000_000_000 else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: step.sortOrder)
+    }
+
+    private static func stepStartTimeString(from date: Date) -> String {
+        date.formatted(.dateTime.hour().minute())
+    }
     private var previewScrollSignature: Int {
         guard let step = selectedStep else { return 0 }
         var signature = step.id.hashValue
