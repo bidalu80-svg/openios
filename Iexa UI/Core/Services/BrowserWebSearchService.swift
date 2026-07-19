@@ -1289,7 +1289,7 @@ final class BrowserWebSearchService: NSObject {
             payload["image_path"] = screenshot.path
             payload["file_path"] = screenshot.path
             payload["file_name"] = screenshot.lastPathComponent
-            payload["content_type"] = "image/png"
+            payload["content_type"] = "image/jpeg"
         }
         return payload
     }
@@ -7496,14 +7496,15 @@ final class BrowserWebSearchService: NSObject {
                     continuation.resume(returning: nil)
                     return
                 }
-                guard let image, let data = image.pngData() else {
+                guard let image, let data = Self.lightweightBrowserThumbnailImageData(from: image) else {
                     continuation.resume(returning: nil)
                     return
                 }
                 do {
                     let folder = try self.browserOutputDirectory()
-                    let fileURL = folder.appendingPathComponent("\(prefix)_\(Int(Date().timeIntervalSince1970 * 1000)).png")
+                    let fileURL = folder.appendingPathComponent("\(prefix)_\(Int(Date().timeIntervalSince1970 * 1000)).jpg")
                     try data.write(to: fileURL, options: [.atomic])
+                    try? Self.pruneTemporaryBrowserOutputFiles(in: folder.deletingLastPathComponent())
                     continuation.resume(returning: fileURL)
                 } catch {
                     self.logger.debug("Browser snapshot write failed: \(error.localizedDescription, privacy: .public)")
@@ -7558,6 +7559,7 @@ final class BrowserWebSearchService: NSObject {
             browserLivePreviewRevision = revision
             browserLivePreviewLastPublishedAt = Date()
             browserLivePreviewFileURL = fileURL
+            try? Self.pruneTemporaryBrowserOutputFiles(in: folder.deletingLastPathComponent())
             NotificationCenter.default.post(
                 name: .browserWebSearchServiceLivePreviewDidChange,
                 object: wv,
@@ -7594,6 +7596,26 @@ final class BrowserWebSearchService: NSObject {
             image.draw(in: CGRect(origin: .zero, size: targetSize))
         }
         return rendered.jpegData(compressionQuality: 0.58)
+    }
+
+    private static func lightweightBrowserThumbnailImageData(from image: UIImage) -> Data? {
+        let maxSide: CGFloat = 900
+        let longestSide = max(image.size.width, image.size.height)
+        let scale = min(1, maxSide / max(longestSide, 1))
+        let targetSize = CGSize(
+            width: max(1, floor(image.size.width * scale)),
+            height: max(1, floor(image.size.height * scale))
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        let rendered = renderer.image { context in
+            context.cgContext.setFillColor(UIColor.white.cgColor)
+            context.cgContext.fill(CGRect(origin: .zero, size: targetSize))
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return rendered.jpegData(compressionQuality: 0.64)
     }
 
     private func captureViewportScreenshot(prefix: String, scrollY: Int? = nil) async -> URL? {
@@ -7633,6 +7655,7 @@ final class BrowserWebSearchService: NSObject {
             let folder = try browserOutputDirectory()
             let fileURL = folder.appendingPathComponent("\(prefix)_\(Int(Date().timeIntervalSince1970 * 1000)).jpg")
             try data.write(to: fileURL, options: [.atomic])
+            try? Self.pruneTemporaryBrowserOutputFiles(in: folder.deletingLastPathComponent())
             return fileURL
         } catch {
             logger.debug("Browser viewport snapshot write failed: \(error.localizedDescription, privacy: .public)")
@@ -7731,17 +7754,37 @@ final class BrowserWebSearchService: NSObject {
                 context.cgContext.restoreGState()
             }
         }
-        guard let data = stitched.pngData() else { return nil }
+        guard let data = Self.lightweightBrowserFullPageImageData(from: stitched) else { return nil }
         do {
             let folder = try browserOutputDirectory()
             let suffix = contentHeight > maxCaptureHeight ? "_truncated" : ""
-            let fileURL = folder.appendingPathComponent("\(prefix)\(suffix)_\(Int(Date().timeIntervalSince1970 * 1000)).png")
+            let fileURL = folder.appendingPathComponent("\(prefix)\(suffix)_\(Int(Date().timeIntervalSince1970 * 1000)).jpg")
             try data.write(to: fileURL, options: [.atomic])
+            try? Self.pruneTemporaryBrowserOutputFiles(in: folder.deletingLastPathComponent())
             return fileURL
         } catch {
             logger.debug("Browser full-page snapshot write failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
+    }
+
+    private static func lightweightBrowserFullPageImageData(from image: UIImage) -> Data? {
+        let maxWidth: CGFloat = 900
+        let scale = min(1, maxWidth / max(image.size.width, 1))
+        let targetSize = CGSize(
+            width: max(1, floor(image.size.width * scale)),
+            height: max(1, floor(image.size.height * scale))
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        let rendered = renderer.image { context in
+            context.cgContext.setFillColor(UIColor.white.cgColor)
+            context.cgContext.fill(CGRect(origin: .zero, size: targetSize))
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return rendered.jpegData(compressionQuality: 0.62)
     }
 
     private func captureVisibleWebViewImage(width: CGFloat, height: CGFloat) async -> UIImage? {
@@ -7791,19 +7834,21 @@ final class BrowserWebSearchService: NSObject {
             "browser_find_focus_",
             "browser_full_",
             "browser_image_timeout_",
-            "search_"
+            "search_",
+            "configured_search_"
         ]
-        let maxTemporaryFiles = 80
-        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        let maxTemporaryFiles = 36
+        let maxTemporaryBytes: Int64 = 24 * 1024 * 1024
+        let cutoff = Date().addingTimeInterval(-6 * 60 * 60)
         guard let enumerator = fileManager.enumerator(
             at: root,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey, .isRegularFileKey],
+            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey, .isRegularFileKey, .fileSizeKey],
             options: [.skipsHiddenFiles]
         ) else { return }
         var directories: [URL] = []
-        var temporaryFiles: [(url: URL, modified: Date)] = []
+        var temporaryFiles: [(url: URL, modified: Date, bytes: Int64)] = []
         for case let url as URL in enumerator {
-            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey, .isRegularFileKey])
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey, .isRegularFileKey, .fileSizeKey])
             if values?.isDirectory == true {
                 directories.append(url)
                 continue
@@ -7815,7 +7860,7 @@ final class BrowserWebSearchService: NSObject {
                   let modified = values?.contentModificationDate else {
                 continue
             }
-            temporaryFiles.append((url, modified))
+            temporaryFiles.append((url, modified, Int64(values?.fileSize ?? 0)))
             if modified < cutoff {
                 try? fileManager.removeItem(at: url)
             }
@@ -7823,9 +7868,16 @@ final class BrowserWebSearchService: NSObject {
         let retained = temporaryFiles
             .filter { $0.modified >= cutoff }
             .sorted { $0.modified > $1.modified }
-        if retained.count > maxTemporaryFiles {
-            for item in retained.dropFirst(maxTemporaryFiles) {
+        var keptCount = 0
+        var keptBytes: Int64 = 0
+        for item in retained {
+            let wouldExceedCount = keptCount >= maxTemporaryFiles
+            let wouldExceedBytes = keptCount > 0 && keptBytes + item.bytes > maxTemporaryBytes
+            if wouldExceedCount || wouldExceedBytes {
                 try? fileManager.removeItem(at: item.url)
+            } else {
+                keptCount += 1
+                keptBytes += item.bytes
             }
         }
         for directory in directories.sorted(by: { $0.pathComponents.count > $1.pathComponents.count }) {

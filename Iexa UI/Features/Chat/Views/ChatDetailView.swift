@@ -12713,7 +12713,7 @@ private struct AgentToolPreviewThumbnail: View {
         if let webTarget = agentToolWebPreviewTarget(from: reference) {
             AgentToolPreviewWebThumbnail(target: webTarget)
                 .frame(width: size.width, height: size.height)
-        } else if let image = Self.localImage(from: reference) {
+        } else if let image = Self.localImage(from: reference, targetSize: size) {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
@@ -12751,20 +12751,76 @@ private struct AgentToolPreviewThumbnail: View {
         }
     }
 
-    private static func localImage(from reference: String) -> UIImage? {
+    private static let localImageCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 80
+        cache.totalCostLimit = 12 * 1024 * 1024
+        return cache
+    }()
+
+    private static func localImage(from reference: String, targetSize: CGSize) -> UIImage? {
         let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetPixelSize = max(
+            80,
+            ceil(max(targetSize.width, targetSize.height) * UIScreen.main.scale)
+        )
         if trimmed.hasPrefix("data:image/"),
            let comma = trimmed.firstIndex(of: ",") {
             let encoded = String(trimmed[trimmed.index(after: comma)...])
-            return Data(base64Encoded: encoded, options: .ignoreUnknownCharacters).flatMap(UIImage.init(data:))
+            guard let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters) else { return nil }
+            return downsampledImage(from: data, targetPixelSize: targetPixelSize)
         }
         if let url = URL(string: trimmed), url.isFileURL {
-            return UIImage(contentsOfFile: url.path)
+            return cachedDownsampledImage(from: url, targetPixelSize: targetPixelSize)
         }
         if FileManager.default.fileExists(atPath: trimmed) {
-            return UIImage(contentsOfFile: trimmed)
+            return cachedDownsampledImage(from: URL(fileURLWithPath: trimmed), targetPixelSize: targetPixelSize)
         }
         return nil
+    }
+
+    private static func cachedDownsampledImage(from url: URL, targetPixelSize: CGFloat) -> UIImage? {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+            .contentModificationDate?
+            .timeIntervalSince1970 ?? 0
+        let cacheKey = "\(url.path)|\(Int(modified))|\(Int(targetPixelSize.rounded()))" as NSString
+        if let cached = localImageCache.object(forKey: cacheKey) {
+            return cached
+        }
+        guard let image = downsampledImage(from: url, targetPixelSize: targetPixelSize) else {
+            if !fileManager.fileExists(atPath: url.path) {
+                localImageCache.removeObject(forKey: cacheKey)
+            }
+            return nil
+        }
+        let cost = Int(image.size.width * image.size.height * max(image.scale, 1) * max(image.scale, 1) * 4)
+        localImageCache.setObject(image, forKey: cacheKey, cost: cost)
+        return image
+    }
+
+    private static func downsampledImage(from url: URL, targetPixelSize: CGFloat) -> UIImage? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else { return nil }
+        return downsampledImage(from: source, targetPixelSize: targetPixelSize)
+    }
+
+    private static func downsampledImage(from data: Data, targetPixelSize: CGFloat) -> UIImage? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, options) else { return nil }
+        return downsampledImage(from: source, targetPixelSize: targetPixelSize)
+    }
+
+    private static func downsampledImage(from source: CGImageSource, targetPixelSize: CGFloat) -> UIImage? {
+        let options = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(80, Int(targetPixelSize.rounded()))
+        ] as CFDictionary
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
+        return UIImage(cgImage: cgImage)
     }
 }
 

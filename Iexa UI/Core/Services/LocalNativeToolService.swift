@@ -764,11 +764,14 @@ final class LocalNativeToolService {
         }
         if attachFile, let previews = result["preview_images"] as? [String] {
             for (index, preview) in previews.prefix(6).enumerated() {
+                let lowercasedPreview = preview.lowercased()
+                let previewIsJPEG = lowercasedPreview.hasSuffix(".jpg") || lowercasedPreview.hasSuffix(".jpeg")
+                let previewExtension = previewIsJPEG ? "jpg" : "png"
                 files.append(ChatMessageFile(
                     type: "image",
                     url: preview,
-                    name: "preview-\(index + 1).png",
-                    contentType: "image/png"
+                    name: "preview-\(index + 1).\(previewExtension)",
+                    contentType: previewIsJPEG ? "image/jpeg" : "image/png"
                 ))
             }
         }
