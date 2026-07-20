@@ -80,7 +80,7 @@ final class LocalAlpineEnvironmentStore: @unchecked Sendable {
         value: String,
         note rawNote: String
     ) throws {
-        let key = try normalizedKey(rawKey)
+        let key = try Self.normalizedKey(rawKey)
         let note = rawNote.trimmingCharacters(in: .whitespacesAndNewlines)
         let variableId = id ?? UUID().uuidString
 
