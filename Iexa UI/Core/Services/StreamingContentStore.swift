@@ -27,6 +27,14 @@ final class StreamingContentStore {
     /// Views should read THIS property, not `streamingContent`.
     var displayContent: String = ""
 
+    /// Reasoning is a separate stream channel.  It must not be encoded into
+    /// `streamingContent`: the latter is also the source used for tool-call
+    /// parsing and continuation requests.
+    private(set) var streamingReasoningContent: String = ""
+
+    /// Whether the reasoning channel has received its terminal event.
+    private(set) var streamingReasoningDone: Bool = false
+
     /// Status history (tool calls, web search progress, etc.)
     var streamingStatusHistory: [ChatStatusUpdate] = []
 
@@ -199,6 +207,8 @@ final class StreamingContentStore {
         streamingContent = ""
         presentationContent = nil
         displayContent = ""
+        streamingReasoningContent = ""
+        streamingReasoningDone = false
         frozenToolBoundaryOffset = 0
         frozenProseBoundaryOffset = 0
         streamingStatusHistory = initialStatusHistory
@@ -232,6 +242,18 @@ final class StreamingContentStore {
             lastKnownTotal = displaySource.count
             drainAccumulator = 0
             steadyRate = 0
+        }
+    }
+
+    /// Updates the independently streamed reasoning state.  Unlike ordinary
+    /// message content, this is rendered through `AssistantMessageContent`
+    /// immediately and is never fed back into the tool/agent protocol.
+    func updateReasoning(content: String?, done: Bool?) {
+        if let content {
+            streamingReasoningContent = content
+        }
+        if let done {
+            streamingReasoningDone = done
         }
     }
 
@@ -362,6 +384,8 @@ final class StreamingContentStore {
         streamingContent = ""
         presentationContent = nil
         displayContent = ""
+        streamingReasoningContent = ""
+        streamingReasoningDone = false
         frozenToolBoundaryOffset = 0
         frozenProseBoundaryOffset = 0
         streamingStatusHistory = []

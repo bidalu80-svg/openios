@@ -111,6 +111,65 @@ function Get-ChangedPaths {
     return $items
 }
 
+function Get-ChangedPathsAgainstRemoteTree {
+    param(
+        [string]$Repo,
+        [string]$BaseCommitSha
+    )
+
+    # A locally trusted ancestor can be absent from GitHub after an earlier
+    # API-only update.  In that case diffing against a local commit is not
+    # enough: compare the complete local HEAD tree with the remote branch tree
+    # so the API commit has exactly the same content as local HEAD.
+    $baseCommit = Invoke-GhApi GET "repos/$Repo/git/commits/$BaseCommitSha" | ConvertFrom-Json
+    $baseTreeSha = $baseCommit.tree.sha
+    if (-not $baseTreeSha) {
+        throw "Could not resolve the tree for remote base commit $BaseCommitSha."
+    }
+    $remoteTree = Invoke-GhApi GET "repos/$Repo/git/trees/${baseTreeSha}?recursive=1" | ConvertFrom-Json
+    if ($remoteTree.truncated) {
+        throw "Remote tree is truncated; refusing an incomplete API sync."
+    }
+
+    $remoteEntries = @{}
+    foreach ($entry in $remoteTree.tree) {
+        if ($entry.type -eq "blob") {
+            $remoteEntries[$entry.path] = $entry
+        }
+    }
+
+    $localEntries = @{}
+    # Keep non-ASCII repository paths (for example Chinese asset names) as
+    # their real Unicode paths rather than Git's quoted octal representation.
+    $lines = & git -c core.quotepath=false ls-tree -r HEAD
+    if ($LASTEXITCODE -ne 0) {
+        throw "git ls-tree -r HEAD failed"
+    }
+    foreach ($line in $lines) {
+        if ($line -match '^(\d+)\s+blob\s+([0-9a-f]+)\t(.+)$') {
+            $localEntries[$Matches[3]] = [pscustomobject]@{
+                Mode = $Matches[1]
+                Sha = $Matches[2]
+            }
+        }
+    }
+
+    $items = [System.Collections.Generic.List[object]]::new()
+    foreach ($path in $localEntries.Keys) {
+        $local = $localEntries[$path]
+        $remote = $remoteEntries[$path]
+        if ($null -eq $remote -or $remote.sha -ne $local.Sha -or $remote.mode -ne $local.Mode) {
+            $items.Add([pscustomobject]@{ Status = "M"; Path = $path }) | Out-Null
+        }
+    }
+    foreach ($path in $remoteEntries.Keys) {
+        if (-not $localEntries.ContainsKey($path)) {
+            $items.Add([pscustomobject]@{ Status = "D"; Path = $path }) | Out-Null
+        }
+    }
+    return $items
+}
+
 function New-GitHubBlob {
     param(
         [string]$Repo,
@@ -169,12 +228,21 @@ function Publish-HeadWithGitHubApi {
 
     $baseIsUsable = (Test-GitQuiet cat-file "-e" "$baseSha^{commit}") -and
         (Test-GitQuiet merge-base --is-ancestor $baseSha HEAD)
+    $syncEntireRemoteTree = $false
     if (-not $baseIsUsable) {
-        Write-Host "Remote base $baseSha is not an ancestor of local HEAD; using trusted base $FallbackBaseSha and force-updating $BranchName."
-        $baseSha = $FallbackBaseSha
+        if (-not $remoteSha) {
+            throw "Remote branch $BranchName has no usable base for an API tree sync."
+        }
+        Write-Host "Remote base $remoteSha is not an ancestor of local HEAD; synchronizing the complete remote tree to local HEAD content."
+        $baseSha = $remoteSha
+        $syncEntireRemoteTree = $true
     }
 
-    $changes = @(Get-ChangedPaths -BaseSha $baseSha)
+    $changes = if ($syncEntireRemoteTree) {
+        @(Get-ChangedPathsAgainstRemoteTree -Repo $repo -BaseCommitSha $baseSha)
+    } else {
+        @(Get-ChangedPaths -BaseSha $baseSha)
+    }
     if ($changes.Count -eq 0) {
         Write-Host "Remote branch is already up to date with local HEAD content."
         return $baseSha
@@ -202,8 +270,16 @@ function Publish-HeadWithGitHubApi {
         }
     }
 
+    # The Git Data API accepts a tree object here, not the commit SHA used as
+    # the parent/ref base above. Resolve it explicitly so API publishing works
+    # when the remote branch is reconstructed from a trusted local base.
+    $baseTreeSha = ((Invoke-GhApi GET "repos/$repo/git/commits/$baseSha" | ConvertFrom-Json).tree.sha)
+    if (-not $baseTreeSha) {
+        throw "Could not resolve the tree for base commit $baseSha."
+    }
+
     $treeSha = ((Invoke-GhApi POST "repos/$repo/git/trees" @{
-        base_tree = $baseSha
+        base_tree = $baseTreeSha
         tree = $tree
     } | ConvertFrom-Json).sha)
 

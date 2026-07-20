@@ -615,7 +615,6 @@ final class ChatViewModel {
     private static let localNativeBrowserSearchSoftLimit = 5
     private static let localNativeBrowserReadableSoftLimit = 5
     private static let localBrowserVerificationContinuationLimit = 12
-    private static let localNativeBrowserForcedContinuationLimit = 24
     private static let localAlpineBrowserFailureSoftLimit = 5
     private static let localAlpineBrowserToolSoftLimit = 36
     private static let localAlpineBrowserSearchSoftLimit = 5
@@ -6306,6 +6305,7 @@ final class ChatViewModel {
 
         // --- Content/streaming events: only process when NOT self-initiated ---
         guard !selfInitiatedStream else { return }
+        guard !Self.payloadContainsStructuredToolProtocol(payload ?? data) else { return }
 
         // Extract content from events. Handle both message AND chat:completion
         // event types, using replace-if-longer to prevent duplication.
@@ -11447,7 +11447,7 @@ final class ChatViewModel {
             self.socketHasReceivedContent = true
             self.updateAssistantMessage(
                 id: msgId,
-                content: snapshot.renderedContent,
+                content: snapshot.bodyContent,
                 isStreaming: true,
                 reasoningContent: snapshot.reasoningContent,
                 reasoningDone: snapshot.reasoningDone
@@ -11472,7 +11472,7 @@ final class ChatViewModel {
                     didAppend = true
                 }
                 let content = payload["content"] as? String ?? ""
-                if !content.isEmpty {
+                if !Self.payloadContainsStructuredToolProtocol(payload), !content.isEmpty {
                     // Append directly — the accumulator dispatches to
                     // the main actor immediately on every token.
                     acc.append(content)
@@ -11506,7 +11506,9 @@ final class ChatViewModel {
                     acc.appendReasoning(reasoning)
                     didAppend = true
                 }
-                if let content = payload["content"] as? String, !content.isEmpty {
+                if !Self.payloadContainsStructuredToolProtocol(payload),
+                   let content = payload["content"] as? String,
+                   !content.isEmpty {
                     acc.append(content)
                     didAppend = true
                 }
@@ -11553,7 +11555,7 @@ final class ChatViewModel {
             guard let self, !self.hasFinishedStreaming else { return }
             self.updateAssistantMessage(
                 id: messageId,
-                content: Self.cleanedInternalPromptArtifacts(snapshot.renderedContent),
+                content: Self.cleanedInternalPromptArtifacts(snapshot.bodyContent),
                 isStreaming: true,
                 reasoningContent: snapshot.reasoningContent,
                 reasoningDone: snapshot.reasoningDone
@@ -12556,9 +12558,6 @@ final class ChatViewModel {
         var executedAnyTool = false
         var browserToolCount = 0
         var browserSearchCount = 0
-        var pendingBrowserContinuationCall: LocalAlpineNativeToolCall?
-        var forcedLatestUserBrowserCall = forcedBrowserContinuationToolCallFromLatestUser()
-        var forcedBrowserContinuationCount = 0
 
         func streamFinalWithoutLocalAlpineTools(reason: String, fallback: String?) async throws -> [String: Any]? {
             apiMessages.append([
@@ -12611,32 +12610,7 @@ final class ChatViewModel {
             }
             if Task.isCancelled { return exactUsage }
 
-            var calls = toolAccumulator.completedCalls()
-            if !executedAnyTool,
-               let userBrowserCall = forcedLatestUserBrowserCall,
-               !calls.contains(where: Self.isLocalAlpineBrowserUseToolCall) {
-                forcedLatestUserBrowserCall = nil
-                if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    acc.replace("")
-                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
-                }
-                calls = [userBrowserCall]
-            } else if calls.isEmpty,
-               let continuationCall = pendingBrowserContinuationCall,
-               forcedBrowserContinuationCount < Self.localNativeBrowserForcedContinuationLimit {
-                forcedBrowserContinuationCount += 1
-                pendingBrowserContinuationCall = nil
-                if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    acc.replace("")
-                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
-                }
-                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage(
-                    suggestedCall: continuationCall
-                ))
-                continue
-            } else if !calls.isEmpty {
-                pendingBrowserContinuationCall = nil
-            }
+            let calls = toolAccumulator.completedCalls()
             guard !calls.isEmpty else {
                 if !executedAnyTool,
                    acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -12699,11 +12673,6 @@ final class ChatViewModel {
                     if call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "web_search" {
                         browserSearchCount += 1
                     }
-                    pendingBrowserContinuationCall = Self.localNativeBrowserContinuationToolCallIfNeeded(
-                        after: call,
-                        toolContent: Self.localAlpineNativeToolResultContent(result),
-                        latestUserPrompt: latestUserBrowserAutomationPrompt()
-                    )
                 }
                 var content = Self.localAlpineNativeToolResultContent(result)
                 if let message = Self.localAlpineNativeLoopGuardModelMessage(preExecutionWarning) {
@@ -12728,7 +12697,6 @@ final class ChatViewModel {
                     browserToolCount: browserToolCount,
                     browserSearchCount: browserSearchCount
                 ) {
-                    pendingBrowserContinuationCall = nil
                     needsFinalAnswerWithoutTools = true
                     finalAnswerFallback = Self.localAlpineNativeToolFallbackMessage(call, result: result)
                     skipRemainingToolMessage = "浏览器工具已经返回足够结果。请直接根据已有浏览器结果回答用户，不要继续调用工具。"
@@ -12834,9 +12802,6 @@ final class ChatViewModel {
         var browserToolCount = 0
         var lastNativeToolFallback: String?
         var executedAnyTool = false
-        var pendingBrowserContinuationCall: LocalAlpineNativeToolCall?
-        var forcedLatestUserBrowserCall = forcedBrowserContinuationToolCallFromLatestUser()
-        var forcedBrowserContinuationCount = 0
 
         func streamFinalWithoutTools(reason: String, fallback: String?) async throws -> [String: Any]? {
             let resolvedFallback = fallback ?? lastNativeToolFallback
@@ -12890,33 +12855,8 @@ final class ChatViewModel {
             }
             if Task.isCancelled { return exactUsage }
 
-            var calls = toolAccumulator.completedCalls()
+            let calls = toolAccumulator.completedCalls()
                 .filter(Self.isLocalNativeFunctionToolCall)
-            if !executedAnyTool,
-               let userBrowserCall = forcedLatestUserBrowserCall,
-               !calls.contains(where: Self.isLocalAlpineBrowserUseToolCall) {
-                forcedLatestUserBrowserCall = nil
-                if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    acc.replace("")
-                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
-                }
-                calls = [userBrowserCall]
-            } else if calls.isEmpty,
-               let continuationCall = pendingBrowserContinuationCall,
-               forcedBrowserContinuationCount < Self.localNativeBrowserForcedContinuationLimit {
-                forcedBrowserContinuationCount += 1
-                pendingBrowserContinuationCall = nil
-                if !acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    acc.replace("")
-                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
-                }
-                apiMessages.append(Self.localNativeBrowserForcedContinuationSystemMessage(
-                    suggestedCall: continuationCall
-                ))
-                continue
-            } else if !calls.isEmpty {
-                pendingBrowserContinuationCall = nil
-            }
             guard !calls.isEmpty else {
                 if !executedAnyTool,
                    acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -13022,16 +12962,10 @@ final class ChatViewModel {
                         browserReadCount += 1
                     }
                     lastNativeToolFallback = Self.localNativeBrowserFallbackMessage(from: execution.toolContent)
-                    pendingBrowserContinuationCall = Self.localNativeBrowserContinuationToolCallIfNeeded(
-                        after: call,
-                        toolContent: execution.toolContent,
-                        latestUserPrompt: latestUserBrowserAutomationPrompt()
-                    )
                     if Self.localNativeBrowserToolResultShouldStop(call, toolContent: execution.toolContent)
                         || browserToolCount >= Self.localNativeBrowserToolSoftLimit
                         || (browserKind == .search && browserSearchCount >= Self.localNativeBrowserSearchSoftLimit)
                         || (browserKind == .readable && browserReadCount >= Self.localNativeBrowserReadableSoftLimit) {
-                        pendingBrowserContinuationCall = nil
                         needsFinalAnswerWithoutTools = true
                         finalAnswerFallback = lastNativeToolFallback
                     }
@@ -13855,76 +13789,9 @@ final class ChatViewModel {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func shouldForceBrowserToolRetryForLatestUser() -> Bool {
-        guard isLocalBrowserNativeToolsEnabled,
-              let latestPrompt = latestUserBrowserAutomationPrompt(),
-              !latestPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return false
-        }
-        return hasLocalBrowserContinuationState()
-            || (Self.browserPromptLooksLikeOpenThenOperate(latestPrompt)
-                && Self.browserAutomationOpenURL(from: latestPrompt) != nil)
-    }
-
     private func hasLocalBrowserContinuationState() -> Bool {
         hasRecentLocalBrowserActivityForContinuation()
             || BrowserWebSearchService.shared.hasActiveBrowserPageForContinuation
-    }
-
-    private func forcedBrowserContinuationToolCallFromLatestUser() -> LocalAlpineNativeToolCall? {
-        guard shouldForceBrowserToolRetryForLatestUser() else {
-            return nil
-        }
-        let latestPrompt = latestUserBrowserAutomationPrompt() ?? ""
-        let shouldOperate = Self.browserPromptLooksLikeCurrentPageContinuation(latestPrompt)
-            || Self.browserPromptLooksLikeOpenThenOperate(latestPrompt)
-        let initialURL = Self.browserAutomationOpenURL(from: latestPrompt)
-        let inputText = Self.browserAutomationInputText(from: latestPrompt)
-            .flatMap { Self.browserAutomationOperandLooksLikeSiteOnly($0) ? nil : $0 }
-        let clickTarget = Self.browserAutomationClickTarget(from: latestPrompt)
-        let initialStage = initialURL == nil ? "find_input" : "automation_start"
-        var arguments: [String: Any] = [
-            "tool_title": shouldOperate ? "继续操作当前网页" : "观察当前网页",
-            "action": initialURL == nil ? "find_elements" : "navigate",
-            "scan_page": true,
-            "screenshot": false,
-            "capture_visuals": false,
-            "attach_preview": false,
-            "force_reload": false,
-            "forceReload": false,
-            "reload": false,
-            "max_scrolls": 10,
-            "max_loops": 8,
-            "user_prompt": latestPrompt
-        ]
-        if let initialURL {
-            arguments["url"] = initialURL
-        }
-        if shouldOperate,
-           let inputText {
-            arguments["text"] = inputText
-            arguments["press_enter"] = true
-            arguments["continuation_stage"] = initialStage
-        }
-        if shouldOperate,
-           let clickTarget {
-            arguments["button_text"] = clickTarget
-            arguments["target"] = clickTarget
-            if inputText == nil {
-                arguments["continuation_stage"] = initialURL == nil ? "find_click_target" : "automation_start"
-            }
-        }
-        guard JSONSerialization.isValidJSONObject(arguments),
-              let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
-              let argumentString = String(data: data, encoding: .utf8) else {
-            return nil
-        }
-
-        return LocalAlpineNativeToolCall(
-            id: "browser_user_\(UUID().uuidString)",
-            name: "browser_use",
-            arguments: argumentString
-        )
     }
 
     private func hasRecentLocalBrowserActivityForContinuation() -> Bool {
@@ -15532,33 +15399,6 @@ final class ChatViewModel {
         return cleaned.isEmpty ? "本地工具已停止继续执行。" : cleaned
     }
 
-    private static func localNativeBrowserForcedContinuationSystemMessage(
-        suggestedCall: LocalAlpineNativeToolCall? = nil
-    ) -> [String: Any] {
-        let suggestedInstruction: String
-        if let suggestedCall {
-            let arguments = suggestedCall.arguments.trimmingCharacters(in: .whitespacesAndNewlines)
-            suggestedInstruction = """
-
-            Suggested next primitive, for reference only:
-            tool: \(suggestedCall.name)
-            arguments: \(arguments.isEmpty ? "{}" : arguments)
-            The model must decide and emit the actual tool call itself; the app must not execute this suggestion directly.
-            """
-        } else {
-            suggestedInstruction = ""
-        }
-        return [
-            "role": "system",
-            "content": """
-            The previous browser result was an intermediate page-operation state, but the assistant did not issue the next browser tool call. The app is continuing the same shared browser session automatically.
-            Treat any previous prose as premature and discarded. Emit exactly one `browser_use` tool call now, with no visible prose before or after the tool call.
-            Continue from the current screenshot/read/result state. Do not navigate/reload the same URL unless explicitly required. Stop only after the user's page task is complete, a final file/result exists, or credentials, payment, or a destructive action requires user input.
-            If the suggested primitive matches the page state, use it as the next browser_use arguments; otherwise choose the next primitive from the current page evidence yourself.\(suggestedInstruction)
-            """
-        ]
-    }
-
     private static func normalizedBrowserResultActionName(_ raw: String) -> String {
         let normalized = raw
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -15643,6 +15483,13 @@ final class ChatViewModel {
         if browserToolResultNeedsMoreLoading(call: call, toolContent: toolContent) {
             return false
         }
+
+        // The browser result contract is authoritative. A `fetch` action can
+        // still be an intermediate download/inspection step, so it must never
+        // override the tool's explicit request to continue the same session.
+        if anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
+            return false
+        }
         if action == "browser.fetch" || action == "browser.wait_for_image" {
             return true
         }
@@ -15651,9 +15498,6 @@ final class ChatViewModel {
             return true
         }
 
-        if anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
-            return false
-        }
         if toolContent.localizedCaseInsensitiveContains("已下载网页资源") {
             return true
         }
@@ -15812,221 +15656,6 @@ final class ChatViewModel {
         return false
     }
 
-    private static func localNativeBrowserContinuationToolCallIfNeeded(
-        after call: LocalAlpineNativeToolCall,
-        toolContent: String,
-        latestUserPrompt: String?
-    ) -> LocalAlpineNativeToolCall? {
-        if call.name.trimmingCharacters(in: .whitespacesAndNewlines) == "web_search" {
-            guard anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true),
-                  !localNativeBrowserToolResultShouldStop(call, toolContent: toolContent) else {
-                return nil
-            }
-            var arguments: [String: Any] = [
-                "tool_title": "查看搜索结果",
-                "action": "find_elements",
-                "target": "search result result-title source link title snippet 搜索结果 来源 标题",
-                "clickable": true,
-                "scan_page": true,
-                "capture_visuals": false,
-                "screenshot": false,
-                "max_scrolls": 8,
-                "continuation_stage": "search_results_scan"
-            ]
-            if let query = firstJSONStringValue(in: toolContent, key: "query"),
-               !query.isEmpty {
-                arguments["query"] = query
-            }
-            let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
-            return LocalAlpineNativeToolCall(
-                id: "browser_continue_\(UUID().uuidString)",
-                name: "browser_use",
-                arguments: String(data: data, encoding: .utf8) ?? "{}"
-            )
-        }
-
-        let effectiveCall = normalizeBrowserAutomationToolCallIfNeeded(
-            call,
-            latestUserPrompt: latestUserPrompt
-        )
-        guard effectiveCall.name.trimmingCharacters(in: .whitespacesAndNewlines) == "browser_use" else {
-            return nil
-        }
-        let isInteractiveIntermediate = browserToolResultLooksLikeInteractiveIntermediate(
-            call: effectiveCall,
-            toolContent: toolContent
-        )
-        guard isInteractiveIntermediate else {
-            return nil
-        }
-        guard !localNativeBrowserToolResultShouldStop(effectiveCall, toolContent: toolContent) else {
-            return nil
-        }
-
-        let lowerContent = toolContent.lowercased()
-        let action = browserResultActionName(from: effectiveCall, toolContent: toolContent)
-        if (action == "browser.auto" || action == "browser.complete.task")
-            && (lowerContent.contains("自动流程未能输入文本")
-                || lowerContent.contains("自动流程未能点击目标按钮")
-                || lowerContent.contains("点击后没有验证到生成已开始")
-                || lowerContent.contains("自动流程已持续尝试")) {
-            return nil
-        }
-
-        var arguments = localAlpineNativeToolArguments(for: effectiveCall)
-        let continuationStage = firstNonEmptyString(
-            in: arguments,
-            keys: ["continuation_stage", "continuationStage"]
-        )?.lowercased() ?? ""
-        let requestedText = firstNonEmptyString(
-            in: arguments,
-            keys: ["text", "value", "input", "content", "message", "prompt", "query", "q", "keyword", "keywords"]
-        ).flatMap { browserAutomationOperandLooksLikeSiteOnly($0) ? nil : $0 }
-        let requestedClickTarget = firstNonEmptyString(
-            in: arguments,
-            keys: ["button_text", "buttonText", "button", "submit_label", "submitLabel", "click_label", "clickLabel", "target", "label"]
-        )
-        let focusedNodeID = browserFocusedNodeID(in: toolContent)
-        let hasExplicitContinuationTarget = requestedText != nil
-            || (requestedClickTarget?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
-        for key in ["url", "link", "href", "page_url", "source", "input_url"] {
-            arguments.removeValue(forKey: key)
-        }
-        arguments["force_reload"] = false
-        arguments["forceReload"] = false
-        arguments["reload"] = false
-
-        if browserToolResultNeedsMoreLoading(call: effectiveCall, toolContent: toolContent) {
-            arguments["action"] = "wait_for_dom_stable"
-            arguments["timeout"] = max(nativeToolIntValue(arguments["timeout"]) ?? 8, 8)
-            arguments["continuation_stage"] = "wait_for_loading"
-        } else if continuationStage == "automation_start",
-           requestedText != nil {
-            arguments["action"] = "find_elements"
-            arguments["scan_page"] = true
-            arguments["screenshot"] = false
-            arguments["capture_visuals"] = false
-            arguments["target"] = "search input textarea textbox query keyword 搜索 输入"
-            arguments["editable"] = true
-            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 10, 10)
-            arguments["continuation_stage"] = "find_input"
-        } else if continuationStage == "automation_start",
-                  let requestedClickTarget,
-                  !requestedClickTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            arguments["action"] = "find_elements"
-            arguments["scan_page"] = true
-            arguments["screenshot"] = false
-            arguments["capture_visuals"] = false
-            arguments["target"] = requestedClickTarget
-            arguments["button_text"] = requestedClickTarget
-            arguments["clickable"] = true
-            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 12, 12)
-            arguments["continuation_stage"] = "find_click_target"
-        } else if continuationStage == "find_input",
-                  let requestedText {
-            arguments["action"] = "type"
-            arguments["text"] = requestedText
-            if let focusedNodeID, !focusedNodeID.isEmpty {
-                arguments["node_id"] = focusedNodeID
-            }
-            arguments["target"] = "search input textarea textbox query keyword 搜索 输入"
-            arguments["press_enter"] = true
-            arguments["clear"] = true
-            arguments["continuation_stage"] = "typed_query"
-        } else if continuationStage == "typed_query",
-                  anyJSONBoolValue(in: toolContent, key: "ok", equals: true) {
-            arguments["action"] = "wait_for_dom_stable"
-            arguments["timeout"] = max(nativeToolIntValue(arguments["timeout"]) ?? 8, 8)
-            arguments["continuation_stage"] = "after_query_wait"
-        } else if continuationStage == "after_query_wait",
-                  let requestedClickTarget,
-                  !requestedClickTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            arguments["action"] = "find_elements"
-            arguments["scan_page"] = true
-            arguments["screenshot"] = false
-            arguments["capture_visuals"] = false
-            arguments["target"] = requestedClickTarget
-            arguments["button_text"] = requestedClickTarget
-            arguments["clickable"] = true
-            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 12, 12)
-            arguments["continuation_stage"] = "find_click_target"
-        } else if continuationStage == "after_query_wait" {
-            arguments["action"] = "get_text"
-            arguments["max_length"] = max(nativeToolIntValue(arguments["max_length"] ?? arguments["limit"]) ?? 32_000, 32_000)
-            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 18, 18)
-            arguments["continuation_stage"] = "final_read"
-        } else if continuationStage == "find_click_target",
-                  let requestedClickTarget,
-                  !requestedClickTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            arguments["action"] = "click"
-            if let focusedNodeID, !focusedNodeID.isEmpty {
-                arguments["node_id"] = focusedNodeID
-            }
-            arguments["label"] = requestedClickTarget
-            arguments["button_text"] = requestedClickTarget
-            arguments["target"] = requestedClickTarget
-            arguments["continuation_stage"] = "clicked_target"
-        } else if continuationStage == "clicked_target",
-                  anyJSONBoolValue(in: toolContent, key: "ok", equals: true) {
-            arguments["action"] = "wait_for_dom_stable"
-            arguments["timeout"] = max(nativeToolIntValue(arguments["timeout"]) ?? 8, 8)
-            arguments["continuation_stage"] = "after_click_wait"
-        } else if continuationStage == "after_click_wait" {
-            arguments["action"] = "get_text"
-            arguments["max_length"] = max(nativeToolIntValue(arguments["max_length"] ?? arguments["limit"]) ?? 32_000, 32_000)
-            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 20, 20)
-            arguments["continuation_stage"] = "final_read"
-        } else if ["browser.click", "browser.type", "browser.execute_js"].contains(action),
-           anyJSONBoolValue(in: toolContent, key: "ok", equals: true) {
-            arguments["action"] = "wait_for_dom_stable"
-            arguments["timeout"] = max(nativeToolIntValue(arguments["timeout"]) ?? 8, 8)
-            arguments["continuation_stage"] = "post_action_wait"
-        } else if action == "browser.wait_for_dom_stable" {
-            arguments["action"] = "find_elements"
-            arguments["scan_page"] = true
-            arguments["capture_visuals"] = false
-            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 12, 12)
-            arguments["attach_preview"] = false
-            arguments["screenshot"] = false
-            arguments["continuation_stage"] = "post_action_scan"
-        } else if ["browser.open", "browser.screenshot", "browser.scroll", "browser.observe", "browser.inspect"].contains(action)
-            || (action == "browser.find_elements" && !lowerContent.contains("\"visual_viewports\"")) {
-            arguments["action"] = "find_elements"
-            arguments["scan_page"] = true
-            arguments["screenshot"] = false
-            arguments["capture_visuals"] = false
-            arguments["max_scrolls"] = max(nativeToolIntValue(arguments["max_scrolls"] ?? arguments["maxScrolls"]) ?? 10, 10)
-            arguments["continuation_stage"] = "page_scan"
-        } else if action == "browser.find_elements",
-                  lowerContent.contains("\"focused_element\"") {
-            arguments["action"] = "observe"
-            arguments["full_page"] = false
-            arguments["attach_preview"] = false
-            arguments["screenshot"] = false
-            arguments["continuation_stage"] = "focused_element_view"
-        } else if !hasExplicitContinuationTarget,
-                  action == "browser.find_elements",
-                  lowerContent.contains("\"items\"") {
-            arguments["action"] = "screenshot"
-            arguments["full_page"] = false
-            arguments["attach_preview"] = false
-            arguments["screenshot"] = false
-            arguments["continuation_stage"] = "search_results_visual_check"
-        } else {
-            arguments["action"] = "observe"
-            arguments["full_page"] = false
-            arguments["attach_preview"] = false
-            arguments["screenshot"] = false
-            arguments["continuation_stage"] = "viewport_view"
-        }
-
-        let data = (try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys])) ?? Data()
-        return LocalAlpineNativeToolCall(
-            id: "browser_continue_\(UUID().uuidString)",
-            name: "browser_use",
-            arguments: String(data: data, encoding: .utf8) ?? "{}"
-        )
-    }
 
     private static func localNativeBrowserFallbackMessage(from toolContent: String) -> String {
         if anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
@@ -16041,30 +15670,6 @@ final class ChatViewModel {
             return "联网搜索失败：\(error)"
         }
         return "联网搜索已经返回结果，但模型没有生成总结。请重试或换一个更具体的搜索词。"
-    }
-
-    private static func browserFocusedNodeID(in toolContent: String) -> String? {
-        guard let data = toolContent.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) else {
-            return nil
-        }
-        guard let result = localNativeBrowserPrimaryResult(from: object) else {
-            return firstJSONStringValue(in: object, key: "node_id")
-                ?? firstJSONStringValue(in: object, key: "nodeId")
-        }
-        if let focused = result["focused_element"] as? [String: Any],
-           let nodeID = firstNonEmptyString(in: focused, keys: ["node_id", "nodeId"]) {
-            return nodeID
-        }
-        if let items = result["items"] as? [[String: Any]] {
-            for item in items {
-                if let nodeID = firstNonEmptyString(in: item, keys: ["node_id", "nodeId"]) {
-                    return nodeID
-                }
-            }
-        }
-        return firstJSONStringValue(in: result, key: "node_id")
-            ?? firstJSONStringValue(in: result, key: "nodeId")
     }
 
     private static func localNativeImageToolFallbackMessage(from toolContent: String) -> String {
@@ -17090,18 +16695,53 @@ final class ChatViewModel {
         return mentionsTools && unsupported
     }
 
+    /// Uses explicit protocol fields only.  This guard is shared by the SSE
+    /// and socket paths so a tool payload cannot enter the body accumulator
+    /// through a transport-specific shortcut.
+    nonisolated private static func payloadContainsStructuredToolProtocol(_ value: Any?) -> Bool {
+        guard let payload = value as? [String: Any] else { return false }
+
+        let type = payload["type"] as? String ?? ""
+        if [
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done"
+        ].contains(type) {
+            return true
+        }
+        if ["response.output_item.added", "response.output_item.done"].contains(type),
+           let item = payload["item"] as? [String: Any],
+           (item["type"] as? String) == "function_call" {
+            return true
+        }
+        if type == "content_block_start",
+           let block = payload["content_block"] as? [String: Any],
+           (block["type"] as? String) == "tool_use" {
+            return true
+        }
+        if type == "content_block_delta",
+           let delta = payload["delta"] as? [String: Any],
+           (delta["type"] as? String) == "input_json_delta" {
+            return true
+        }
+        if payload["tool_calls"] != nil || payload["function_call"] != nil {
+            return true
+        }
+        guard let choices = payload["choices"] as? [[String: Any]] else { return false }
+        return choices.contains { choice in
+            let delta = choice["delta"] as? [String: Any]
+            let message = choice["message"] as? [String: Any]
+            return delta?["tool_calls"] != nil
+                || delta?["function_call"] != nil
+                || message?["tool_calls"] != nil
+                || message?["function_call"] != nil
+        }
+    }
+
+    /// Extract only protocol-defined reasoning *deltas*.  Do not recursively
+    /// inspect arbitrary payload fields: gateway completion payloads commonly
+    /// include a `thought`, `summary`, or a full `message` object, and treating
+    /// those as a delta puts the final answer inside the thinking card.
     nonisolated private static func reasoningDelta(from value: Any?) -> String? {
-        guard let value else { return nil }
-
-        if let text = value as? String {
-            return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : text
-        }
-
-        if let array = value as? [Any] {
-            let rendered = array.compactMap { reasoningDelta(from: $0) }.joined()
-            return rendered.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : rendered
-        }
-
         guard let dict = value as? [String: Any] else { return nil }
 
         if let type = dict["type"] as? String,
@@ -17123,31 +16763,24 @@ final class ChatViewModel {
             return text
         }
 
-        if let choices = dict["choices"] as? [[String: Any]],
-           let first = choices.first {
-            if let delta = first["delta"] as? [String: Any],
-               let reasoning = reasoningDelta(from: delta) {
-                return reasoning
-            }
-            if let message = first["message"] as? [String: Any],
-               let reasoning = reasoningDelta(from: message) {
-                return reasoning
+        // Chat Completions reasoning is valid only on a streaming choice.delta.
+        // A completed choice.message is a full response, not a reasoning delta.
+        guard let choices = dict["choices"] as? [[String: Any]],
+              let delta = choices.first?["delta"] as? [String: Any] else {
+            return nil
+        }
+        return reasoningDelta(fromOpenAIChoiceDelta: delta)
+    }
+
+    nonisolated private static func reasoningDelta(
+        fromOpenAIChoiceDelta delta: [String: Any]
+    ) -> String? {
+        for key in ["reasoning_content", "reasoningContent", "reasoning"] {
+            if let text = delta[key] as? String,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return text
             }
         }
-
-        for key in [
-            "reasoning_content", "reasoningContent",
-            "reasoning_text", "reasoningText",
-            "thinking_content", "thinkingContent",
-            "thinking", "think",
-            "thought", "thoughts",
-            "reasoning"
-        ] {
-            if let rendered = reasoningDelta(from: dict[key]) {
-                return rendered
-            }
-        }
-
         return nil
     }
 
@@ -17258,7 +16891,7 @@ final class ChatViewModel {
                     acc.appendReasoning(reasoning)
                     didUpdate = true
                 }
-                if !content.isEmpty {
+                if !Self.payloadContainsStructuredToolProtocol(payload ?? data), !content.isEmpty {
                     acc.append(content)
                     didUpdate = true
                 }
@@ -17273,7 +16906,7 @@ final class ChatViewModel {
                     acc.appendReasoning(reasoning)
                     didUpdate = true
                 }
-                if !content.isEmpty {
+                if !Self.payloadContainsStructuredToolProtocol(payload ?? data), !content.isEmpty {
                     let localBody = acc.bodyContent
                     let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
                         local: localBody,
@@ -17330,7 +16963,7 @@ final class ChatViewModel {
            let first = choices.first,
            let delta = first["delta"] as? [String: Any] {
             var didUpdate = false
-            if let reasoning = Self.reasoningDelta(from: delta) {
+            if let reasoning = Self.reasoningDelta(fromOpenAIChoiceDelta: delta) {
                 acc.appendReasoning(reasoning)
                 didUpdate = true
             }
@@ -17373,8 +17006,11 @@ final class ChatViewModel {
             updateAssistantMessage(id: assistantMessageId, accumulator: acc, isStreaming: true)
         }
 
-        // Direct content field
-        if let content = payload["content"] as? String, !content.isEmpty {
+        // Direct content field.  Tool protocol payloads are handled by the
+        // matching tool-call accumulator, never by the assistant body.
+        if !Self.payloadContainsStructuredToolProtocol(payload),
+           let content = payload["content"] as? String,
+           !content.isEmpty {
             let localBody = acc.bodyContent
             let protectedContent = CodeSourceFormatter.shouldPreserveLocalCodeIndentation(
                 local: localBody,
@@ -17454,7 +17090,9 @@ final class ChatViewModel {
                 acc.appendReasoning(reasoning)
                 didUpdate = true
             }
-            if let content = payload?["content"] as? String, !content.isEmpty {
+            if !Self.payloadContainsStructuredToolProtocol(payload ?? data),
+               let content = payload?["content"] as? String,
+               !content.isEmpty {
                 acc.append(content)
                 didUpdate = true
             }
@@ -18660,9 +18298,6 @@ final class ChatViewModel {
             modelId: request.model,
             text: latestUserTextForLocalNativeTools
         )
-        let shouldRequireBrowserToolRetry = !shouldPrioritizeImageRoute
-            && shouldForceBrowserToolRetryForLatestUser()
-
         // Always send the full features object with explicit true/false values
         var features = buildChatFeatures()
         if shouldPrioritizeImageRoute {
@@ -18702,7 +18337,7 @@ final class ChatViewModel {
                 .lowercased() == "none"
             if shouldUseLocalAlpineNativeTools(for: request.model), request.tools == nil, !nativeToolsDisabled {
                 request.tools = Self.localAlpineNativeToolSchemas(includeMemoryTools: memoryEnabled)
-                request.toolChoice = shouldRequireBrowserToolRetry ? "required" : "auto"
+                request.toolChoice = "auto"
                 request.parallelToolCalls = true
             }
             if var modelItem = request.modelItem,
@@ -18772,13 +18407,6 @@ final class ChatViewModel {
             request.toolChoice = "auto"
             request.parallelToolCalls = true
         }
-        if shouldRequireBrowserToolRetry,
-           shouldExposeBrowserTools,
-           request.tools?.isEmpty == false,
-           !nativeToolsDisabled {
-            request.toolChoice = "required"
-        }
-
         if let fc = selectedModel?.functionCallingMode, fc == "native", !localAlpineClientSideTask {
             params["function_calling"] = "native"
         }
@@ -24899,11 +24527,7 @@ final class ChatViewModel {
         self.conversation?.history.currentId = assistantMessageId
         NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
 
-        var apiMessages = await buildAPIMessagesAsync(includeLocalAlpineExecutionContext: false)
-        Self.appendLocalNativeResultInstruction(
-            to: &apiMessages,
-            allowBrowserContinuation: shouldContinueBrowserTools
-        )
+        let apiMessages = await buildAPIMessagesAsync(includeLocalAlpineExecutionContext: false)
 
         isStreaming = true
         hasFinishedStreaming = false
@@ -24956,7 +24580,10 @@ final class ChatViewModel {
                 )
                 await self.populateCommonRequestFields(&request)
 
+                let supportsStructuredNativeContinuation = self.isOpenAICompatibleProvider
+                    || self.currentProviderType == .anthropic
                 if shouldContinueBrowserTools,
+                   supportsStructuredNativeContinuation,
                    self.shouldUseLocalNativeFunctionTools(for: modelId),
                    self.isLocalBrowserNativeToolsEnabled {
                     request.tools = Self.localNativeFunctionToolSchemas(
@@ -24970,42 +24597,40 @@ final class ChatViewModel {
                     request.toolChoice = "required"
                     request.parallelToolCalls = false
 
-                    if self.isOpenAICompatibleProvider {
-                        do {
-                            exactUsage = try await self.streamProviderLocalNativeFunctionLoop(
-                                manager: manager,
-                                initialRequest: request,
-                                assistantMessageId: assistantMessageId,
-                                acc: acc
-                            )
-                        } catch {
-                            guard Self.errorLooksLikeUnsupportedNativeTools(error) else { throw error }
-                            self.localNativeFunctionToolsUnsupportedModels.insert(modelId)
-                            Self.disableAgentToolsForResultContinuation(&request)
-                            let stream = try await manager.sendPreferredOpenAIStreaming(
-                                request: request
-                            )
-                            for try await event in stream {
-                                if Task.isCancelled { break }
-                                if let usage = event.usage, !usage.isEmpty {
-                                    exactUsage = usage
-                                }
-                                self.applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
-                                if event.isFinished { break }
-                            }
-                        }
-                        if Task.isCancelled { return }
-                        acc.markReasoningDone()
-                        await self.finishLocalNativeContinuation(
+                    do {
+                        exactUsage = try await self.streamProviderLocalNativeFunctionLoop(
+                            manager: manager,
+                            initialRequest: request,
                             assistantMessageId: assistantMessageId,
-                            modelId: modelId,
-                            content: acc.content,
-                            usage: exactUsage,
-                            reasoningContent: acc.reasoningContent,
-                            reasoningDone: acc.reasoningDone
+                            acc: acc
                         )
-                        return
+                    } catch {
+                        guard Self.errorLooksLikeUnsupportedNativeTools(error) else { throw error }
+                        self.localNativeFunctionToolsUnsupportedModels.insert(modelId)
+                        Self.disableAgentToolsForResultContinuation(&request)
+                        let stream = try await manager.sendPreferredOpenAIStreaming(
+                            request: request
+                        )
+                        for try await event in stream {
+                            if Task.isCancelled { break }
+                            if let usage = event.usage, !usage.isEmpty {
+                                exactUsage = usage
+                            }
+                            self.applyStreamingEventDelta(event, to: acc, assistantMessageId: assistantMessageId)
+                            if event.isFinished { break }
+                        }
                     }
+                    if Task.isCancelled { return }
+                    acc.markReasoningDone()
+                    await self.finishLocalNativeContinuation(
+                        assistantMessageId: assistantMessageId,
+                        modelId: modelId,
+                        content: acc.content,
+                        usage: exactUsage,
+                        reasoningContent: acc.reasoningContent,
+                        reasoningDone: acc.reasoningDone
+                    )
+                    return
                 }
 
                 Self.disableAgentToolsForResultContinuation(&request)
@@ -25304,57 +24929,6 @@ final class ChatViewModel {
         } else {
             messages.insert(["role": "system", "content": trimmedInstruction], at: 0)
         }
-    }
-
-    private static func appendLocalNativeResultInstruction(
-        to messages: inout [[String: Any]],
-        allowBrowserContinuation: Bool = false
-    ) {
-        let continuationInstruction = allowBrowserContinuation
-            ? """
-            The latest Local Native browser result is an intermediate browser state, not the final user-visible answer. Continue with real `browser_use` function tool calls in this same turn until the page task is complete, a final readable/file result exists, or credentials, payment, or a destructive action requires user input. Do not answer with prose while `next_action_required:true` is present.
-            """
-            : """
-            Reply to the user in normal language only, using Minis-style brevity: final result first, no process narration.
-            """
-        let instruction = """
-        [Local native tool result]
-        The latest Local Native message above is a real on-device iOS tool result for device info, clipboard, local notification, location, weather, calendar, local browser/web reading, local Office document generation, or iOS Shortcuts launching. Do not emit another `iexa_native` block in this turn.
-        \(continuationInstruction)
-        - Never print, quote, summarize as JSON, or expose the raw Local Native result object. It is machine-only context, not assistant-visible answer text.
-        - If the result contains `action`, `browser_use`, `browser_action`, `data`, `items`, `node_id`, `page_x`, or `selector`, use those fields only to choose the next `browser_use` call or to answer naturally from the readable page content.
-        - Do not say you are opening/searching/reading/checking/running unless the user specifically asked for an execution log.
-        - Do not recap tool calls, intermediate observations, or hidden loop-control reasons; the app shows tool progress separately.
-        - If the local browser tool succeeded and no further browser action is required, answer from the returned page/search content and cite page titles/URLs plainly.
-        - If an Office document was generated, tell the user the file and previews are attached in the chat.
-        - If an iOS Shortcut was run or opened, state the requested shortcut action and any system/user confirmation requirement.
-        - If it failed, give the concrete permission/state problem and the next user action.
-        [/Local native tool result]
-        """
-        appendSystemInstruction(instruction, marker: "[Local native tool result]", to: &messages)
-    }
-
-    private static func shouldSuppressStreamingLocalNativeResultEcho(raw: String, visible: String) -> Bool {
-        let trimmedRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedVisible = visible.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedRaw.isEmpty else { return false }
-        if trimmedVisible.isEmpty { return false }
-
-        let first = trimmedRaw.first
-        guard first == "{" || first == "[" else { return false }
-        if trimmedRaw.count < 160 {
-            return true
-        }
-
-        let lower = trimmedRaw.lowercased()
-        return lower.contains(#""action""#)
-            || lower.contains(#""browser_action""#)
-            || lower.contains(#""tool""#)
-            || lower.contains(#""data""#)
-            || lower.contains(#""items""#)
-            || lower.contains(#""node_id""#)
-            || lower.contains(#""page_x""#)
-            || lower.contains(#""selector""#)
     }
 
     private static func shouldExposeLocalDeviceNativeTools(_ text: String) -> Bool {
@@ -27606,7 +27180,7 @@ final class ChatViewModel {
     ) {
         updateAssistantMessage(
             id: id,
-            content: accumulator.content,
+            content: accumulator.bodyContent,
             isStreaming: isStreaming,
             sources: sources,
             statusHistory: statusHistory,
@@ -27632,14 +27206,7 @@ final class ChatViewModel {
         let initialSafeDisplayContent = showInlineImageReceiveState
             ? ""
             : Self.safeAssistantDisplayContent(displayContent)
-        let isLocalNativeContinuationDisplay = conversation?.messages
-            .first(where: { $0.id == id })?
-            .metadata?["iexa_local_native_continuation"] == "true"
-        let safeDisplayContent = isStreaming
-            && isLocalNativeContinuationDisplay
-            && Self.shouldSuppressStreamingLocalNativeResultEcho(raw: displayContent, visible: initialSafeDisplayContent)
-            ? ""
-            : initialSafeDisplayContent
+        let safeDisplayContent = initialSafeDisplayContent
         let shouldHandleLocalAlpineDisplay = terminalEnabled && selectedTerminalIsLocalAlpine
         let visibleAlpineDisplayContent: String? = {
             guard shouldHandleLocalAlpineDisplay else { return nil }
@@ -27694,6 +27261,7 @@ final class ChatViewModel {
             // This avoids mutating conversation.messages on every token,
             // which would invalidate ALL message views via @Observable.
             streamingStore.updateContent(content, displayContent: renderedDisplayContent)
+            streamingStore.updateReasoning(content: reasoningContent, done: reasoningDone)
             if let sources { streamingStore.appendSources(sources) }
             if let statusHistory = effectiveStatusHistory {
                 var mergedStatusHistory = streamingStore.streamingStatusHistory
@@ -29260,7 +28828,9 @@ final class ContentAccumulator: @unchecked Sendable {
 
     nonisolated var content: String {
         lock.lock()
-        let value = snapshotLocked().renderedContent
+        // Agent continuations and completion handling must receive the actual
+        // assistant body, never the UI-only <details type="reasoning"> wrapper.
+        let value = _content
         lock.unlock()
         return value
     }

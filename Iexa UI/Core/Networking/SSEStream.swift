@@ -134,6 +134,14 @@ enum SSEEvent: Sendable {
         }
 
         guard case .json(let json) = self else { return nil }
+        // Tool protocol chunks are never assistant prose.  Keep this boundary
+        // here, before the generic `content` / `text` fallbacks below: a few
+        // compatible gateways attach their tool observation JSON to one of
+        // those generic keys while streaming.  The tool-call accumulator owns
+        // these events and binds them to the matching call id.
+        if Self.isStructuredToolProtocolEvent(json) {
+            return nil
+        }
         if let type = json["type"] as? String {
             if (type == "response.output_text.delta" || type == "response.refusal.delta"),
                let delta = json["delta"] as? String,
@@ -194,18 +202,6 @@ enum SSEEvent: Sendable {
             return delta
         }
 
-        if let choices = json["choices"] as? [[String: Any]],
-           let first = choices.first {
-            if let delta = first["delta"] as? [String: Any],
-               let reasoning = Self.renderReasoning(delta) {
-                return reasoning
-            }
-            if let message = first["message"] as? [String: Any],
-               let reasoning = Self.renderReasoning(message) {
-                return reasoning
-            }
-        }
-
         if json["type"] as? String == "content_block_delta",
            let delta = json["delta"] as? [String: Any],
            ["thinking_delta", "reasoning_delta"].contains(delta["type"] as? String ?? ""),
@@ -214,7 +210,14 @@ enum SSEEvent: Sendable {
             return text
         }
 
-        return Self.renderReasoning(json)
+        // Chat Completions carries reasoning only in `choices[].delta`.  A
+        // completed `message` can contain a summary/final answer, so it must
+        // never be interpreted as an incremental thinking payload.
+        guard let choices = json["choices"] as? [[String: Any]],
+              let delta = choices.first?["delta"] as? [String: Any] else {
+            return nil
+        }
+        return Self.renderReasoningDelta(delta)
     }
 
     /// Extracts usage statistics from the final streaming chunk.
@@ -279,31 +282,59 @@ enum SSEEvent: Sendable {
         return nil
     }
 
-    private static func renderReasoning(_ value: Any?) -> String? {
-        guard let value else { return nil }
-
-        if let text = value as? String {
-            return text.isEmpty ? nil : text
+    private static func isStructuredToolProtocolEvent(_ json: [String: Any]) -> Bool {
+        let type = json["type"] as? String ?? ""
+        if [
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done"
+        ].contains(type) {
+            return true
         }
 
-        if let dict = value as? [String: Any] {
-            for key in [
-                "reasoning_content", "reasoningContent",
-                "reasoning", "thinking", "think",
-                "thought", "thoughts"
-            ] {
-                if let rendered = renderReasoning(dict[key]) {
-                    return rendered
-                }
+        if ["response.output_item.added", "response.output_item.done"].contains(type),
+           let item = json["item"] as? [String: Any],
+           (item["type"] as? String) == "function_call" {
+            return true
+        }
+
+        if type == "content_block_start",
+           let block = json["content_block"] as? [String: Any],
+           (block["type"] as? String) == "tool_use" {
+            return true
+        }
+
+        if type == "content_block_delta",
+           let delta = json["delta"] as? [String: Any],
+           (delta["type"] as? String) == "input_json_delta" {
+            return true
+        }
+
+        if let choices = json["choices"] as? [[String: Any]],
+           choices.contains(where: { choice in
+               guard let delta = choice["delta"] as? [String: Any] else { return false }
+               return delta["tool_calls"] != nil || delta["function_call"] != nil
+           }) {
+            return true
+        }
+
+        if let choices = json["choices"] as? [[String: Any]],
+           choices.contains(where: { choice in
+               guard let message = choice["message"] as? [String: Any] else { return false }
+               return message["tool_calls"] != nil || message["function_call"] != nil
+           }) {
+            return true
+        }
+
+        return json["tool_calls"] != nil || json["function_call"] != nil
+    }
+
+    private static func renderReasoningDelta(_ delta: [String: Any]) -> String? {
+        for key in ["reasoning_content", "reasoningContent", "reasoning"] {
+            if let text = delta[key] as? String,
+               !text.isEmpty {
+                return text
             }
-            return nil
         }
-
-        if let array = value as? [Any] {
-            let rendered = array.compactMap { renderReasoning($0) }.joined()
-            return rendered.isEmpty ? nil : rendered
-        }
-
         return nil
     }
 

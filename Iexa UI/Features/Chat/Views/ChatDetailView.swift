@@ -11312,8 +11312,24 @@ private struct IsolatedAssistantMessage: View {
         }()
 
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
+        let localReasoningContent: String? = {
+            if isActivelyStreaming {
+                let content = streamingStore.streamingReasoningContent
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return content.isEmpty ? nil : content
+            }
+            return message.metadata?["iexa_local_reasoning_content"]
+        }()
+        let localReasoningDone = isActivelyStreaming
+            ? streamingStore.streamingReasoningDone
+            : message.metadata?["iexa_local_reasoning_done"] == "true"
+        let hasLocalReasoning = !(localReasoningContent?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ?? true)
 
-        if effectiveIsStreaming && displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if effectiveIsStreaming
+            && displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !hasLocalReasoning {
             if message.metadata?["iexa_local_alpine_result"] == "true"
                 || (message.model == "Local Alpine" && message.statusHistory.contains(where: {
                     $0.action?.lowercased() == "local_alpine"
@@ -11372,8 +11388,8 @@ private struct IsolatedAssistantMessage: View {
                             content: frozenContent,
                             isStreaming: false,
                             messageEmbeds: message.embeds,
-                            localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
-                            localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true",
+                            localReasoningContent: localReasoningContent,
+                            localReasoningDone: localReasoningDone,
                             reasoningEffort: reasoningEffort,
                             localStructuredPartsJSON: message.metadata?["iexa_local_content_parts"],
                             authToken: authToken,
@@ -11446,6 +11462,7 @@ private struct IsolatedAssistantMessage: View {
                     : 0
 
                 let canUseProseStreamingRenderer = isActivelyStreaming
+                    && !hasLocalReasoning
                     && !Self.requiresFullAssistantRouting(displayContent)
                     && !Self.containsCodeFence(displayContent)
 
@@ -11490,8 +11507,8 @@ private struct IsolatedAssistantMessage: View {
                         content: displayContent,
                         isStreaming: effectiveIsStreaming,
                         messageEmbeds: message.embeds,
-                        localReasoningContent: message.metadata?["iexa_local_reasoning_content"],
-                        localReasoningDone: message.metadata?["iexa_local_reasoning_done"] == "true",
+                        localReasoningContent: localReasoningContent,
+                        localReasoningDone: localReasoningDone,
                         reasoningEffort: reasoningEffort,
                         localStructuredPartsJSON: message.metadata?["iexa_local_content_parts"],
                         authToken: authToken,
