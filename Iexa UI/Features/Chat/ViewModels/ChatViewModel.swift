@@ -2979,6 +2979,9 @@ final class ChatViewModel {
         Rules:
         - Current device time: \(nowText), timezone: \(timezoneName). For web/search/browser tasks involving current, latest, today, now, prices, releases, schedules, news, weather, or other time-sensitive data, build queries from this device time. Never use model training-cutoff dates as search dates.
         - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` (model read/write for local `SKILL.md` skills), `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Rootfs paths like `/bin`, `/etc`, `/usr`, `/lib`, `/tmp` are Alpine paths.
+        - User environment variables are injected into every Local Alpine shell command. Available names and notes only (values are never included here):
+        \(LocalAlpineEnvironmentStore.shared.modelVisibleSummary())
+        - Use a configured variable as `$NAME`; never print it with `echo`, `env`, `printenv`, logs, URLs, or error messages. To test whether it is set, use `[ -n "${NAME:-}" ] && printf set || printf not_set`.
         - Inline saved images: after generating, downloading, converting, or saving an image file, prefer a simple filename without spaces and put the real saved file path in the final answer using Markdown image syntax, e.g. `![图片](/mnt/iexa/shared/result.png)`. Iexa renders PNG/JPG/JPEG/WebP/GIF/BMP/AVIF paths from `/mnt/iexa/shared`, `/mnt/iexa/mounts`, and `/mnt/iexa/attachments` directly in the chat body. If `browser_use.fetch`, `wait_for_image`, or shell saves an image, include that saved path; do not only say it was saved.
         \(localAlpineDNSLookupRules)
         - Shell is Alpine BusyBox/ash. Install OS packages with `apk add --no-cache`; never use apt/brew/sudo/systemctl/macOS/Windows commands.
@@ -3362,6 +3365,9 @@ final class ChatViewModel {
           {"tool_title":"列出目录","command":"pwd && ls -la","cwd":"/mnt/iexa/shared"}
           ```
         - Default workspace is `/mnt/iexa/shared`; relative paths resolve there. `/mnt/iexa` is the namespace root. Minis-style reserved folders under it are `/mnt/iexa/shared` (model read/write), `/mnt/iexa/skills` (model read/write for local `SKILL.md` skills), `/mnt/iexa/memory` (model-read-only for structured write/edit/delete/move/copy/mkdir tools), and `/mnt/iexa/mounts/<name>` for user-mounted external folders. Each mounted folder's structured write permission is controlled by the user's file-browser setting for that mount. Execution is embedded Local Alpine/iSH, not Open Terminal, iOS/macOS/Windows, Debian, or Ubuntu.
+        - User environment variables are injected into every Local Alpine shell command. Available names and notes only (values are never included here):
+        \(LocalAlpineEnvironmentStore.shared.modelVisibleSummary())
+        - Use a configured variable as `$NAME`; never print it with `echo`, `env`, `printenv`, logs, URLs, or error messages. To test whether it is set, use `[ -n "${NAME:-}" ] && printf set || printf not_set`.
         - To show a downloaded/generated local image in the chat body, prefer a simple filename without spaces and include the saved path in the final answer as Markdown, for example `![图片](/mnt/iexa/shared/result.png)`. Iexa renders PNG/JPG/JPEG/WebP/GIF/BMP/AVIF paths from `/mnt/iexa/shared`, `/mnt/iexa/mounts`, and `/mnt/iexa/attachments` inline.
         \(localAlpineDNSLookupRules)
         - Shell is Alpine BusyBox/ash. Use `apk add --no-cache` for missing OS packages after `command -v` or `apk info -e`; never use apt/brew/sudo/systemctl or bash/GNU-only syntax.
@@ -15022,7 +15028,8 @@ final class ChatViewModel {
     }
 
     private static func localAlpineNativeToolResultContent(_ result: LocalAlpineAgentResult) -> String {
-        let body = result.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = (result.modelObservation ?? LocalAlpineEnvironmentStore.shared.redactedForModel(result.summary))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let fallback = result.didExecute ? "Local Alpine tool completed." : "Local Alpine tool did not execute."
         let limit = result.commandResults.contains { LocalAlpineAgentCommandResult.isReadFileCommand($0.command) }
             ? 240_000

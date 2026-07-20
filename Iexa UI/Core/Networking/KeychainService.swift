@@ -85,6 +85,56 @@ final class KeychainService: Sendable {
         getToken(forServer: serverURL) != nil
     }
 
+    @discardableResult
+    func saveSecret(_ secret: String, account: String) -> Bool {
+        guard let data = secret.data(using: .utf8), !account.isEmpty else { return false }
+
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        return SecItemAdd(addQuery as CFDictionary, nil) == errSecSuccess
+    }
+
+    func secret(forAccount account: String) -> String? {
+        guard !account.isEmpty else { return nil }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    @discardableResult
+    func deleteSecret(forAccount account: String) -> Bool {
+        guard !account.isEmpty else { return true }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: account
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
+    }
+
     // MARK: - Account-Scoped Token Storage (Multi-Account)
 
     /// Saves a JWT token for a specific user account on a server.

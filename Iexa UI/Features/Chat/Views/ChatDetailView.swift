@@ -3227,6 +3227,9 @@ struct ChatDetailView: View {
 
             context.mergedActivityAnchorIds.insert(anchor.id)
             for message in activityMessages where message.id != anchor.id {
+                if isLocalAlpineResultMessage(message) {
+                    continue
+                }
                 context.hiddenMergedActivityMessageIds.insert(message.id)
             }
         }

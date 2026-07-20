@@ -1417,7 +1417,9 @@ actor LocalAlpineAgentService {
                         return LocalAlpineAgentResult(
                             didExecute: true,
                             summary: lines.joined(separator: "\n\n"),
-                            modelObservation: modelLines.joined(separator: "\n\n"),
+                            modelObservation: LocalAlpineEnvironmentStore.shared.redactedForModel(
+                                modelLines.joined(separator: "\n\n")
+                            ),
                             interactiveRequest: request,
                             commandResults: commandResults,
                             writtenFiles: writtenFiles,
@@ -1496,7 +1498,9 @@ actor LocalAlpineAgentService {
         return LocalAlpineAgentResult(
             didExecute: true,
             summary: lines.joined(separator: "\n\n"),
-            modelObservation: modelLines.joined(separator: "\n\n"),
+            modelObservation: LocalAlpineEnvironmentStore.shared.redactedForModel(
+                modelLines.joined(separator: "\n\n")
+            ),
             interactiveRequest: nil,
             commandResults: commandResults,
             writtenFiles: writtenFiles,

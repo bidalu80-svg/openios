@@ -92,6 +92,18 @@ struct LocalAgentCenterView: View {
                         tint: .cyan
                     )
                 }
+
+                NavigationLink {
+                    LocalAlpineEnvironmentVariablesView()
+                } label: {
+                    centerRow(
+                        icon: "terminal",
+                        title: "环境变量",
+                        subtitle: "注入到 Local Alpine 沙箱 shell",
+                        value: "\(LocalAlpineEnvironmentStore.shared.variables.count) 个",
+                        tint: .orange
+                    )
+                }
             } header: {
                 Text("能力扩展")
             }

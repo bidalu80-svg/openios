@@ -3495,6 +3495,7 @@ actor LocalAlpineTerminalService {
     private func bootstrappedShellCommand(for command: String) -> String {
         let script = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !script.isEmpty else { return command }
+        let customEnvironmentExports = LocalAlpineEnvironmentStore.shared.shellExportScript()
         return """
         iexa_apply_compat_env() {
           export LANG="${LANG:-C.UTF-8}"
@@ -3529,6 +3530,7 @@ actor LocalAlpineTerminalService {
         fi
         iexa_apply_compat_env
         iexa_refresh_toolchain_env
+        \(customEnvironmentExports)
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
           _iexa_bootstrap_version=2026-07-18.3
