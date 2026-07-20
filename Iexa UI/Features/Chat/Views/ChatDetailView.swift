@@ -11371,7 +11371,7 @@ private struct IsolatedAssistantMessage: View {
                 ? Self.safeAssistantRenderableContent(streamingStore.liveTextTail)
                 : ""
             let liveTailHasSpecialContent = Self.requiresFullAssistantRouting(liveTail)
-            if frozenBoundary > 0 && !liveTailHasSpecialContent {
+            if frozenBoundary > 0 && !liveTailHasSpecialContent && !hasLocalReasoning {
                 let dc = streamingStore.displayContent
                 let frozenContent: String = {
                     guard dc.count >= frozenBoundary else { return dc }

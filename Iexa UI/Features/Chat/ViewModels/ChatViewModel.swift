@@ -15490,6 +15490,9 @@ final class ChatViewModel {
         if anyJSONBoolValue(in: toolContent, key: "next_action_required", equals: true) {
             return false
         }
+        if anyJSONBoolValue(in: toolContent, key: "ok", equals: false) {
+            return true
+        }
         if action == "browser.fetch" || action == "browser.wait_for_image" {
             return true
         }
@@ -16080,13 +16083,18 @@ final class ChatViewModel {
         browserVerificationCompleted: Bool = false
     ) -> String {
         let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let data = trimmed.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              let result = localNativeBrowserPrimaryResult(from: object) else {
-            return localNativeFunctionToolResultContent(
-                summary,
-                browserVerificationCompleted: browserVerificationCompleted
-            )
+        let result: [String: Any]
+        if let data = trimmed.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data),
+           let structuredResult = localNativeBrowserPrimaryResult(from: object) {
+            result = structuredResult
+        } else {
+            result = [
+                "ok": false,
+                "error": trimmed.isEmpty
+                    ? "浏览器工具没有返回结构化结果。"
+                    : trimmed
+            ]
         }
 
         let rawAction = firstNonEmptyString(
@@ -23620,10 +23628,21 @@ final class ChatViewModel {
             markLocalNativeToolParentHidden(messageId: messageId)
         }
 
-        let resultContent = Self.localNativeFunctionToolResultContent(
-            result.summary,
-            browserVerificationCompleted: browserVerificationCompleted
-        )
+        let browserCall = structuredCalls.first(where: {
+            Self.localNativeBrowserToolKind($0) != nil
+        })
+        let resultContent = if let browserCall {
+            Self.localNativeBrowserToolResultContent(
+                result.summary,
+                call: browserCall,
+                browserVerificationCompleted: browserVerificationCompleted
+            )
+        } else {
+            Self.localNativeFunctionToolResultContent(
+                result.summary,
+                browserVerificationCompleted: browserVerificationCompleted
+            )
+        }
         var resultMetadata: [String: String] = [
             "iexa_local_native_result": "true",
             "iexa_local_native_raw_result": resultContent
@@ -27956,7 +27975,13 @@ final class ChatViewModel {
 
         if let activeRunId = localAlpineActiveRunIdsByMessageId[messageId],
            activeRunId != event.runId {
-            return
+            let visibleCalls = localAlpinePendingToolCallsByMessageId[messageId]
+                ?? localAlpineLiveToolCallsByMessageId[messageId]
+                ?? []
+            guard event.call.phase == .start,
+                  !visibleCalls.contains(where: { $0.id == event.call.id }) else {
+                return
+            }
         }
         localAlpineActiveRunIdsByMessageId[messageId] = event.runId
 
