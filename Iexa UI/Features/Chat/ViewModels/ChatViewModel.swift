@@ -7648,11 +7648,17 @@ final class ChatViewModel {
                 acc.markReasoningDone()
                 if acc.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                    !self.assistantMessageHasRenderableImage(messageId: assistantMessageId) {
+                    let hasCompletedLocalAlpineToolTurns = !LocalAlpineNativeToolTurn.decodeMetadata(
+                        self.conversation?.messages.first(where: { $0.id == assistantMessageId })?
+                            .metadata?["iexa_local_alpine_native_tool_turns"]
+                    ).isEmpty
                     self.updateAssistantMessage(
                         id: assistantMessageId,
                         content: "",
                         isStreaming: false,
-                        error: ChatMessageError(content: "未收到模型回复或图片数据，请重试。")
+                        error: ChatMessageError(content: hasCompletedLocalAlpineToolTurns
+                            ? "本地工具已完成，但模型没有返回最终说明。请重试以继续当前工具步骤。"
+                            : "未收到模型回复或图片数据，请重试。")
                     )
                     self.cleanupStreaming()
                     return
@@ -10685,36 +10691,17 @@ final class ChatViewModel {
             failedMessage.metadata?["iexa_local_alpine_tool_calls"]
         )
         let lastToolTitle = toolCalls.last?.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let emptyResponseFallback: String
+        let emptyResponseError: String
         if let lastToolTitle, !lastToolTitle.isEmpty {
-            emptyResponseFallback = "本地工具“\(lastToolTitle)”已完成，但模型没有返回最终说明。"
+            emptyResponseError = "本地工具“\(lastToolTitle)”已完成，但模型仍未返回最终说明。请重试以继续当前工具步骤。"
         } else {
-            emptyResponseFallback = "本地工具已完成，但模型没有返回最终说明。"
-        }
-
-        // The failed assistant message is intentionally kept in place: its step
-        // cards and raw tool result are the source of truth for this continuation.
-        // Clear only the old error and reactivate this same message for streaming.
-        self.conversation?.messages[messageIndex].error = nil
-        self.conversation?.messages[messageIndex].isStreaming = true
-        self.conversation?.history.updateNode(id: messageId) { node in
-            node.error = nil
-            node.done = false
+            emptyResponseError = "本地工具已完成，但模型仍未返回最终说明。请重试以继续当前工具步骤。"
         }
 
         var apiMessages = await buildAPIMessagesAsync(
             includeLocalAlpineExecutionContext: true,
             preferLocalAlpineNativeTools: false
         )
-        // A direct native-tool parent is visually hidden and is not necessarily
-        // classified as a standalone Local Alpine result by the normal history
-        // builder. Append its exact structured tool history explicitly.
-        if let exactToolHistory = Self.localAlpineToolHistoryMessages(
-            for: failedMessage,
-            providerType: currentProviderType
-        ) {
-            apiMessages.append(contentsOf: exactToolHistory)
-        }
         apiMessages.append([
             "role": "system",
             "content": """
@@ -10723,6 +10710,16 @@ final class ChatViewModel {
             Do not call tools and do not execute, delete, write, modify, browse, or retry anything. Always output at least one visible sentence.
             """
         ])
+
+        // Build the continuation history while this message is still a completed
+        // row. The builder then emits its stored tool turns. Only afterwards do
+        // we reactivate the same UI row for the new final-answer stream.
+        self.conversation?.messages[messageIndex].error = nil
+        self.conversation?.messages[messageIndex].isStreaming = true
+        self.conversation?.history.updateNode(id: messageId) { node in
+            node.error = nil
+            node.done = false
+        }
 
         isStreaming = true
         hasFinishedStreaming = false
@@ -10761,8 +10758,16 @@ final class ChatViewModel {
                 if Task.isCancelled { return }
                 acc.markReasoningDone()
                 if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    acc.replace(emptyResponseFallback)
-                    self.updateAssistantMessage(id: messageId, accumulator: acc, isStreaming: true)
+                    self.updateAssistantMessage(
+                        id: messageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: emptyResponseError)
+                    )
+                    self.cleanupStreaming()
+                    await self.persistLocalConversationIfNeeded()
+                    NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                    return
                 }
 
                 self.updateAssistantMessage(id: messageId, accumulator: acc, isStreaming: false)
@@ -11742,6 +11747,33 @@ final class ChatViewModel {
                 return []
             }
             return calls
+        }
+    }
+
+    /// Durable counterpart of one native tool exchange. Unlike the legacy
+    /// aggregated raw-result metadata, this preserves the exact chronological
+    /// `assistant tool_call -> tool_result` boundary needed for a continuation
+    /// request after the app or provider stream has stopped.
+    private struct LocalAlpineNativeToolTurn: Codable, Hashable {
+        let call: LocalAlpineNativeToolCall
+        let result: String
+
+        static func metadataString(for turns: [LocalAlpineNativeToolTurn]) -> String? {
+            let limitedTurns = Array(turns.suffix(16))
+            guard !limitedTurns.isEmpty,
+                  let data = try? JSONEncoder().encode(limitedTurns) else {
+                return nil
+            }
+            return String(data: data, encoding: .utf8)
+        }
+
+        static func decodeMetadata(_ value: String?) -> [LocalAlpineNativeToolTurn] {
+            guard let value,
+                  let data = value.data(using: .utf8),
+                  let turns = try? JSONDecoder().decode([LocalAlpineNativeToolTurn].self, from: data) else {
+                return []
+            }
+            return turns
         }
     }
 
@@ -12786,7 +12818,7 @@ final class ChatViewModel {
                         Local Alpine tools above have already executed and returned their real results. Produce the final user-facing answer from those results now.
                         Do not call any tool again and do not repeat any shell, file, delete, write, or browser operation. Always return at least one visible sentence.
                         """,
-                        fallback: "本地工具已完成，但模型没有返回最终说明。"
+                        fallback: nil
                     )
                 }
                 return exactUsage
@@ -14941,6 +14973,19 @@ final class ChatViewModel {
             result.modelObservation ?? result.summary,
             label: "local-alpine-native-tool-result"
         )
+        let exactToolResult = incomingRaw.isEmpty
+            ? "Local Alpine native tool completed."
+            : incomingRaw
+        let existingTurns = LocalAlpineNativeToolTurn.decodeMetadata(
+            metadata["iexa_local_alpine_native_tool_turns"]
+        )
+        var mergedTurns = existingTurns
+        for call in executedCalls where !mergedTurns.contains(where: { $0.call.id == call.id }) {
+            mergedTurns.append(LocalAlpineNativeToolTurn(call: call, result: exactToolResult))
+        }
+        if let turns = LocalAlpineNativeToolTurn.metadataString(for: mergedTurns) {
+            metadata["iexa_local_alpine_native_tool_turns"] = turns
+        }
         let raw = [metadata["iexa_local_alpine_raw_result"], incomingRaw]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -15109,6 +15154,29 @@ final class ChatViewModel {
         for message: ChatMessage,
         providerType: ServerConfig.ProviderType?
     ) -> [[String: Any]]? {
+        let storedTurns = LocalAlpineNativeToolTurn.decodeMetadata(
+            message.metadata?["iexa_local_alpine_native_tool_turns"]
+        )
+        if !storedTurns.isEmpty {
+            var messages: [[String: Any]] = []
+            for turn in storedTurns {
+                messages.append(toolCallAssistantMessage(
+                    for: [turn.call],
+                    providerType: providerType
+                ))
+                appendToolResultMessage(
+                    callID: turn.call.id,
+                    content: clippedForSystemContext(
+                        redactedLocalAlpineInternalPaths(in: turn.result),
+                        maxCharacters: 16_000
+                    ),
+                    providerType: providerType,
+                    to: &messages
+                )
+            }
+            return messages
+        }
+
         let nativeCalls = LocalAlpineNativeToolCall.decodeMetadata(
             message.metadata?["iexa_local_alpine_native_calls"]
         )
@@ -22625,6 +22693,9 @@ final class ChatViewModel {
             && !Self.isLocalWorkspaceAgentResult(message) {
             let isNativeToolResult = Self.isLocalNativeToolResult(message)
             let isLocalAlpineResult = Self.isLocalAlpineAgentResult(message)
+            let isDirectLocalAlpineNativeToolParent = !LocalAlpineNativeToolTurn.decodeMetadata(
+                message.metadata?["iexa_local_alpine_native_tool_turns"]
+            ).isEmpty
             if isNativeToolResult {
                 if (isOpenAICompatibleProvider || currentProviderType == .anthropic),
                    let exactToolHistory = Self.localNativeToolHistoryMessages(
@@ -22641,6 +22712,27 @@ final class ChatViewModel {
                         includeImageCanvasInstruction: false
                     )
                     apiMessages.append(["role": "system", "content": modelContent])
+                }
+                continue
+            }
+            // Direct Local Alpine native calls share the visible assistant
+            // placeholder with their final answer. Their ordered tool turns
+            // therefore need the same structured replay as standalone Local
+            // Alpine result rows, rather than being flattened into one text
+            // observation on the next agent step.
+            if isDirectLocalAlpineNativeToolParent,
+               (isOpenAICompatibleProvider || currentProviderType == .anthropic),
+               let exactToolHistory = Self.localAlpineToolHistoryMessages(
+                for: message,
+                providerType: currentProviderType
+               ) {
+                apiMessages.append(contentsOf: exactToolHistory)
+                let finalContent = contentForModel(
+                    message: message,
+                    includeImageCanvasInstruction: false
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                if message.error == nil, !finalContent.isEmpty {
+                    apiMessages.append(["role": "assistant", "content": finalContent])
                 }
                 continue
             }
