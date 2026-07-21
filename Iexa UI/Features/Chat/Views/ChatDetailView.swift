@@ -8628,7 +8628,7 @@ struct ChatDetailView: View {
                 .foregroundStyle(theme.error)
             Spacer()
             if !isAnyMessageVisuallyStreaming {
-                Button { Task { await viewModel.regenerateResponse(messageId: retryMessageId) } } label: {
+                Button { Task { await viewModel.retryFailedAssistantResponse(messageId: retryMessageId) } } label: {
                     Text("重试").scaledFont(size: 12, weight: .medium).foregroundStyle(theme.brandPrimary)
                 }
             }

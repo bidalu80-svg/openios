@@ -10652,6 +10652,158 @@ final class ChatViewModel {
         await regenerateResponse(messageId: lastAssistant.id)
     }
 
+    /// Retries a failed final answer after Local Alpine has already completed one
+    /// or more native tool calls. This deliberately continues from the persisted
+    /// tool-call/result history instead of regenerating the user turn: commands
+    /// such as delete/write/shell must never run a second time just because the
+    /// provider ended the post-tool stream without visible assistant text.
+    func retryFailedAssistantResponse(messageId: String) async {
+        guard !isStreaming || isExternallyStreaming else { return }
+        guard let conversation,
+              let messageIndex = conversation.messages.firstIndex(where: { $0.id == messageId }),
+              let manager else {
+            return
+        }
+
+        let failedMessage = conversation.messages[messageIndex]
+        let nativeCalls = LocalAlpineNativeToolCall.decodeMetadata(
+            failedMessage.metadata?["iexa_local_alpine_native_calls"]
+        )
+        // Only the OpenAI-compatible Local Alpine native-tool path needs a
+        // continuation retry. Keep ordinary errors on the established regenerate
+        // behavior, including image-generation and non-tool failures.
+        guard isOpenAICompatibleProvider, !nativeCalls.isEmpty else {
+            await regenerateResponse(messageId: messageId)
+            return
+        }
+
+        let modelId = (selectedModelId ?? failedMessage.model ?? conversation.model ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !modelId.isEmpty else { return }
+
+        let toolCalls = LocalAlpineToolCall.decodeMetadata(
+            failedMessage.metadata?["iexa_local_alpine_tool_calls"]
+        )
+        let lastToolTitle = toolCalls.last?.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let emptyResponseFallback: String
+        if let lastToolTitle, !lastToolTitle.isEmpty {
+            emptyResponseFallback = "本地工具“\(lastToolTitle)”已完成，但模型没有返回最终说明。"
+        } else {
+            emptyResponseFallback = "本地工具已完成，但模型没有返回最终说明。"
+        }
+
+        // The failed assistant message is intentionally kept in place: its step
+        // cards and raw tool result are the source of truth for this continuation.
+        // Clear only the old error and reactivate this same message for streaming.
+        self.conversation?.messages[messageIndex].error = nil
+        self.conversation?.messages[messageIndex].isStreaming = true
+        self.conversation?.history.updateNode(id: messageId) { node in
+            node.error = nil
+            node.done = false
+        }
+
+        var apiMessages = await buildAPIMessagesAsync(
+            includeLocalAlpineExecutionContext: true,
+            preferLocalAlpineNativeTools: false
+        )
+        // A direct native-tool parent is visually hidden and is not necessarily
+        // classified as a standalone Local Alpine result by the normal history
+        // builder. Append its exact structured tool history explicitly.
+        if let exactToolHistory = Self.localAlpineToolHistoryMessages(
+            for: failedMessage,
+            providerType: currentProviderType
+        ) {
+            apiMessages.append(contentsOf: exactToolHistory)
+        }
+        apiMessages.append([
+            "role": "system",
+            "content": """
+            The Local Alpine tools immediately above already executed in the real local environment.
+            Continue this exact conversation by giving the user the final answer based only on those tool results.
+            Do not call tools and do not execute, delete, write, modify, browse, or retry anything. Always output at least one visible sentence.
+            """
+        ])
+
+        isStreaming = true
+        hasFinishedStreaming = false
+        selfInitiatedStream = true
+        activeTaskId = nil
+        sessionId = UUID().uuidString
+        beginStreamingBackgroundTaskIfNeeded()
+        streamingStore.beginStreaming(
+            messageId: messageId,
+            modelId: modelId,
+            initialStatusHistory: failedMessage.statusHistory,
+            initialSources: failedMessage.sources
+        )
+        appendContextCompressionStatusIfNeeded(to: messageId)
+
+        streamingTask = Task { [weak self] in
+            guard let self else { return }
+            let acc = ContentAccumulator()
+            var exactUsage: [String: Any]?
+
+            do {
+                var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
+                await self.populateCommonRequestFields(&request)
+                Self.disableAgentToolsForResultContinuation(&request)
+
+                let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                for try await event in sseStream {
+                    if Task.isCancelled { return }
+                    if let usage = event.usage, !usage.isEmpty {
+                        exactUsage = usage
+                    }
+                    self.applyStreamingEventDelta(event, to: acc, assistantMessageId: messageId)
+                    if event.isFinished { break }
+                }
+
+                if Task.isCancelled { return }
+                acc.markReasoningDone()
+                if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    acc.replace(emptyResponseFallback)
+                    self.updateAssistantMessage(id: messageId, accumulator: acc, isStreaming: true)
+                }
+
+                self.updateAssistantMessage(id: messageId, accumulator: acc, isStreaming: false)
+                self.normalizeAssistantGeneratedMedia(messageId: messageId)
+                let finalContent = self.conversation?.messages.first(where: { $0.id == messageId })?.content
+                    ?? acc.bodyContent
+                self.applyUsage(exactUsage, toMessageId: messageId)
+                let lastUser = self.conversation?.messages.last(where: {
+                    $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+                })
+                self.recordTokenUsageForCompletedTurn(
+                    assistantMessageId: messageId,
+                    userText: lastUser?.content ?? "",
+                    assistantText: finalContent,
+                    userAttachments: [],
+                    usage: exactUsage
+                )
+                self.hasFinishedStreaming = true
+                self.isStreaming = false
+                self.selfInitiatedStream = false
+                self.activeTaskId = nil
+                self.lastTaskExtractionLength = 0
+                await self.persistLocalConversationIfNeeded()
+                await self.sendCompletionNotificationIfNeeded(content: finalContent)
+                self.endBackgroundTask()
+                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.updateAssistantMessage(
+                    id: messageId,
+                    accumulator: acc,
+                    isStreaming: false,
+                    error: ChatMessageError(content: Self.localizedGenerationError(error))
+                )
+                self.cleanupStreaming()
+                await self.persistLocalConversationIfNeeded()
+                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            }
+        }
+    }
+
     /// Regenerates a specific assistant response by its message ID.
     ///
     /// If the targeted message is NOT the last assistant message, all messages
@@ -12621,6 +12773,21 @@ final class ChatViewModel {
                 if !executedAnyTool,
                    acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     throw Self.nativeToolSilentFailureError(kind: "Local Alpine")
+                }
+                // A completed tool call followed by an empty normal completion is
+                // not necessarily a failed tool run. Some OpenAI-compatible relays terminate the
+                // tool-result turn with an empty `stop`/`[DONE]` response. Ask once
+                // more for the final answer with every tool disabled, so a completed
+                // command is never mistaken for a missing image/model response.
+                if executedAnyTool,
+                   acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return try await streamFinalWithoutLocalAlpineTools(
+                        reason: """
+                        Local Alpine tools above have already executed and returned their real results. Produce the final user-facing answer from those results now.
+                        Do not call any tool again and do not repeat any shell, file, delete, write, or browser operation. Always return at least one visible sentence.
+                        """,
+                        fallback: "本地工具已完成，但模型没有返回最终说明。"
+                    )
                 }
                 return exactUsage
             }
