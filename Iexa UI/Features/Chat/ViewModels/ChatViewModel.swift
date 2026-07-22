@@ -2687,7 +2687,7 @@ final class ChatViewModel {
         ),
         LocalAlpineToolCapability(
             name: "browser_use",
-            description: "Operate the shared WKWebView automation session using the browser mode selected in Settings. Every primitive action returns post_action_observation and next_action_candidates with node_id values; continue from those candidates instead of stopping after open/click/type.",
+            description: "Operate the shared WKWebView automation session using the browser mode selected in Settings. Every primitive action returns post_action_observation and next_action_candidates with node_id values; continue from those candidates instead of stopping after open/click/type. Use fetch only when the user explicitly requests downloading or saving a resource; use get_readable or get_text to read normal webpages.",
             arguments: ["action navigate/observe/click/type/get_text/scroll/get_page_info/execute_js/find_elements/hover/get_readable/set_user_agent/set_viewport/get_backbone/fetch/new_tab/close_tab/list_tabs/get_cookies/scroll_and_collect/wait_for_dom_stable/wait_for_image", "url?", "selector?", "node_id/nodeId from next_action_candidates?", "label/button_text?", "text?", "coordinate_x/y?", "direction?", "amount?", "find filters: text/text-contains/desc/desc-contains/id/class/package/clickable/editable/scrollable/checked/enabled", "item_selector?", "scroll_count?", "keywords?", "fuzzy?", "tab_id?", "viewport_width/height?", "reset?", "full_page?", "attach_preview?", "save_to?", "timeout?", "aliases: web_fetch/fetch_url/open_url"]
         ),
         LocalAlpineToolCapability(
@@ -13052,6 +13052,7 @@ final class ChatViewModel {
         var browserToolCount = 0
         var lastNativeToolFallback: String?
         var executedAnyTool = false
+        var browserResultEchoCount = 0
 
         func streamFinalWithoutTools(reason: String, fallback: String?) async throws -> [String: Any]? {
             let resolvedFallback = fallback ?? lastNativeToolFallback
@@ -13121,6 +13122,22 @@ final class ChatViewModel {
                 }
             }
             guard !calls.isEmpty else {
+                if Self.isLocalNativeBrowserResultEnvelopeEcho(acc.bodyContent) {
+                    browserResultEchoCount += 1
+                    acc.replace("")
+                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
+                    apiMessages.append([
+                        "role": "system",
+                        "content": "The browser result is already attached as a structured tool result. Do not echo its JSON in assistant text. Either issue the next browser tool call when the task remains incomplete, or answer the user concisely from the existing result."
+                    ])
+                    if browserResultEchoCount < 3 {
+                        continue
+                    }
+                    return try await streamFinalWithoutTools(
+                        reason: "Do not repeat browser tool-result JSON. Give the user a concise answer from the completed browser result.",
+                        fallback: lastNativeToolFallback
+                    )
+                }
                 if Self.containsLocalNativeToolProtocol(acc.bodyContent) {
                     let message = "模型返回的本地工具协议不完整，未执行任何浏览器或设备操作。请根据这个失败结果修正工具调用参数，或直接回答用户。"
                     apiMessages.append(["role": "system", "content": message])
@@ -21125,7 +21142,7 @@ final class ChatViewModel {
 
         Browser override: use `browser_use` like Android Iexa. The shared browser uses the User-Agent and viewport selected in Settings → Chat Settings → Tools → Browser Mode. For interactive pages, open/navigate first, then read `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll` from every result. Prefer returned candidate `node_id` values for the next `click`, `type`, or `hover`; use `screenshot` to see the page when visual confirmation or coordinate fallback is needed. After pressing a page generate/export/download button, wait for the real result with `wait_for_image` or `wait_for_dom_stable`; do not stop at the click. Treat every browser action result as intermediate until the user task is complete, a final file/result exists, or credentials, payment, or a destructive action requires user input.
 
-        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. `web_search` only opens a real search page and returns an intermediate browser state; do not answer from `web_search` alone. Continue with `browser_use` like Android Iexa: inspect the returned observation and choose the next primitive yourself, such as opening a relevant result, reading the page with `get_readable`/`get_text`, scrolling for more content, or using `find_elements` with `scan_page:true` only when structural discovery is needed. Use `next_action_candidates` and `post_action_observation.visible_elements` first; reuse returned `nodeId`/`node_id` for the next click/type/hover; use viewport coordinates only when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or credentials, payment, or a destructive action requires user input. Do not narrate intermediate browser work in chat; progress belongs in the tool card. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn.
+        For browser/web actions, call real function tools (`web_search`, `browser_readable`, `browser_use`) when present, otherwise emit one `iexa_native` fallback action. Search when current/recent/source-backed facts are needed; use the current device time above as the search date and never use training-cutoff dates as query dates. `web_search` only opens a real search page and returns an intermediate browser state; do not answer from `web_search` alone. Continue with `browser_use` like Android Iexa: inspect the returned observation and choose the next primitive yourself, such as opening a relevant result, reading the page with `get_readable`/`get_text`, scrolling for more content, or using `find_elements` with `scan_page:true` only when structural discovery is needed. Use `fetch` only when the user explicitly asks to download or save a resource; it is not the normal way to read an HTML page. Use `next_action_candidates` and `post_action_observation.visible_elements` first; reuse returned `nodeId`/`node_id` for the next click/type/hover; use viewport coordinates only when a visible target is not exposed by DOM text. Before summarizing long pages, use `browser_readable`, `get_readable`, `get_text`, or `scroll_and_collect`; do not conclude from the first viewport. Screenshots/observations are tool-only by default and must not be attached to chat unless the user asks. Continue bounded primitive browser steps until the requested task is complete, a final file/result exists, or credentials, payment, or a destructive action requires user input. Do not narrate intermediate browser work in chat; progress belongs in the tool card. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn.
 
         Tool call style: when a real or fallback browser/native tool can satisfy the user's request, call it directly instead of only explaining. Infer the search query, URL target, page control, or follow-up intent from the latest user message and visible context; use reasonable safe defaults; ask only when the request is genuinely ambiguous, needs credentials, or would affect data outside the requested scope.
 
@@ -28297,6 +28314,21 @@ final class ChatViewModel {
             || normalized.contains("<function_call")
             || normalized.contains("\"tool_calls\"")
             || normalized.contains("\"browser_use_action\"")
+    }
+
+    private static func isLocalNativeBrowserResultEnvelopeEcho(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let json = firstJSONObjectString(in: trimmed) ?? (trimmed.hasPrefix("{") ? trimmed : nil),
+              let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let action = firstJSONStringValue(in: object, key: "action")?.lowercased(),
+              action == "browser_use",
+              let browserAction = firstJSONStringValue(in: object, key: "browser_action")?.lowercased(),
+              browserAction.hasPrefix("browser."),
+              object["data"] is [String: Any] else {
+            return false
+        }
+        return true
     }
 
     private func attachInlineImages(from rawContent: String, to messageIndex: Int) {
