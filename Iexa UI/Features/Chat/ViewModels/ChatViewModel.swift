@@ -10672,13 +10672,10 @@ final class ChatViewModel {
         }
 
         let failedMessage = conversation.messages[messageIndex]
-        let nativeCalls = LocalAlpineNativeToolCall.decodeMetadata(
-            failedMessage.metadata?["iexa_local_alpine_native_calls"]
-        )
-        // Only the OpenAI-compatible Local Alpine native-tool path needs a
-        // continuation retry. Keep ordinary errors on the established regenerate
-        // behavior, including image-generation and non-tool failures.
-        guard isOpenAICompatibleProvider, !nativeCalls.isEmpty else {
+        // Android retries from the failed assistant tail while retaining all
+        // preceding tool-result turns. Browser continuations keep their result
+        // on a parent node, so inspect the active parent chain, not just this row.
+        guard hasStructuredToolContinuation(endingAt: messageId) else {
             await regenerateResponse(messageId: messageId)
             return
         }
@@ -10687,21 +10684,19 @@ final class ChatViewModel {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !modelId.isEmpty else { return }
 
-        let toolCalls = LocalAlpineToolCall.decodeMetadata(
-            failedMessage.metadata?["iexa_local_alpine_tool_calls"]
-        )
-        let lastToolTitle = toolCalls.last?.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let emptyResponseError: String
-        if let lastToolTitle, !lastToolTitle.isEmpty {
-            emptyResponseError = "本地工具“\(lastToolTitle)”已完成，但模型仍未返回最终说明。请重试以继续当前工具步骤。"
-        } else {
-            emptyResponseError = "本地工具已完成，但模型仍未返回最终说明。请重试以继续当前工具步骤。"
-        }
+        let emptyResponseError = "工具步骤已完成，但模型仍未返回最终说明。请重试以继续当前工具步骤。"
 
         var apiMessages = await buildAPIMessagesAsync(
             includeLocalAlpineExecutionContext: true,
-            preferLocalAlpineNativeTools: false
+            preferLocalAlpineNativeTools: false,
+            excludingMessageIDs: Set([messageId])
         )
+        if let failedTurnHistory = Self.structuredToolHistoryMessages(
+            for: failedMessage,
+            providerType: currentProviderType
+        ) {
+            apiMessages.append(contentsOf: failedTurnHistory)
+        }
         apiMessages.append([
             "role": "system",
             "content": """
@@ -10807,6 +10802,54 @@ final class ChatViewModel {
                 NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
             }
         }
+    }
+
+    /// Same retry boundary as Android's retryLast: retain the tool-result tail
+    /// and reactivate this assistant row, never create a sibling regeneration.
+    private func hasStructuredToolContinuation(endingAt messageId: String) -> Bool {
+        guard let conversation else { return false }
+        var cursor: String? = messageId
+        var visited = Set<String>()
+        while let id = cursor,
+              visited.insert(id).inserted,
+              let node = conversation.history.nodes[id] {
+            let metadata = node.metadata ?? [:]
+            if !LocalAlpineNativeToolTurn.decodeMetadata(
+                metadata["iexa_local_alpine_native_tool_turns"]
+            ).isEmpty || !LocalNativeToolTurn.decodeMetadata(
+                metadata["iexa_local_native_tool_turns"]
+            ).isEmpty || !LocalAlpineNativeToolCall.decodeMetadata(
+                metadata["iexa_local_alpine_native_calls"]
+            ).isEmpty || !LocalAlpineNativeToolCall.decodeMetadata(
+                metadata["iexa_local_native_tool_calls"]
+            ).isEmpty {
+                return true
+            }
+            // A retry belongs only to this user turn. Do not turn an ordinary
+            // later error into a tool continuation just because an older turn
+            // in the same conversation happened to use a tool.
+            if node.role == .user {
+                break
+            }
+            cursor = node.parentId
+        }
+        return false
+    }
+
+    private static func structuredToolHistoryMessages(
+        for message: ChatMessage,
+        providerType: ServerConfig.ProviderType?
+    ) -> [[String: Any]]? {
+        if let alpineHistory = localAlpineToolHistoryMessages(
+            for: message,
+            providerType: providerType
+        ) {
+            return alpineHistory
+        }
+        return localNativeToolHistoryMessages(
+            for: message,
+            providerType: providerType
+        )
     }
 
     /// Regenerates a specific assistant response by its message ID.
@@ -11776,6 +11819,8 @@ final class ChatViewModel {
             return turns
         }
     }
+
+    private typealias LocalNativeToolTurn = LocalAlpineNativeToolTurn
 
     private static let nativeToolSilentFailureDomain = "Iexa.NativeToolSilentFailure"
 
@@ -13060,9 +13105,30 @@ final class ChatViewModel {
             }
             if Task.isCancelled { return exactUsage }
 
-            let calls = toolAccumulator.completedCalls()
+            var calls = toolAccumulator.completedCalls()
                 .filter(Self.isLocalNativeFunctionToolCall)
+            // Some relays incorrectly stream a function envelope as assistant
+            // text instead of a tool_calls delta. Parse that envelope here at
+            // the agent boundary, execute it as a real tool call, and feed its
+            // result back structurally. Do not let it fall through as prose.
+            if calls.isEmpty {
+                let textCalls = Self.localNativeMarkdownFunctionToolCalls(from: acc.bodyContent)
+                    .filter(Self.isLocalNativeFunctionToolCall)
+                if !textCalls.isEmpty {
+                    calls = textCalls
+                    acc.replace("")
+                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
+                }
+            }
             guard !calls.isEmpty else {
+                if Self.containsLocalNativeToolProtocol(acc.bodyContent) {
+                    let message = "模型返回的本地工具协议不完整，未执行任何浏览器或设备操作。请根据这个失败结果修正工具调用参数，或直接回答用户。"
+                    apiMessages.append(["role": "system", "content": message])
+                    acc.replace("")
+                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
+                    executedAnyTool = true
+                    continue
+                }
                 if !executedAnyTool,
                    acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     throw Self.nativeToolSilentFailureError(kind: "Local Native")
@@ -13150,6 +13216,11 @@ final class ChatViewModel {
                 if execution.completedAssistantTurn {
                     return exactUsage
                 }
+                mergeLocalNativeToolResultMetadata(
+                    messageId: assistantMessageId,
+                    call: call,
+                    result: execution.toolContent
+                )
                 Self.appendToolResultMessage(
                     callID: call.id,
                     content: execution.toolContent,
@@ -15207,6 +15278,25 @@ final class ChatViewModel {
         for message: ChatMessage,
         providerType: ServerConfig.ProviderType?
     ) -> [[String: Any]]? {
+        let storedTurns = LocalNativeToolTurn.decodeMetadata(
+            message.metadata?["iexa_local_native_tool_turns"]
+        )
+        if !storedTurns.isEmpty {
+            var messages: [[String: Any]] = []
+            for turn in storedTurns {
+                messages.append(toolCallAssistantMessage(
+                    for: [turn.call],
+                    providerType: providerType
+                ))
+                appendToolResultMessage(
+                    callID: turn.call.id,
+                    content: clippedForSystemContext(turn.result, maxCharacters: 16_000),
+                    providerType: providerType,
+                    to: &messages
+                )
+            }
+            return messages
+        }
         let nativeCalls = LocalAlpineNativeToolCall.decodeMetadata(
             message.metadata?["iexa_local_native_tool_calls"]
         )
@@ -16984,6 +17074,41 @@ final class ChatViewModel {
                 || delta?["function_call"] != nil
                 || message?["tool_calls"] != nil
                 || message?["function_call"] != nil
+        }
+    }
+
+    private func mergeLocalNativeToolResultMetadata(
+        messageId: String,
+        call: LocalAlpineNativeToolCall,
+        result: String
+    ) {
+        guard let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        var metadata = conversation?.messages[index].metadata ?? [:]
+        let normalizedResult = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        let exactResult = normalizedResult.isEmpty
+            ? "Local Native tool completed."
+            : normalizedResult
+        var turns = LocalNativeToolTurn.decodeMetadata(
+            metadata["iexa_local_native_tool_turns"]
+        )
+        if !turns.contains(where: { $0.call.id == call.id }) {
+            turns.append(LocalNativeToolTurn(call: call, result: exactResult))
+        }
+        if let encodedTurns = LocalNativeToolTurn.metadataString(for: turns) {
+            metadata["iexa_local_native_tool_turns"] = encodedTurns
+        }
+        var calls = LocalAlpineNativeToolCall.decodeMetadata(
+            metadata["iexa_local_native_tool_calls"]
+        )
+        if !calls.contains(where: { $0.id == call.id }) {
+            calls.append(call)
+        }
+        if let encodedCalls = LocalAlpineNativeToolCall.metadataString(for: calls) {
+            metadata["iexa_local_native_tool_calls"] = encodedCalls
+        }
+        conversation?.messages[index].metadata = metadata
+        conversation?.history.updateNode(id: messageId) { node in
+            node.metadata = metadata
         }
     }
 
@@ -22571,7 +22696,8 @@ final class ChatViewModel {
     private func buildAPIMessagesAsync(
         imageCanvasInstructionMessageId: String? = nil,
         includeLocalAlpineExecutionContext: Bool? = nil,
-        preferLocalAlpineNativeTools: Bool? = nil
+        preferLocalAlpineNativeTools: Bool? = nil,
+        excludingMessageIDs: Set<String> = []
     ) async -> [[String: Any]] {
         guard let conversation else { return [] }
         var apiMessages: [[String: Any]] = []
@@ -22689,12 +22815,16 @@ final class ChatViewModel {
         if !combinedSystemPrompt.isEmpty {
             apiMessages.append(["role": "system", "content": combinedSystemPrompt])
         }
-        for message in conversation.messages where !message.isStreaming
+        for message in conversation.messages where !excludingMessageIDs.contains(message.id)
+            && !message.isStreaming
             && !Self.isLocalWorkspaceAgentResult(message) {
             let isNativeToolResult = Self.isLocalNativeToolResult(message)
             let isLocalAlpineResult = Self.isLocalAlpineAgentResult(message)
             let isDirectLocalAlpineNativeToolParent = !LocalAlpineNativeToolTurn.decodeMetadata(
                 message.metadata?["iexa_local_alpine_native_tool_turns"]
+            ).isEmpty
+            let isDirectLocalNativeToolParent = !LocalNativeToolTurn.decodeMetadata(
+                message.metadata?["iexa_local_native_tool_turns"]
             ).isEmpty
             if isNativeToolResult {
                 if (isOpenAICompatibleProvider || currentProviderType == .anthropic),
@@ -22723,6 +22853,22 @@ final class ChatViewModel {
             if isDirectLocalAlpineNativeToolParent,
                (isOpenAICompatibleProvider || currentProviderType == .anthropic),
                let exactToolHistory = Self.localAlpineToolHistoryMessages(
+                for: message,
+                providerType: currentProviderType
+               ) {
+                apiMessages.append(contentsOf: exactToolHistory)
+                let finalContent = contentForModel(
+                    message: message,
+                    includeImageCanvasInstruction: false
+                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                if message.error == nil, !finalContent.isEmpty {
+                    apiMessages.append(["role": "assistant", "content": finalContent])
+                }
+                continue
+            }
+            if isDirectLocalNativeToolParent,
+               (isOpenAICompatibleProvider || currentProviderType == .anthropic),
+               let exactToolHistory = Self.localNativeToolHistoryMessages(
                 for: message,
                 providerType: currentProviderType
                ) {
@@ -23916,6 +24062,12 @@ final class ChatViewModel {
         if let toolCalls = LocalAlpineNativeToolCall.metadataString(for: structuredCalls) {
             resultMetadata["iexa_local_native_tool_calls"] = toolCalls
         }
+        let resultTurns = zip(structuredCalls, result.callResultContents).map {
+            LocalNativeToolTurn(call: $0.0, result: $0.1)
+        }
+        if let encodedTurns = LocalNativeToolTurn.metadataString(for: resultTurns) {
+            resultMetadata["iexa_local_native_tool_turns"] = encodedTurns
+        }
         let resultMessage = ChatMessage(
             role: .system,
             content: "本地 iOS 工具执行结果\n\n\(resultContent)",
@@ -23966,6 +24118,10 @@ final class ChatViewModel {
         ]
         if let encodedCalls = LocalAlpineNativeToolCall.metadataString(for: toolCalls) {
             resultMetadata["iexa_local_native_tool_calls"] = encodedCalls
+        }
+        let resultTurns = toolCalls.map { LocalNativeToolTurn(call: $0, result: toolContent) }
+        if let encodedTurns = LocalNativeToolTurn.metadataString(for: resultTurns) {
+            resultMetadata["iexa_local_native_tool_turns"] = encodedTurns
         }
         let resultMessage = ChatMessage(
             role: .system,
@@ -28129,6 +28285,18 @@ final class ChatViewModel {
             cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return cleaned
+    }
+
+    private static func containsLocalNativeToolProtocol(_ text: String) -> Bool {
+        let normalized = text.lowercased()
+        return normalized.contains("```iexa_native")
+            || normalized.contains("<|dsml|>")
+            || normalized.contains("<| |dsml| |")
+            || normalized.contains("<tool_call")
+            || normalized.contains("<tool_use")
+            || normalized.contains("<function_call")
+            || normalized.contains("\"tool_calls\"")
+            || normalized.contains("\"browser_use_action\"")
     }
 
     private func attachInlineImages(from rawContent: String, to messageIndex: Int) {

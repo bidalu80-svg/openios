@@ -4226,7 +4226,7 @@ final class BrowserWebSearchService: NSObject {
                 "error": "Failed to load webpage"
             ]
         }
-        let script = Self.firstString(in: call, keys: ["script"])
+        let script = Self.firstString(in: call, keys: ["script", "javascript", "js"])
         guard let script, !script.isEmpty else {
             return [
                 "action": "browser.execute_js",
@@ -4287,7 +4287,12 @@ final class BrowserWebSearchService: NSObject {
           }
         })();
         """
-        let evaluation = await evaluateAsyncJavaScriptString(asyncBody, fallbackScript: syncWrapped)
+        let timeout = TimeInterval(Self.intValue(call["timeout"] ?? call["timeout_seconds"]) ?? 30)
+        let evaluation = await evaluateAsyncJavaScriptString(
+            asyncBody,
+            fallbackScript: syncWrapped,
+            timeout: min(max(timeout, 1), 30)
+        )
         guard let json = evaluation.string,
               let data = json.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -9602,7 +9607,11 @@ final class BrowserWebSearchService: NSObject {
         (await evaluateJavaScriptString(script)).string
     }
 
-    private func evaluateAsyncJavaScriptString(_ script: String, fallbackScript: String) async -> JavaScriptEvaluation {
+    private func evaluateAsyncJavaScriptString(
+        _ script: String,
+        fallbackScript: String,
+        timeout: TimeInterval = 30
+    ) async -> JavaScriptEvaluation {
         guard let webView else {
             return JavaScriptEvaluation(
                 string: nil,
@@ -9612,35 +9621,69 @@ final class BrowserWebSearchService: NSObject {
             )
         }
         if #available(iOS 14.0, *) {
-            do {
-                let value = try await webView.callAsyncJavaScript(
-                    script,
-                    arguments: [:],
-                    in: nil,
-                    contentWorld: .page
-                )
-                if let string = value as? String {
-                    return JavaScriptEvaluation(
-                        string: string,
-                        error: nil,
-                        resultType: "string",
-                        resultPreview: nil
-                    )
+            return await withCheckedContinuation { continuation in
+                var didFinish = false
+                var timeoutTask: Task<Void, Never>?
+                func finish(_ evaluation: JavaScriptEvaluation) {
+                    guard !didFinish else { return }
+                    didFinish = true
+                    timeoutTask?.cancel()
+                    continuation.resume(returning: evaluation)
                 }
-                return JavaScriptEvaluation(
-                    string: nil,
-                    error: nil,
-                    resultType: String(describing: type(of: value)),
-                    resultPreview: String(String(describing: value).prefix(500))
-                )
-            } catch {
-                self.logger.debug("Browser async JS failed: \(error.localizedDescription, privacy: .public)")
-                return JavaScriptEvaluation(
-                    string: nil,
-                    error: error.localizedDescription,
-                    resultType: nil,
-                    resultPreview: nil
-                )
+
+                timeoutTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                    guard !Task.isCancelled else { return }
+                    finish(JavaScriptEvaluation(
+                        string: nil,
+                        error: "JavaScript execution timed out after \(Int(timeout))s",
+                        resultType: nil,
+                        resultPreview: nil
+                    ))
+                }
+
+                Task { @MainActor [weak self, weak webView] in
+                    guard let self, let webView else {
+                        finish(JavaScriptEvaluation(
+                            string: nil,
+                            error: "Browser web view is not available",
+                            resultType: nil,
+                            resultPreview: nil
+                        ))
+                        return
+                    }
+                    do {
+                        let value = try await webView.callAsyncJavaScript(
+                            script,
+                            arguments: [:],
+                            in: nil,
+                            contentWorld: .page
+                        )
+                        if let string = value as? String {
+                            finish(JavaScriptEvaluation(
+                                string: string,
+                                error: nil,
+                                resultType: "string",
+                                resultPreview: nil
+                            ))
+                        } else {
+                            finish(JavaScriptEvaluation(
+                                string: nil,
+                                error: nil,
+                                resultType: String(describing: type(of: value)),
+                                resultPreview: String(String(describing: value).prefix(500))
+                            ))
+                        }
+                    } catch {
+                        self.logger.debug("Browser async JS failed: \(error.localizedDescription, privacy: .public)")
+                        finish(JavaScriptEvaluation(
+                            string: nil,
+                            error: error.localizedDescription,
+                            resultType: nil,
+                            resultPreview: nil
+                        ))
+                    }
+                }
             }
         }
         return await evaluateJavaScriptString(fallbackScript)

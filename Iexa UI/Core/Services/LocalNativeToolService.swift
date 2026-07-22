@@ -5,6 +5,7 @@ import UserNotifications
 struct LocalNativeToolRunResult: Sendable {
     let didExecute: Bool
     let summary: String
+    let callResultContents: [String]
     let files: [ChatMessageFile]
     let officeDocument: LocalNativeOfficeDocument?
     let browserDocument: LocalNativeBrowserDocument?
@@ -106,6 +107,7 @@ final class LocalNativeToolService {
             return LocalNativeToolRunResult(
                 didExecute: false,
                 summary: "",
+                callResultContents: [],
                 files: [],
                 officeDocument: nil,
                 browserDocument: nil,
@@ -135,6 +137,9 @@ final class LocalNativeToolService {
         return LocalNativeToolRunResult(
             didExecute: true,
             summary: prettyJSON(payload),
+            callResultContents: zip(calls, results).map { call, result in
+                structuredResultContent(for: call, result: result)
+            },
             files: results.flatMap(Self.files(from:)),
             officeDocument: Self.officeDocument(from: results),
             browserDocument: Self.browserDocument(from: results),
@@ -153,6 +158,57 @@ final class LocalNativeToolService {
             return error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         return true
+    }
+
+    private func structuredResultContent(
+        for call: [String: Any],
+        result: [String: Any]
+    ) -> String {
+        guard Self.isBrowserToolCall(call) else {
+            return prettyJSON(result)
+        }
+
+        let requestedAction = (call["action"] as? String ?? call["name"] as? String ?? "browser_use")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let browserAction = (
+            result["browser_action"] as? String
+            ?? result["browser_use_action"] as? String
+            ?? call["browser_use_action"] as? String
+            ?? call["browser_action"] as? String
+            ?? call["operation"] as? String
+            ?? call["op"] as? String
+            ?? requestedAction
+        )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let succeeded = Self.resultSucceeded(result)
+        var data = result
+        data["success"] = succeeded
+
+        return prettyJSON([
+            "ok": succeeded,
+            "tool": "browser_use",
+            "action": "browser_use",
+            "browser_action": browserAction,
+            "data": data,
+            "timestamp": ISO8601DateFormatter().string(from: Date())
+        ])
+    }
+
+    private static func isBrowserToolCall(_ call: [String: Any]) -> Bool {
+        let raw = (call["action"] as? String ?? call["name"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: ".")
+        return raw == "browser.use"
+            || raw == "web.search"
+            || raw == "browser.search"
+            || raw.hasPrefix("browser.")
+            || raw == "navigate"
+            || raw == "get.readable"
+            || raw == "get.text"
+            || raw == "get.page.info"
+            || raw == "execute.js"
+            || raw == "wait.for.dom.stable"
     }
 
     private static func progressStatusKey(for action: String, index: Int) -> String {
