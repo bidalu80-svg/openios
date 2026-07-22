@@ -13052,7 +13052,6 @@ final class ChatViewModel {
         var browserToolCount = 0
         var lastNativeToolFallback: String?
         var executedAnyTool = false
-        var browserResultEchoCount = 0
 
         func streamFinalWithoutTools(reason: String, fallback: String?) async throws -> [String: Any]? {
             let resolvedFallback = fallback ?? lastNativeToolFallback
@@ -13122,22 +13121,6 @@ final class ChatViewModel {
                 }
             }
             guard !calls.isEmpty else {
-                if Self.isLocalNativeBrowserResultEnvelopeEcho(acc.bodyContent) {
-                    browserResultEchoCount += 1
-                    acc.replace("")
-                    updateAssistantMessage(id: assistantMessageId, content: "", isStreaming: true)
-                    apiMessages.append([
-                        "role": "system",
-                        "content": "The browser result is already attached as a structured tool result. Do not echo its JSON in assistant text. Either issue the next browser tool call when the task remains incomplete, or answer the user concisely from the existing result."
-                    ])
-                    if browserResultEchoCount < 3 {
-                        continue
-                    }
-                    return try await streamFinalWithoutTools(
-                        reason: "Do not repeat browser tool-result JSON. Give the user a concise answer from the completed browser result.",
-                        fallback: lastNativeToolFallback
-                    )
-                }
                 if Self.containsLocalNativeToolProtocol(acc.bodyContent) {
                     let message = "模型返回的本地工具协议不完整，未执行任何浏览器或设备操作。请根据这个失败结果修正工具调用参数，或直接回答用户。"
                     apiMessages.append(["role": "system", "content": message])
@@ -14112,7 +14095,9 @@ final class ChatViewModel {
                 return true
             }
             if metadata["iexa_local_alpine_tool_calls"]?.localizedCaseInsensitiveContains("browser_use") == true
-                || metadata["iexa_local_alpine_tool_calls"]?.localizedCaseInsensitiveContains("web_search") == true {
+                || metadata["iexa_local_alpine_tool_calls"]?.localizedCaseInsensitiveContains("web_search") == true
+                || metadata["iexa_local_native_tool_calls"]?.localizedCaseInsensitiveContains("browser_use") == true
+                || metadata["iexa_local_native_tool_calls"]?.localizedCaseInsensitiveContains("web_search") == true {
                 return true
             }
         }
@@ -16535,6 +16520,74 @@ final class ChatViewModel {
             )
         }
         return String(body.prefix(16_000))
+    }
+
+    private static func localNativePlainContinuationObservation(for message: ChatMessage) -> String {
+        let turns = LocalNativeToolTurn.decodeMetadata(
+            message.metadata?["iexa_local_native_tool_turns"]
+        )
+        let browserTurns = turns.filter { localNativeBrowserToolKind($0.call) != nil }
+        guard !browserTurns.isEmpty else {
+            return "A local tool completed. Answer the user from the completed result; do not reproduce internal tool protocol or JSON."
+        }
+
+        let observations = browserTurns.compactMap { turn -> String? in
+            let raw = turn.result.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !raw.isEmpty else { return nil }
+            let result: [String: Any]
+            if let data = raw.data(using: .utf8),
+               let object = try? JSONSerialization.jsonObject(with: data),
+               let primary = localNativeBrowserPrimaryResult(from: object) {
+                result = primary
+            } else {
+                result = ["ok": false, "error": raw]
+            }
+
+            let action = normalizedBrowserResultActionName(
+                firstNonEmptyString(
+                    in: result,
+                    keys: ["browser_action", "browser_use_action", "operation", "op", "action"]
+                ) ?? localAlpineBrowserActionName(from: turn.call)
+            )
+            var lines = ["Browser action completed: \(action)."]
+            if let title = firstNonEmptyString(in: result, keys: ["title", "name"]) {
+                lines.append("Page title: \(String(title.prefix(400))).")
+            }
+            if let pageURL = firstNonEmptyString(in: result, keys: ["page_url", "url", "link", "href"]),
+               !pageURL.lowercased().hasPrefix("file:") {
+                lines.append("Page URL: \(String(pageURL.prefix(1_500))).")
+            }
+            if let error = firstNonEmptyString(in: result, keys: ["error", "message"]) {
+                lines.append("Result: \(String(error.prefix(2_000)))")
+            } else {
+                let text = localNativeBrowserPlainText(from: result)
+                if !text.isEmpty { lines.append(text) }
+            }
+            return lines.joined(separator: "\n")
+        }
+
+        return """
+        A browser tool has already completed. Use the observation below to continue the user's task or give the final answer. Do not reproduce tool protocol, JSON, internal file URLs, CSS selectors, or node identifiers in assistant text.
+
+        \(String(observations.joined(separator: "\n\n").prefix(12_000)))
+        """
+    }
+
+    private static func localNativeBrowserPlainText(from result: [String: Any]) -> String {
+        let keys = ["summary", "text", "content", "readable_text", "markdown"]
+        let chunks = keys.compactMap { key in
+            firstNonEmptyString(in: result, keys: [key]).map { String($0.prefix(8_000)) }
+        }
+        return String(chunks.joined(separator: "\n\n").prefix(10_000))
+    }
+
+    private static func localNativeMessageHasBrowserToolTurn(_ message: ChatMessage) -> Bool {
+        if messageHasLocalBrowserActivity(message) {
+            return true
+        }
+        return LocalNativeToolTurn.decodeMetadata(
+            message.metadata?["iexa_local_native_tool_turns"]
+        ).contains { localNativeBrowserToolKind($0.call) != nil }
     }
 
     private static func localNativeBrowserPrimaryResult(from value: Any) -> [String: Any]? {
@@ -19004,6 +19057,10 @@ final class ChatViewModel {
     private func shouldEnableOpenAIResponsesImageGenerationTool(modelId: String) -> Bool {
         guard imageGenerationEnabled else { return false }
         guard !selectedModelCanGenerateImages else { return false }
+        if let selectedModel,
+           LocalModelCapabilityRegistry.isKnownTextOnlyModel(selectedModel) {
+            return false
+        }
         if selectedModel?.supportsImageGeneration == true { return true }
         if selectedModel?.defaultFeatureIds.contains("image_generation") == true { return true }
         if selectedModel?.builtinTools["image_generation"] == true { return true }
@@ -19053,6 +19110,9 @@ final class ChatViewModel {
         guard canUseDirectImageEndpointProvider,
               imageGenerationEnabled,
               let model = selectedModel else {
+            return false
+        }
+        guard !LocalModelCapabilityRegistry.isKnownTextOnlyModel(model) else {
             return false
         }
         let requestedModelId = (modelId ?? selectedModelId ?? conversation?.model ?? "")
@@ -22844,21 +22904,27 @@ final class ChatViewModel {
                 message.metadata?["iexa_local_native_tool_turns"]
             ).isEmpty
             if isNativeToolResult {
-                if (isOpenAICompatibleProvider || currentProviderType == .anthropic),
+                let canReplayStructuredHistory = (isOpenAICompatibleProvider || currentProviderType == .anthropic)
+                    && !localNativeFunctionToolsUnsupportedModels.contains(localAlpineModelId)
+                if canReplayStructuredHistory,
                    let exactToolHistory = Self.localNativeToolHistoryMessages(
                     for: message,
                     providerType: currentProviderType
                 ) {
                     apiMessages.append(contentsOf: exactToolHistory)
                 } else {
-                    // Legacy result messages created before structured native
-                    // history was persisted. Keep the old system-text fallback
-                    // so existing conversations remain usable.
-                    let modelContent = contentForModel(
-                        message: message,
-                        includeImageCanvasInstruction: false
-                    )
-                    apiMessages.append(["role": "system", "content": modelContent])
+                    if Self.localNativeMessageHasBrowserToolTurn(message) {
+                        apiMessages.append([
+                            "role": "system",
+                            "content": Self.localNativePlainContinuationObservation(for: message)
+                        ])
+                    } else {
+                        let modelContent = contentForModel(
+                            message: message,
+                            includeImageCanvasInstruction: false
+                        )
+                        apiMessages.append(["role": "system", "content": modelContent])
+                    }
                 }
                 continue
             }
@@ -24856,16 +24922,17 @@ final class ChatViewModel {
         conversation?.history.currentId = messageId
     }
 
-    private func localNativeResultNeedsBrowserContinuation(parentId: String) -> Bool {
+    private func localNativeResultHasBrowserActivity(parentId: String) -> Bool {
         guard let message = conversation?.messages.first(where: { $0.id == parentId }) else {
             return false
         }
         let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Self.messageHasLocalBrowserActivity(message) {
+            return true
+        }
         guard !content.isEmpty else { return false }
         let lowered = content.lowercased()
-
-        let isBrowserResult = Self.messageHasLocalBrowserActivity(message)
-            || lowered.contains("\"browser_action\"")
+        return lowered.contains("\"browser_action\"")
             || lowered.contains("\"action\":\"browser.")
             || lowered.contains("\"action\" : \"browser.")
             || lowered.contains("\"post_action_observation\"")
@@ -24875,9 +24942,16 @@ final class ChatViewModel {
             || lowered.contains("browser_use")
             || lowered.contains("本地 ios 工具执行结果")
                 && (lowered.contains("\"url\"") || lowered.contains("网页") || lowered.contains("浏览器"))
-        guard isBrowserResult else {
+    }
+
+    private func localNativeResultNeedsBrowserContinuation(parentId: String) -> Bool {
+        guard localNativeResultHasBrowserActivity(parentId: parentId),
+              let message = conversation?.messages.first(where: { $0.id == parentId }) else {
             return false
         }
+        let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return false }
+        let lowered = content.lowercased()
 
         if Self.anyJSONBoolValue(in: content, key: "next_action_required", equals: true) {
             return true
@@ -24945,6 +25019,7 @@ final class ChatViewModel {
         guard let manager else { return }
         guard let conversation, conversation.messages.contains(where: { $0.id == parentId }) else { return }
         guard let modelId = selectedModelId ?? conversation.model else { return }
+        let hasBrowserToolResult = localNativeResultHasBrowserActivity(parentId: parentId)
         let shouldContinueBrowserTools = localNativeResultNeedsBrowserContinuation(parentId: parentId)
 
         let assistantMessageId = UUID().uuidString
@@ -25040,7 +25115,7 @@ final class ChatViewModel {
 
                 let supportsStructuredNativeContinuation = self.isOpenAICompatibleProvider
                     || self.currentProviderType == .anthropic
-                if shouldContinueBrowserTools,
+                if hasBrowserToolResult,
                    supportsStructuredNativeContinuation,
                    self.shouldUseLocalNativeFunctionTools(for: modelId),
                    self.isLocalBrowserNativeToolsEnabled {
@@ -25052,7 +25127,7 @@ final class ChatViewModel {
                         includeShortcutsTools: false,
                         includeMemoryTools: false
                     )
-                    request.toolChoice = "required"
+                    request.toolChoice = shouldContinueBrowserTools ? "required" : "auto"
                     request.parallelToolCalls = false
 
                     do {
@@ -25065,6 +25140,9 @@ final class ChatViewModel {
                     } catch {
                         guard Self.errorLooksLikeUnsupportedNativeTools(error) else { throw error }
                         self.localNativeFunctionToolsUnsupportedModels.insert(modelId)
+                        request.messages = await self.buildAPIMessagesAsync(
+                            includeLocalAlpineExecutionContext: false
+                        )
                         Self.disableAgentToolsForResultContinuation(&request)
                         let stream = try await manager.sendPreferredOpenAIStreaming(
                             request: request
@@ -28314,21 +28392,6 @@ final class ChatViewModel {
             || normalized.contains("<function_call")
             || normalized.contains("\"tool_calls\"")
             || normalized.contains("\"browser_use_action\"")
-    }
-
-    private static func isLocalNativeBrowserResultEnvelopeEcho(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let json = firstJSONObjectString(in: trimmed) ?? (trimmed.hasPrefix("{") ? trimmed : nil),
-              let data = json.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let action = firstJSONStringValue(in: object, key: "action")?.lowercased(),
-              action == "browser_use",
-              let browserAction = firstJSONStringValue(in: object, key: "browser_action")?.lowercased(),
-              browserAction.hasPrefix("browser."),
-              object["data"] is [String: Any] else {
-            return false
-        }
-        return true
     }
 
     private func attachInlineImages(from rawContent: String, to messageIndex: Int) {

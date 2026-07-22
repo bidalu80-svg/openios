@@ -366,11 +366,22 @@ struct LocalModelCapability: Hashable, Sendable {
 
 enum LocalModelCapabilityRegistry {
     static func explicitlyDisablesImageGeneration(for model: AIModel) -> Bool {
+        if isKnownTextOnlyModel(model) {
+            return true
+        }
         if let value = model.capabilities?["image_generation"],
            truthy(value) == false {
             return true
         }
         return false
+    }
+
+    static func isKnownTextOnlyModel(_ model: AIModel) -> Bool {
+        [model.id, model.name].contains { raw in
+            let identifier = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return identifier == "sensenova-6.7-flash-lite"
+                || identifier.hasSuffix("/sensenova-6.7-flash-lite")
+        }
     }
 
     static func capability(for model: AIModel) -> LocalModelCapability {
