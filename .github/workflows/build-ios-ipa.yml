@@ -423,29 +423,43 @@ jobs:
         if: env.HAS_SIGNING_SECRETS != 'true' || steps.archive_signed.outcome != 'success' || steps.export_signed.outcome != 'success'
         run: |
           APP_BUNDLE_ID="${IOS_BUNDLE_ID:-com.openui.openui}"
-          mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/unsigned-build-app" "$RUNNER_TEMP/unsigned-ipa/Payload"
-          xcodebuild \
-            -project "Iexa UI.xcodeproj" \
-            -scheme "Iexa UI" \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            TARGET_BUILD_DIR="$RUNNER_TEMP/unsigned-build-app" \
-            BUILT_PRODUCTS_DIR="$RUNNER_TEMP/unsigned-build-app" \
-            COPY_PHASE_STRIP=YES \
-            DEAD_CODE_STRIPPING=YES \
-            DEBUG_INFORMATION_FORMAT=dwarf \
-            DEPLOYMENT_POSTPROCESSING=YES \
-            ENABLE_NS_ASSERTIONS=NO \
-            ENABLE_TESTABILITY=NO \
-            STRIP_INSTALLED_PRODUCT=YES \
-            STRIP_SWIFT_SYMBOLS=YES \
-            SWIFT_REFLECTION_METADATA_LEVEL=without-names \
-            SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO \
-            GCC_INLINES_ARE_PRIVATE_EXTERN=YES \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            build
+          DERIVED_DATA_PATH="$RUNNER_TEMP/DerivedData-unsigned"
+          rm -rf "$DERIVED_DATA_PATH"
+          mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/unsigned-build-app" "$RUNNER_TEMP/unsigned-ipa/Payload" "$DERIVED_DATA_PATH"
+          build_unsigned_app() {
+            xcodebuild \
+              -project "Iexa UI.xcodeproj" \
+              -scheme "Iexa UI" \
+              -configuration Release \
+              -destination 'generic/platform=iOS' \
+              -derivedDataPath "$DERIVED_DATA_PATH" \
+              -jobs 1 \
+              TARGET_BUILD_DIR="$RUNNER_TEMP/unsigned-build-app" \
+              BUILT_PRODUCTS_DIR="$RUNNER_TEMP/unsigned-build-app" \
+              COMPILER_INDEX_STORE_ENABLE=NO \
+              COPY_PHASE_STRIP=YES \
+              DEAD_CODE_STRIPPING=YES \
+              DEBUG_INFORMATION_FORMAT=dwarf \
+              DEPLOYMENT_POSTPROCESSING=YES \
+              ENABLE_NS_ASSERTIONS=NO \
+              ENABLE_TESTABILITY=NO \
+              STRIP_INSTALLED_PRODUCT=YES \
+              STRIP_SWIFT_SYMBOLS=YES \
+              SWIFT_REFLECTION_METADATA_LEVEL=without-names \
+              SWIFT_SERIALIZE_DEBUGGING_OPTIONS=NO \
+              GCC_INLINES_ARE_PRIVATE_EXTERN=YES \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              build
+          }
+
+          if ! build_unsigned_app; then
+            echo "::warning::Unsigned app build failed once; cleaning DerivedData and retrying"
+            rm -rf "$DERIVED_DATA_PATH" "$RUNNER_TEMP/unsigned-build-app" "$RUNNER_TEMP/unsigned-ipa/Payload"
+            mkdir -p "$DERIVED_DATA_PATH" "$RUNNER_TEMP/unsigned-build-app" "$RUNNER_TEMP/unsigned-ipa/Payload"
+            build_unsigned_app
+          fi
 
           APP_PATH="$(find "$RUNNER_TEMP/unsigned-build-app" -maxdepth 1 -name '*.app' | head -n 1)"
           if [ -z "$APP_PATH" ]; then
