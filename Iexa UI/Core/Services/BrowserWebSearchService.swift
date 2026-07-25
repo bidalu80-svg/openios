@@ -10,6 +10,11 @@ struct BrowserWebSearchTabSnapshot: Identifiable, Equatable {
     let isActive: Bool
 }
 
+private struct BrowserVisualArtifact {
+    let fileURL: URL
+    let modelReadablePath: String
+}
+
 @MainActor
 final class BrowserWebSearchService: NSObject {
     static let shared = BrowserWebSearchService()
@@ -670,14 +675,12 @@ final class BrowserWebSearchService: NSObject {
         if Self.browserActionPublishesLivePreview(requestedAction),
            enriched["visual_observation"] == nil,
            let screenshot = await captureViewportScreenshot(prefix: "browser_snapshot") {
-            enriched["screenshot_path"] = screenshot.path
-            enriched["visual_observation"] = [
-                "screenshot_url": screenshot.absoluteString,
-                "file_path": screenshot.path,
-                "image_path": screenshot.path,
-                "tool_only": true,
-                "note": "Tool-only current viewport snapshot after browser action."
-            ]
+            let artifact = await browserVisualArtifact(for: screenshot)
+            enriched["screenshot_path"] = artifact.modelReadablePath
+            enriched["visual_observation"] = browserVisualObservation(
+                from: artifact,
+                note: "Tool-only current viewport snapshot after browser action."
+            )
         }
         return enriched
     }
@@ -1266,12 +1269,11 @@ final class BrowserWebSearchService: NSObject {
             "summary": summaryText
         ]
         if let screenshot {
-            payload["visual_observation"] = [
-                "screenshot_url": screenshot.absoluteString,
-                "file_path": screenshot.path,
-                "tool_only": true,
-                "note": "Tool-only current viewport screenshot. Do not show in chat unless the user explicitly asks."
-            ]
+            let artifact = await browserVisualArtifact(for: screenshot)
+            payload["visual_observation"] = browserVisualObservation(
+                from: artifact,
+                note: "Tool-only current viewport screenshot. Do not show in chat unless the user explicitly asks."
+            )
         }
         return payload
     }
@@ -1300,6 +1302,7 @@ final class BrowserWebSearchService: NSObject {
                 "error": "Failed to capture webpage screenshot"
             ]
         }
+        let artifact = await browserVisualArtifact(for: screenshot)
         let snapshot = await evaluatePageSnapshot()
         let title = snapshot?.title.isEmpty == false ? snapshot!.title : "网页截图"
         let url = snapshot?.url ?? webView?.url?.absoluteString ?? ""
@@ -1313,10 +1316,11 @@ final class BrowserWebSearchService: NSObject {
             "attach_file": attachPreview,
             "preview_images": attachPreview ? [screenshot.absoluteString] : [],
             "visual_observation": [
-                "screenshot_url": screenshot.absoluteString,
-                "file_url": screenshot.absoluteString,
-                "file_path": screenshot.path,
-                "image_path": screenshot.path,
+                "screenshot_url": artifact.fileURL.absoluteString,
+                "file_url": artifact.fileURL.absoluteString,
+                "file_path": artifact.modelReadablePath,
+                "image_path": artifact.modelReadablePath,
+                "local_alpine_path": artifact.modelReadablePath,
                 "tool_only": true,
                 "note": fullPage
                     ? "Tool-only full-page browser screenshot. Use it to decide the next browser action; do not show in chat unless the user asks."
@@ -1333,9 +1337,10 @@ final class BrowserWebSearchService: NSObject {
         if attachPreview {
             payload["screenshot_url"] = screenshot.absoluteString
             payload["file_url"] = screenshot.absoluteString
-            payload["image_path"] = screenshot.path
-            payload["file_path"] = screenshot.path
-            payload["file_name"] = screenshot.lastPathComponent
+            payload["image_path"] = artifact.modelReadablePath
+            payload["file_path"] = artifact.modelReadablePath
+            payload["local_alpine_path"] = artifact.modelReadablePath
+            payload["file_name"] = artifact.fileURL.lastPathComponent
             payload["content_type"] = "image/jpeg"
         }
         return payload
@@ -1947,14 +1952,13 @@ final class BrowserWebSearchService: NSObject {
             if visualFallback,
                Self.boolValue(payload["needs_visual_coordinates"]) == true,
                let screenshot = await captureViewportScreenshot(prefix: "browser_click_miss") {
+                let artifact = await browserVisualArtifact(for: screenshot)
                 payload["attach_file"] = false
                 payload["preview_images"] = []
-                payload["visual_observation"] = [
-                    "screenshot_url": screenshot.absoluteString,
-                    "file_path": screenshot.path,
-                    "tool_only": true,
-                    "note": "Tool-only current viewport screenshot. Do not show in chat unless the user explicitly asks."
-                ]
+                payload["visual_observation"] = browserVisualObservation(
+                    from: artifact,
+                    note: "Tool-only current viewport screenshot. Do not show in chat unless the user explicitly asks."
+                )
                 payload["summary"] = "未在 DOM/可访问性文本中找到目标，已截取当前视口；请根据截图使用坐标点击重试，不要断定页面没有按钮。"
                 return payload
             }
@@ -3439,12 +3443,8 @@ final class BrowserWebSearchService: NSObject {
         var updated = payload
         updated["attach_file"] = false
         updated["preview_images"] = []
-        updated["visual_observation"] = [
-            "screenshot_url": screenshot.absoluteString,
-            "file_path": screenshot.path,
-            "tool_only": true,
-            "note": note
-        ]
+        let artifact = await browserVisualArtifact(for: screenshot)
+        updated["visual_observation"] = browserVisualObservation(from: artifact, note: note)
         return updated
     }
 
@@ -4056,14 +4056,15 @@ final class BrowserWebSearchService: NSObject {
 
             if captureVisuals && visualSampleIndexes.contains(viewportIndex) {
                 if let screenshot = await captureViewportScreenshot(prefix: "browser_scan_\(viewportIndex)", scrollY: offset) {
-                    visualViewports.append([
-                        "viewport_index": viewportIndex,
-                        "scroll_y": offset,
-                        "screenshot_url": screenshot.absoluteString,
-                        "file_path": screenshot.path,
-                        "tool_only": true,
-                        "note": "Tool-only viewport sample from full-page scan. Use with DOM/text samples to choose the next browser action."
-                    ])
+                    let artifact = await browserVisualArtifact(for: screenshot)
+                    visualViewports.append(browserVisualObservation(
+                        from: artifact,
+                        note: "Tool-only viewport sample from full-page scan. Use with DOM/text samples to choose the next browser action.",
+                        extra: [
+                            "viewport_index": viewportIndex,
+                            "scroll_y": offset
+                        ]
+                    ))
                 }
             }
 
@@ -4138,13 +4139,12 @@ final class BrowserWebSearchService: NSObject {
                 focusedScrollY = targetY
                 if captureVisuals,
                    let screenshot = await captureViewportScreenshot(prefix: "browser_find_focus", scrollY: targetY) {
-                    focusedVisual = [
-                        "screenshot_url": screenshot.absoluteString,
-                        "file_path": screenshot.path,
-                        "scroll_y": targetY,
-                        "tool_only": true,
-                        "note": "Tool-only focused viewport after full-page element scan. The browser is left near the best matching element so the next click/type/coordinate action can operate on the visible page."
-                    ]
+                    let artifact = await browserVisualArtifact(for: screenshot)
+                    focusedVisual = browserVisualObservation(
+                        from: artifact,
+                        note: "Tool-only focused viewport after full-page element scan. The browser is left near the best matching element so the next click/type/coordinate action can operate on the visible page.",
+                        extra: ["scroll_y": targetY]
+                    )
                 }
             } else {
                 _ = await evaluateJSONObject(Self.scrollToPageYScript(originalY))
@@ -7844,6 +7844,52 @@ final class BrowserWebSearchService: NSObject {
                 }
                 continuation.resume(returning: image)
             }
+        }
+    }
+
+    private func browserVisualArtifact(for fileURL: URL) async -> BrowserVisualArtifact {
+        let modelReadablePath = await materializeBrowserVisualForModel(fileURL: fileURL) ?? fileURL.path
+        return BrowserVisualArtifact(fileURL: fileURL, modelReadablePath: modelReadablePath)
+    }
+
+    private func browserVisualObservation(
+        from artifact: BrowserVisualArtifact,
+        note: String,
+        extra: [String: Any] = [:]
+    ) -> [String: Any] {
+        var observation: [String: Any] = [
+            "screenshot_url": artifact.fileURL.absoluteString,
+            "file_url": artifact.fileURL.absoluteString,
+            "file_path": artifact.modelReadablePath,
+            "image_path": artifact.modelReadablePath,
+            "local_alpine_path": artifact.modelReadablePath,
+            "tool_only": true,
+            "note": note
+        ]
+        for (key, value) in extra {
+            observation[key] = value
+        }
+        return observation
+    }
+
+    private func materializeBrowserVisualForModel(fileURL: URL) async -> String? {
+        guard let data = try? Data(contentsOf: fileURL) else {
+            logger.debug("Browser visual copy skipped because source could not be read: \(fileURL.path, privacy: .public)")
+            return nil
+        }
+
+        let destination = "/shared/browser-screenshots"
+        let fileName = fileURL.lastPathComponent
+        do {
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: data,
+                fileName: fileName,
+                destinationPath: destination
+            )
+            return "/mnt/iexa\(destination)/\(fileName)"
+        } catch {
+            logger.debug("Browser visual copy to Local Alpine failed: \(error.localizedDescription, privacy: .public)")
+            return nil
         }
     }
 
