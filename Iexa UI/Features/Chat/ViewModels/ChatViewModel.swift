@@ -467,6 +467,13 @@ final class ChatViewModel {
     /// Skills selected via the `$` picker for the current message.
     /// Sent as `skill_ids` in the API request and cleared after each send.
     var selectedSkillIds: [String] = []
+    private var selectedLocalSkillIds: [String] = []
+    /// Full server skill details selected for the current message.
+    /// Used to inject skill instructions into the client-built system prompt
+    /// so compatible/direct providers behave like Chat Controls even when the
+    /// backend ignores `skill_ids`.
+    private var selectedSkillDetailsById: [String: SkillDetail] = [:]
+    private static let localSkillPickerPrefix = "local-skill:"
 
     /// The prompt selected by the user that has variables requiring input.
     /// When set, the variable input sheet is presented.
@@ -6112,6 +6119,7 @@ final class ChatViewModel {
     /// - If cache exists, shows it instantly and refreshes in the background.
     /// - If no cache, shows a loading state while fetching.
     func loadSkills() {
+        availableSkills = mergedSkillPickerItems(serverSkills: availableSkills)
         if !availableSkills.isEmpty {
             // Background refresh — no loading indicator
             Task { await fetchSkillsFromServer() }
@@ -6132,11 +6140,40 @@ final class ChatViewModel {
         do {
             let items = try await apiClient.getSkills()
             // Only cache active skills — disabled skills don't appear in $ commands
-            availableSkills = items.filter(\.isActive)
+            availableSkills = mergedSkillPickerItems(serverSkills: items.filter(\.isActive))
             logger.info("Loaded \(self.availableSkills.count) active skills")
         } catch {
+            availableSkills = mergedSkillPickerItems(serverSkills: availableSkills.filter { !Self.isLocalSkillPickerID($0.id) })
             logger.warning("Failed to load skills: \(error.localizedDescription)")
         }
+    }
+
+    private func mergedSkillPickerItems(serverSkills: [SkillItem]) -> [SkillItem] {
+        let localItems = LocalSkillsService.shared.enabledSkills.map { skill in
+            SkillItem(
+                id: Self.localSkillPickerID(for: skill.id),
+                name: skill.name,
+                description: skill.description.isEmpty ? "本地技能" : skill.description,
+                isActive: skill.isEnabled
+            )
+        }
+        var seen = Set<String>()
+        return (serverSkills + localItems).filter { item in
+            seen.insert(item.id).inserted
+        }
+    }
+
+    private static func localSkillPickerID(for id: String) -> String {
+        localSkillPickerPrefix + id
+    }
+
+    private static func isLocalSkillPickerID(_ id: String) -> Bool {
+        id.hasPrefix(localSkillPickerPrefix)
+    }
+
+    private static func localSkillID(fromPickerID id: String) -> String? {
+        guard isLocalSkillPickerID(id) else { return nil }
+        return String(id.dropFirst(localSkillPickerPrefix.count))
     }
 
     /// Called when the user selects a skill from the `$` picker.
@@ -6145,6 +6182,16 @@ final class ChatViewModel {
     /// (matching the Iexa native server wire format), and records the skill ID in
     /// `selectedSkillIds` so it is sent as `skill_ids` in the API request.
     func selectSkill(_ skill: SkillItem) {
+        if let localSkillID = Self.localSkillID(fromPickerID: skill.id) {
+            replaceDollarTokenWith("")
+            dismissSkillPicker()
+            if !selectedLocalSkillIds.contains(localSkillID) {
+                selectedLocalSkillIds.append(localSkillID)
+            }
+            Haptics.play(.light)
+            return
+        }
+
         // Use the web UI format: <$slug|slug>
         replaceDollarTokenWith("<$\(skill.id)|\(skill.id)> ")
         dismissSkillPicker()
@@ -6152,8 +6199,113 @@ final class ChatViewModel {
         if !selectedSkillIds.contains(skill.id) {
             selectedSkillIds.append(skill.id)
         }
+        Task { await cacheSelectedSkillDetailIfNeeded(id: skill.id) }
 
         Haptics.play(.light)
+    }
+
+    private func cacheSelectedSkillDetailIfNeeded(id: String) async {
+        guard selectedSkillDetailsById[id] == nil,
+              let apiClient = manager?.apiClient else {
+            return
+        }
+        do {
+            let detail = try await apiClient.getSkillDetail(id: id)
+            guard detail.isActive else { return }
+            selectedSkillDetailsById[id] = detail
+        } catch {
+            logger.warning("Failed to preload skill detail \(id): \(error.localizedDescription)")
+        }
+    }
+
+    private func serverSkillSystemContext(for ids: [String]) async -> String? {
+        let orderedIDs = ids.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !orderedIDs.isEmpty else { return nil }
+
+        var details: [SkillDetail] = []
+        for id in orderedIDs {
+            if let cached = selectedSkillDetailsById[id], cached.isActive {
+                details.append(cached)
+                continue
+            }
+            guard let apiClient = manager?.apiClient else { continue }
+            do {
+                let detail = try await apiClient.getSkillDetail(id: id)
+                guard detail.isActive else { continue }
+                selectedSkillDetailsById[id] = detail
+                details.append(detail)
+            } catch {
+                logger.warning("Failed to load selected skill detail \(id): \(error.localizedDescription)")
+            }
+        }
+
+        let blocks = details.compactMap { detail -> String? in
+            let content = detail.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else { return nil }
+            return """
+            ## \(detail.name)
+            ID: \(detail.id)
+            \(content)
+            """
+        }
+        guard !blocks.isEmpty else { return nil }
+        return """
+
+        [服务器技能]
+        以下技能由用户通过本轮输入框 `$` 技能选择器启用。它们是本轮必须内置到系统上下文的工作指南，不是用户正文，也不要复述技能标记。
+
+        \(blocks.joined(separator: "\n\n"))
+        [/服务器技能]
+        """
+    }
+
+    private func localSelectedSkillSystemContext(for ids: [String]) -> String? {
+        let orderedIDs = ids.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !orderedIDs.isEmpty else { return nil }
+        var skillsByID: [String: LocalSkill] = [:]
+        for skill in LocalSkillsService.shared.skills where skillsByID[skill.id] == nil {
+            skillsByID[skill.id] = skill
+        }
+        let blocks = orderedIDs.compactMap { id -> String? in
+            guard let skill = skillsByID[id], skill.isEnabled else { return nil }
+            let content = skill.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else { return nil }
+            return """
+            ## \(skill.name)
+            ID: \(skill.id)
+            \(content)
+            """
+        }
+        guard !blocks.isEmpty else { return nil }
+        return """
+
+        [本轮选择的本地技能]
+        以下技能由用户通过本轮输入框 `$` 技能选择器启用。它们是本轮必须内置到系统上下文的工作指南，不是用户正文，也不要复述技能标记。
+
+        \(blocks.joined(separator: "\n\n"))
+        [/本轮选择的本地技能]
+        """
+    }
+
+    private func selectedSkillSystemContext(serverSkillIds: [String], localSkillIds: [String]) async -> String? {
+        [
+            await serverSkillSystemContext(for: serverSkillIds),
+            localSelectedSkillSystemContext(for: localSkillIds)
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+
+    private static func removingSkillInvocationMarkers(from rawText: String) -> String {
+        rawText
+            .replacingOccurrences(
+                of: #"<\$[^>\|\s]+\|[^>\|\s]+>\s*"#,
+                with: "",
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: #"[ \t]{2,}"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Replaces the `$...` token in the input text with `replacement`.
@@ -6624,6 +6776,7 @@ final class ChatViewModel {
         selectedToolIds = []
         selectedKnowledgeItems = []
         selectedSkillIds = []
+        selectedLocalSkillIds = []
         pendingChatParams = nil
         // Sync UI toggles with the selected model's server-configured defaults.
         syncUIWithModelDefaults()
@@ -6689,7 +6842,12 @@ final class ChatViewModel {
     }
 
     func sendMessage() async {
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawText = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pendingSkillIds = selectedSkillIds
+        let pendingLocalSkillIds = selectedLocalSkillIds
+        let cleanedText = Self.removingSkillInvocationMarkers(from: rawText)
+        let hasPendingSkills = !pendingSkillIds.isEmpty || !pendingLocalSkillIds.isEmpty
+        let text = cleanedText.isEmpty && hasPendingSkills ? "请按已选择的技能执行。" : cleanedText
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let manager else { return }
         var pendingInterjectionId: UUID?
@@ -6783,8 +6941,17 @@ final class ChatViewModel {
         selectedReferenceChats = []
 
         // Capture and clear skill IDs — sent as skill_ids in the API request.
-        let currentSkillIds = selectedSkillIds
+        let currentSkillIds = pendingSkillIds
+        let currentLocalSkillIds = pendingLocalSkillIds
+        let currentSelectedSkillContext = await selectedSkillSystemContext(
+            serverSkillIds: currentSkillIds,
+            localSkillIds: currentLocalSkillIds
+        )
         selectedSkillIds = []
+        selectedLocalSkillIds = []
+        for id in currentSkillIds {
+            selectedSkillDetailsById.removeValue(forKey: id)
+        }
 
         let currentText = text
         let currentAttachments = processedAttachments
@@ -7224,7 +7391,8 @@ final class ChatViewModel {
             && shouldUseLocalAlpineNativeTools(for: modelId)
         let apiMessages = await buildAPIMessagesAsync(
             imageCanvasInstructionMessageId: imageCanvasInstructionMessageId,
-            preferLocalAlpineNativeTools: useLocalAlpineNativeToolsForThisTurn
+            preferLocalAlpineNativeTools: useLocalAlpineNativeToolsForThisTurn,
+            selectedSkillContext: currentSelectedSkillContext
         )
         appendContextCompressionStatusIfNeeded(to: assistantMessageId)
         let parentId = userMessage.id
@@ -7558,7 +7726,8 @@ final class ChatViewModel {
                             var fallbackRequest = request
                             fallbackRequest.messages = await self.buildAPIMessagesAsync(
                                 imageCanvasInstructionMessageId: imageCanvasInstructionMessageId,
-                                preferLocalAlpineNativeTools: false
+                                preferLocalAlpineNativeTools: false,
+                                selectedSkillContext: currentSelectedSkillContext
                             )
                             fallbackRequest.tools = nil
                             fallbackRequest.toolChoice = nil
@@ -22774,6 +22943,7 @@ final class ChatViewModel {
         imageCanvasInstructionMessageId: String? = nil,
         includeLocalAlpineExecutionContext: Bool? = nil,
         preferLocalAlpineNativeTools: Bool? = nil,
+        selectedSkillContext: String? = nil,
         excludingMessageIDs: Set<String> = []
     ) async -> [[String: Any]] {
         guard let conversation else { return [] }
@@ -22885,7 +23055,7 @@ final class ChatViewModel {
         let taskExecutionOutputPolicyContext = (alpineContext != nil || alpineExecutionStateContext != nil || localNativeToolContext != nil)
             ? Self.taskExecutionOutputPolicySystemContext()
             : nil
-        let combinedSystemPrompt = [asyncEffectiveSP, taskExecutionOutputPolicyContext, modelCapabilityContext, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSoulContext, localSkillsContext, memoryContext, feedbackPreferenceContext]
+        let combinedSystemPrompt = [asyncEffectiveSP, taskExecutionOutputPolicyContext, modelCapabilityContext, workspaceContext, alpineContext, alpineExecutionStateContext, webSearchToolContext, localNativeToolContext, localSoulContext, localSkillsContext, selectedSkillContext, memoryContext, feedbackPreferenceContext]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: "\n\n")
