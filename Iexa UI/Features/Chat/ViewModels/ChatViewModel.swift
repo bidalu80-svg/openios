@@ -16744,9 +16744,13 @@ final class ChatViewModel {
     }
 
     private static func localNativeBrowserPlainText(from result: [String: Any]) -> String {
-        let keys = ["summary", "text", "content", "readable_text", "markdown"]
+        let keys = ["summary", "visible_text_from_screenshot", "ocr_text", "text", "content", "readable_text", "markdown"]
         var chunks = keys.compactMap { key in
             firstNonEmptyString(in: result, keys: [key]).map { String($0.prefix(8_000)) }
+        }
+        if let visual = result["visual_observation"] as? [String: Any],
+           let visualText = firstNonEmptyString(in: visual, keys: ["visible_text_from_screenshot", "ocr_text"]) {
+            chunks.insert("Screenshot OCR:\n\(String(visualText.prefix(4_000)))", at: 0)
         }
         if let modelReadablePath = firstNonEmptyString(
             in: result,
@@ -16980,12 +16984,12 @@ final class ChatViewModel {
 
     private static func localNativeBrowserCompactObservation(_ raw: [String: Any]) -> [String: Any] {
         var compact: [String: Any] = [:]
-        for key in ["title", "url", "ready_state", "state_label", "visible_text", "visible_element_count", "total_detected_element_count", "action_candidate_count"] {
+        for key in ["title", "url", "ready_state", "state_label", "visible_text", "visible_text_from_screenshot", "ocr_text", "visible_element_count", "total_detected_element_count", "action_candidate_count"] {
             if let value = raw[key] {
                 if let text = value as? String {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
-                        compact[key] = String(trimmed.prefix(key == "visible_text" ? 1200 : 400))
+                        compact[key] = String(trimmed.prefix(["visible_text", "visible_text_from_screenshot", "ocr_text"].contains(key) ? 1200 : 400))
                     }
                 } else if value is NSNumber || value is Bool {
                     compact[key] = value
@@ -17038,16 +17042,20 @@ final class ChatViewModel {
 
     private static func localNativeBrowserCompactVisualReference(_ raw: [String: Any]) -> [String: Any] {
         var compact: [String: Any] = [:]
-        for key in ["viewport_index", "scroll_y", "note", "tool_only"] {
+        for key in ["viewport_index", "scroll_y", "note", "tool_only", "ocr_status", "visible_text_from_screenshot", "ocr_text"] {
             guard let value = raw[key] else { continue }
             if let text = value as? String {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
-                    compact[key] = String(trimmed.prefix(700))
+                    compact[key] = String(trimmed.prefix(["visible_text_from_screenshot", "ocr_text"].contains(key) ? 1800 : 700))
                 }
             } else if value is NSNumber || value is Bool {
                 compact[key] = value
             }
+        }
+        if let imagePath = firstNonEmptyString(in: raw, keys: ["image_path", "file_path", "local_alpine_path", "screenshot_path"]),
+           imagePath.hasPrefix("/mnt/iexa/") {
+            compact["image_path"] = String(imagePath.prefix(1_500))
         }
         if raw["screenshot_url"] != nil || raw["file_url"] != nil || raw["file_path"] != nil || raw["image_path"] != nil {
             compact["visual_state"] = "captured_tool_only"

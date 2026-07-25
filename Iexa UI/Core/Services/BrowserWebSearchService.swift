@@ -2,6 +2,7 @@ import Foundation
 import WebKit
 import UIKit
 import OSLog
+import Vision
 
 struct BrowserWebSearchTabSnapshot: Identifiable, Equatable {
     let id: Int
@@ -13,6 +14,7 @@ struct BrowserWebSearchTabSnapshot: Identifiable, Equatable {
 private struct BrowserVisualArtifact {
     let fileURL: URL
     let modelReadablePath: String
+    let recognizedText: String?
 }
 
 private struct BrowserDownloadedArtifact {
@@ -1322,17 +1324,12 @@ final class BrowserWebSearchService: NSObject {
             "attach_preview": attachPreview,
             "attach_file": attachPreview,
             "preview_images": attachPreview ? [screenshot.absoluteString] : [],
-            "visual_observation": [
-                "screenshot_url": artifact.fileURL.absoluteString,
-                "file_url": artifact.fileURL.absoluteString,
-                "file_path": artifact.modelReadablePath,
-                "image_path": artifact.modelReadablePath,
-                "local_alpine_path": artifact.modelReadablePath,
-                "tool_only": true,
-                "note": fullPage
+            "visual_observation": browserVisualObservation(
+                from: artifact,
+                note: fullPage
                     ? "Tool-only full-page browser screenshot. Use it to decide the next browser action; do not show in chat unless the user asks."
                     : "Tool-only current viewport browser screenshot. Use it to decide the next browser action; do not show in chat unless the user asks."
-            ],
+            ),
             "items": [[
                 "title": title,
                 "link": url,
@@ -1341,6 +1338,10 @@ final class BrowserWebSearchService: NSObject {
             ]],
             "summary": fullPage ? "已生成整页网页截图（仅供工具观察，不默认插入对话）。" : "已生成当前视口网页截图（仅供工具观察，不默认插入对话）。"
         ]
+        if let recognizedText = artifact.recognizedText, !recognizedText.isEmpty {
+            payload["visible_text_from_screenshot"] = recognizedText
+            payload["ocr_text"] = recognizedText
+        }
         if attachPreview {
             payload["screenshot_url"] = screenshot.absoluteString
             payload["file_url"] = screenshot.absoluteString
@@ -7905,7 +7906,12 @@ final class BrowserWebSearchService: NSObject {
 
     private func browserVisualArtifact(for fileURL: URL) async -> BrowserVisualArtifact {
         let modelReadablePath = await materializeBrowserVisualForModel(fileURL: fileURL) ?? fileURL.path
-        return BrowserVisualArtifact(fileURL: fileURL, modelReadablePath: modelReadablePath)
+        let recognizedText = await Self.recognizeBrowserVisualText(fileURL: fileURL)
+        return BrowserVisualArtifact(
+            fileURL: fileURL,
+            modelReadablePath: modelReadablePath,
+            recognizedText: recognizedText
+        )
     }
 
     private func browserVisualObservation(
@@ -7922,10 +7928,52 @@ final class BrowserWebSearchService: NSObject {
             "tool_only": true,
             "note": note
         ]
+        if let recognizedText = artifact.recognizedText?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !recognizedText.isEmpty {
+            observation["visible_text_from_screenshot"] = String(recognizedText.prefix(6_000))
+            observation["ocr_text"] = String(recognizedText.prefix(6_000))
+            observation["ocr_status"] = "recognized_text"
+        }
         for (key, value) in extra {
             observation[key] = value
         }
         return observation
+    }
+
+    private nonisolated static func recognizeBrowserVisualText(fileURL: URL) async -> String? {
+        guard #available(iOS 13.0, *) else { return nil }
+        return await Task.detached(priority: .utility) {
+            guard let image = UIImage(contentsOfFile: fileURL.path),
+                  let cgImage = image.cgImage else {
+                return nil
+            }
+
+            func performOCR(languages: [String]) -> String? {
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.usesLanguageCorrection = true
+                if !languages.isEmpty {
+                    request.recognitionLanguages = languages
+                }
+                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+                do {
+                    try handler.perform([request])
+                } catch {
+                    return nil
+                }
+                let lines = (request.results ?? [])
+                    .compactMap { observation in
+                        observation.topCandidates(1).first?.string
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    .filter { !$0.isEmpty }
+                guard !lines.isEmpty else { return nil }
+                return String(lines.joined(separator: "\n").prefix(6_000))
+            }
+
+            return performOCR(languages: ["zh-Hans", "zh-Hant", "en-US"])
+                ?? performOCR(languages: [])
+        }.value
     }
 
     private func materializeBrowserVisualForModel(fileURL: URL) async -> String? {
