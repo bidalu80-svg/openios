@@ -13717,8 +13717,8 @@ final class ChatViewModel {
                 result.summary,
                 browserVerificationCompleted: browserVerificationCompleted
             )
-        let modelVisualContextMessage = browserAction != nil && selectedModel?.supportsImageInput == true
-            ? Self.localNativeBrowserVisualContextMessage(from: result.summary)
+        let modelVisualContextMessage = browserAction != nil
+            ? await Self.localNativeBrowserVisualContextMessage(from: result.summary)
             : nil
         return LocalNativeFunctionToolExecution(
             toolContent: toolContent,
@@ -16283,19 +16283,20 @@ final class ChatViewModel {
         return false
     }
 
-    private static func localNativeBrowserVisualContextMessage(from toolContent: String) -> [String: Any]? {
+    private static func localNativeBrowserVisualContextMessage(from toolContent: String) async -> [String: Any]? {
         guard let data = toolContent.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) else {
             return nil
         }
 
         let references = localNativeBrowserVisualReferences(in: object, limit: 4)
-        let imageParts = references.compactMap { reference -> [String: Any]? in
-            guard let dataURL = browserVisualDataURL(from: reference) else { return nil }
-            return [
+        var imageParts: [[String: Any]] = []
+        for reference in references {
+            guard let dataURL = await browserVisualDataURL(from: reference) else { continue }
+            imageParts.append([
                 "type": "image_url",
                 "image_url": ["url": dataURL]
-            ]
+            ])
         }
         guard !imageParts.isEmpty else { return nil }
 
@@ -16310,6 +16311,37 @@ final class ChatViewModel {
             "role": "user",
             "content": content
         ]
+    }
+
+    private static func localNativeBrowserVisualContextMessages(for message: ChatMessage) async -> [[String: Any]] {
+        var messages: [[String: Any]] = []
+        let turns = LocalNativeToolTurn.decodeMetadata(
+            message.metadata?["iexa_local_native_tool_turns"]
+        )
+
+        for turn in turns where localNativeBrowserToolKind(turn.call) != nil {
+            if let visualMessage = await localNativeBrowserVisualContextMessage(from: turn.result) {
+                messages.append(visualMessage)
+                if messages.count >= 2 { return messages }
+            }
+        }
+
+        guard messages.isEmpty else { return messages }
+        let rawResult = (
+            message.metadata?["iexa_local_native_raw_result"]
+                ?? message.content
+                    .replacingOccurrences(
+                        of: #"(?is)^\s*本地\s+iOS\s+工具执行结果\s*\n*"#,
+                        with: "",
+                        options: .regularExpression
+                    )
+        )
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let visualMessage = await localNativeBrowserVisualContextMessage(from: rawResult) {
+            return [visualMessage]
+        }
+        return []
     }
 
     private static func localNativeBrowserVisualReferences(in value: Any, limit: Int) -> [String] {
@@ -16422,8 +16454,8 @@ final class ChatViewModel {
         }
     }
 
-    private static func browserVisualDataURL(from reference: String) -> String? {
-        guard let data = imageData(fromImageReference: reference),
+    private static func browserVisualDataURL(from reference: String) async -> String? {
+        guard let data = await browserVisualImageData(from: reference),
               let image = UIImage(data: data),
               image.size.width > 0,
               image.size.height > 0 else {
@@ -16456,6 +16488,20 @@ final class ChatViewModel {
             }
         }
         return nil
+    }
+
+    private static func browserVisualImageData(from reference: String) async -> Data? {
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let localAlpinePath = normalizedLocalAlpineSharedMediaPath(trimmed),
+           localAlpinePathLooksLikeImage(localAlpinePath),
+           let data = try? await LocalAlpineTerminalService.shared.readFile(path: localAlpinePath),
+           (1...64_000_000).contains(data.count) {
+            return data
+        }
+
+        return imageData(fromImageReference: trimmed)
     }
 
     private static func localNativeFunctionToolEnvelopeContent(for call: LocalAlpineNativeToolCall) -> String {
@@ -23077,6 +23123,7 @@ final class ChatViewModel {
         if !combinedSystemPrompt.isEmpty {
             apiMessages.append(["role": "system", "content": combinedSystemPrompt])
         }
+        let recentBrowserVisualMessageIDs = Set(conversation.messages.suffix(8).map(\.id))
         for message in conversation.messages where !excludingMessageIDs.contains(message.id)
             && !message.isStreaming
             && !Self.isLocalWorkspaceAgentResult(message) {
@@ -23097,12 +23144,18 @@ final class ChatViewModel {
                     providerType: currentProviderType
                 ) {
                     apiMessages.append(contentsOf: exactToolHistory)
+                    if recentBrowserVisualMessageIDs.contains(message.id) {
+                        apiMessages.append(contentsOf: await Self.localNativeBrowserVisualContextMessages(for: message))
+                    }
                 } else {
                     if Self.localNativeMessageHasBrowserToolTurn(message) {
                         apiMessages.append([
                             "role": "system",
                             "content": Self.localNativePlainContinuationObservation(for: message)
                         ])
+                        if recentBrowserVisualMessageIDs.contains(message.id) {
+                            apiMessages.append(contentsOf: await Self.localNativeBrowserVisualContextMessages(for: message))
+                        }
                     } else {
                         let modelContent = contentForModel(
                             message: message,
@@ -23139,8 +23192,11 @@ final class ChatViewModel {
                let exactToolHistory = Self.localNativeToolHistoryMessages(
                 for: message,
                 providerType: currentProviderType
-               ) {
+                ) {
                 apiMessages.append(contentsOf: exactToolHistory)
+                if recentBrowserVisualMessageIDs.contains(message.id) {
+                    apiMessages.append(contentsOf: await Self.localNativeBrowserVisualContextMessages(for: message))
+                }
                 let finalContent = contentForModel(
                     message: message,
                     includeImageCanvasInstruction: false
