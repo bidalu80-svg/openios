@@ -6178,12 +6178,13 @@ final class ChatViewModel {
 
     /// Called when the user selects a skill from the `$` picker.
     ///
-    /// Replaces the `$query` token with `<$slug|slug> ` in the input text
-    /// (matching the Iexa native server wire format), and records the skill ID in
-    /// `selectedSkillIds` so it is sent as `skill_ids` in the API request.
+    /// Replaces the `$query` token with a visible `<$slug|slug> ` marker in
+    /// the input text and records the selected skill for this message. The
+    /// marker is stripped before creating the user message, so skills behave
+    /// like per-message system context instead of normal user text.
     func selectSkill(_ skill: SkillItem) {
         if let localSkillID = Self.localSkillID(fromPickerID: skill.id) {
-            replaceDollarTokenWith("")
+            replaceDollarTokenWith("<$\(localSkillID)|\(localSkillID)> ")
             dismissSkillPicker()
             if !selectedLocalSkillIds.contains(localSkillID) {
                 selectedLocalSkillIds.append(localSkillID)
