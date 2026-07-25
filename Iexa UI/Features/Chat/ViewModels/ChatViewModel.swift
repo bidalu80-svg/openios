@@ -16744,8 +16744,14 @@ final class ChatViewModel {
 
     private static func localNativeBrowserPlainText(from result: [String: Any]) -> String {
         let keys = ["summary", "text", "content", "readable_text", "markdown"]
-        let chunks = keys.compactMap { key in
+        var chunks = keys.compactMap { key in
             firstNonEmptyString(in: result, keys: [key]).map { String($0.prefix(8_000)) }
+        }
+        if let modelReadablePath = firstNonEmptyString(
+            in: result,
+            keys: ["file_path", "saved_path", "local_alpine_path", "image_path"]
+        ) {
+            chunks.insert("Saved file: \(String(modelReadablePath.prefix(1_500)))", at: 0)
         }
         return String(chunks.joined(separator: "\n\n").prefix(10_000))
     }

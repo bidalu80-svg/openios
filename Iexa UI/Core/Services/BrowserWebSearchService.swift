@@ -15,6 +15,13 @@ private struct BrowserVisualArtifact {
     let modelReadablePath: String
 }
 
+private struct BrowserDownloadedArtifact {
+    let fileURL: URL
+    let modelReadablePath: String?
+    let contentType: String
+    let byteCount: Int
+}
+
 @MainActor
 final class BrowserWebSearchService: NSObject {
     static let shared = BrowserWebSearchService()
@@ -1422,7 +1429,11 @@ final class BrowserWebSearchService: NSObject {
                     let folder = try browserOutputDirectory()
                     let fileURL = folder.appendingPathComponent(fileName)
                     try fetchedData.write(to: fileURL, options: [.atomic])
-                    return [
+                    let modelReadablePath = await materializeBrowserDownloadForModel(
+                        data: fetchedData,
+                        fileName: fileName
+                    )
+                    var payload: [String: Any] = [
                         "action": "browser.fetch",
                         "ok": (200..<300).contains(status),
                         "url": finalURL.absoluteString,
@@ -1439,6 +1450,18 @@ final class BrowserWebSearchService: NSObject {
                             ? "已通过当前浏览器会话下载网页资源：\(fileName)"
                             : "网页返回 HTTP \(status)，已保存响应内容：\(fileName)"
                     ]
+                    if let modelReadablePath {
+                        payload["file_path"] = modelReadablePath
+                        payload["saved_path"] = modelReadablePath
+                        payload["local_alpine_path"] = modelReadablePath
+                        if contentType.lowercased().hasPrefix("image/") {
+                            payload["image_path"] = modelReadablePath
+                        }
+                        payload["summary"] = (200..<300).contains(status)
+                            ? "已通过当前浏览器会话下载网页资源：\(fileName)，模型可读取路径：\(modelReadablePath)"
+                            : "网页返回 HTTP \(status)，已保存响应内容：\(fileName)，模型可读取路径：\(modelReadablePath)"
+                    }
+                    return payload
                 } catch {
                     return [
                         "action": "browser.fetch",
@@ -1487,7 +1510,11 @@ final class BrowserWebSearchService: NSObject {
             let folder = try browserOutputDirectory()
             let fileURL = folder.appendingPathComponent(fileName)
             try data.write(to: fileURL, options: [.atomic])
-            return [
+            let modelReadablePath = await materializeBrowserDownloadForModel(
+                data: data,
+                fileName: fileName
+            )
+            var payload: [String: Any] = [
                 "action": "browser.fetch",
                 "ok": (200..<300).contains(http.statusCode),
                 "url": url.absoluteString,
@@ -1503,6 +1530,18 @@ final class BrowserWebSearchService: NSObject {
                     ? "已使用浏览器会话下载网页资源：\(fileName)"
                     : "网页返回 HTTP \(http.statusCode)，已保存响应内容：\(fileName)"
             ]
+            if let modelReadablePath {
+                payload["file_path"] = modelReadablePath
+                payload["saved_path"] = modelReadablePath
+                payload["local_alpine_path"] = modelReadablePath
+                if contentType.lowercased().hasPrefix("image/") {
+                    payload["image_path"] = modelReadablePath
+                }
+                payload["summary"] = (200..<300).contains(http.statusCode)
+                    ? "已使用浏览器会话下载网页资源：\(fileName)，模型可读取路径：\(modelReadablePath)"
+                    : "网页返回 HTTP \(http.statusCode)，已保存响应内容：\(fileName)，模型可读取路径：\(modelReadablePath)"
+            }
+            return payload
         } catch {
             return [
                 "action": "browser.fetch",
@@ -4558,13 +4597,13 @@ final class BrowserWebSearchService: NSObject {
                 lastCandidates = candidates
                 if let candidate = candidates.first,
                    let saved = await saveBrowserImageCandidate(candidate) {
-                    return [
+                    var payload: [String: Any] = [
                         "action": "browser.wait_for_image",
                         "ok": true,
                         "title": object["title"] as? String ?? "生成图片",
                         "url": object["url"] as? String ?? "",
-                        "file_url": saved.url.absoluteString,
-                        "file_name": saved.url.lastPathComponent,
+                        "file_url": saved.fileURL.absoluteString,
+                        "file_name": saved.fileURL.lastPathComponent,
                         "content_type": saved.contentType,
                         "attach_file": true,
                         "bytes": saved.byteCount,
@@ -4573,15 +4612,23 @@ final class BrowserWebSearchService: NSObject {
                         "source_url": candidate["src"] as? String ?? "",
                         "source_key": candidate["source_key"] as? String ?? "",
                         "generation_state": object["generation_state"] as? String ?? "",
-                        "preview_images": [saved.url.absoluteString],
+                        "preview_images": [saved.fileURL.absoluteString],
                         "items": [[
                             "title": "生成图片",
-                            "link": saved.url.absoluteString,
+                            "link": saved.fileURL.absoluteString,
                             "snippet": "已等待并保存网页生成的图片。",
-                            "thumbnail_url": saved.url.absoluteString
+                            "thumbnail_url": saved.fileURL.absoluteString
                         ]],
-                        "summary": "已等待到网页生成图片并保存为附件：\(saved.url.lastPathComponent)"
+                        "summary": "已等待到网页生成图片并保存为附件：\(saved.fileURL.lastPathComponent)"
                     ]
+                    if let modelReadablePath = saved.modelReadablePath {
+                        payload["file_path"] = modelReadablePath
+                        payload["saved_path"] = modelReadablePath
+                        payload["image_path"] = modelReadablePath
+                        payload["local_alpine_path"] = modelReadablePath
+                        payload["summary"] = "已等待到网页生成图片并保存为附件：\(saved.fileURL.lastPathComponent)，模型可读取路径：\(modelReadablePath)"
+                    }
+                    return payload
                 }
             }
             try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -4611,7 +4658,7 @@ final class BrowserWebSearchService: NSObject {
         return payload
     }
 
-    private func saveBrowserImageCandidate(_ candidate: [String: Any]) async -> (url: URL, contentType: String, byteCount: Int)? {
+    private func saveBrowserImageCandidate(_ candidate: [String: Any]) async -> BrowserDownloadedArtifact? {
         let source = [
             candidate["data_url"] as? String,
             candidate["src"] as? String,
@@ -4670,7 +4717,16 @@ final class BrowserWebSearchService: NSObject {
             let stamped = "\(Int(Date().timeIntervalSince1970 * 1000))_\(fileName)"
             let fileURL = folder.appendingPathComponent(stamped)
             try data.write(to: fileURL, options: [.atomic])
-            return (fileURL, contentType, data.count)
+            let modelReadablePath = await materializeBrowserDownloadForModel(
+                data: data,
+                fileName: stamped
+            )
+            return BrowserDownloadedArtifact(
+                fileURL: fileURL,
+                modelReadablePath: modelReadablePath,
+                contentType: contentType,
+                byteCount: data.count
+            )
         } catch {
             return nil
         }
@@ -7889,6 +7945,23 @@ final class BrowserWebSearchService: NSObject {
             return "/mnt/iexa\(destination)/\(fileName)"
         } catch {
             logger.debug("Browser visual copy to Local Alpine failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    private func materializeBrowserDownloadForModel(data: Data, fileName: String) async -> String? {
+        guard !data.isEmpty else { return nil }
+
+        let destination = "/shared/browser-downloads"
+        do {
+            try await LocalAlpineTerminalService.shared.writeFile(
+                data: data,
+                fileName: fileName,
+                destinationPath: destination
+            )
+            return "/mnt/iexa\(destination)/\(fileName)"
+        } catch {
+            logger.debug("Browser download copy to Local Alpine failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
