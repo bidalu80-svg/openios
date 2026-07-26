@@ -5199,19 +5199,36 @@ final class ChatViewModel {
             return
         }
 
+        let canonicalServerTurn = serverMessagesCanonicalizingDuplicateAssistantTurns(
+            serverConversation.messages
+        )
+        let remappedAssistantIds = canonicalServerTurn.remappedAssistantIds
+
         // Merge the server's history tree into our local history.
         // The server tree is authoritative for all non-streaming nodes.
         if serverConversation.history.isPopulated {
             for (id, serverNode) in serverConversation.history.nodes {
+                if remappedAssistantIds[id] != nil {
+                    continue
+                }
+                var normalizedServerNode = serverNode
+                if let parentId = normalizedServerNode.parentId {
+                    normalizedServerNode.parentId = remappedAssistantIds[parentId] ?? parentId
+                }
+                normalizedServerNode.childrenIds = Self.remappingHistoryChildren(
+                    normalizedServerNode.childrenIds,
+                    using: remappedAssistantIds
+                )
+
                 if let localNode = conversation?.history.nodes[id] {
                     // Node exists locally — update content fields but keep local
                     // content if we're actively streaming this message.
                     let isActivelyStreaming = streamingStore.streamingMessageId == id && streamingStore.isActive
                     if !isActivelyStreaming {
-                        var updated = serverNode
+                        var updated = normalizedServerNode
                         // Preserve local childrenIds if they have more entries
                         // (local may have new branches not yet on server)
-                        if localNode.childrenIds.count > serverNode.childrenIds.count {
+                        if localNode.childrenIds.count > normalizedServerNode.childrenIds.count {
                             updated.childrenIds = localNode.childrenIds
                         }
                         // CRITICAL: Never overwrite a non-empty local tree node content
@@ -5240,16 +5257,16 @@ final class ChatViewModel {
                     }
                 } else {
                     // New node from server — add directly
-                    conversation?.history.nodes[id] = Self.sanitizedHistoryNodeForDisplay(serverNode)
+                    conversation?.history.nodes[id] = Self.sanitizedHistoryNodeForDisplay(normalizedServerNode)
                 }
             }
             // Update currentId from server unless we're actively streaming
             if !isStreaming, let serverCurrentId = serverConversation.history.currentId {
-                conversation?.history.currentId = serverCurrentId
+                conversation?.history.currentId = remappedAssistantIds[serverCurrentId] ?? serverCurrentId
             }
         }
 
-        let serverMessages = serverConversation.messages
+        let serverMessages = canonicalServerTurn.messages
 
         // Build a set of server message IDs for removal detection
         let serverMessageIds = Set(serverMessages.map(\.id))
@@ -5394,6 +5411,209 @@ final class ChatViewModel {
             tasks = serverConversation.tasks
             conversation?.tasks = serverConversation.tasks
         }
+    }
+
+    private struct CanonicalServerTurnMessages {
+        let messages: [ChatMessage]
+        let remappedAssistantIds: [String: String]
+    }
+
+    private func serverMessagesCanonicalizingDuplicateAssistantTurns(
+        _ rawServerMessages: [ChatMessage]
+    ) -> CanonicalServerTurnMessages {
+        guard let localMessages = conversation?.messages,
+              !localMessages.isEmpty,
+              !rawServerMessages.isEmpty else {
+            return CanonicalServerTurnMessages(
+                messages: rawServerMessages,
+                remappedAssistantIds: [:]
+            )
+        }
+
+        let rawServerIds = Set(rawServerMessages.map(\.id))
+        var canonicalMessages: [ChatMessage] = []
+        var canonicalIndexById: [String: Int] = [:]
+        var remappedAssistantIds: [String: String] = [:]
+
+        func appendCanonical(_ message: ChatMessage) {
+            if let existingIndex = canonicalIndexById[message.id] {
+                canonicalMessages[existingIndex] = Self.preferredCanonicalAssistantMessage(
+                    canonicalMessages[existingIndex],
+                    message
+                )
+            } else {
+                canonicalIndexById[message.id] = canonicalMessages.count
+                canonicalMessages.append(message)
+            }
+        }
+
+        for (serverIndex, rawServerMessage) in rawServerMessages.enumerated() {
+            guard rawServerMessage.role == .assistant,
+                  let parentId = Self.effectiveParentId(
+                    of: rawServerMessage,
+                    at: serverIndex,
+                    in: rawServerMessages
+                  ),
+                  let localAssistant = Self.matchingLocalAssistantForServerAssistant(
+                    rawServerMessage,
+                    parentId: parentId,
+                    localMessages: localMessages,
+                    rawServerIds: rawServerIds
+                  ) else {
+                appendCanonical(rawServerMessage)
+                continue
+            }
+
+            appendCanonical(Self.assistantMessage(
+                serverMessage: rawServerMessage,
+                usingLocalIdentity: localAssistant,
+                parentId: parentId
+            ))
+            if rawServerMessage.id != localAssistant.id {
+                remappedAssistantIds[rawServerMessage.id] = localAssistant.id
+            }
+        }
+
+        return CanonicalServerTurnMessages(
+            messages: canonicalMessages,
+            remappedAssistantIds: remappedAssistantIds
+        )
+    }
+
+    private static func remappingHistoryChildren(
+        _ childrenIds: [String],
+        using remappedIds: [String: String]
+    ) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for childId in childrenIds {
+            let remappedId = remappedIds[childId] ?? childId
+            if seen.insert(remappedId).inserted {
+                result.append(remappedId)
+            }
+        }
+        return result
+    }
+
+    private static func matchingLocalAssistantForServerAssistant(
+        _ serverMessage: ChatMessage,
+        parentId: String,
+        localMessages: [ChatMessage],
+        rawServerIds: Set<String>
+    ) -> ChatMessage? {
+        guard serverMessage.role == .assistant else { return nil }
+        if rawServerIds.contains(serverMessage.id) &&
+            localMessages.contains(where: { $0.id == serverMessage.id }) {
+            return nil
+        }
+
+        let parentText = localMessages
+            .first(where: { $0.id == parentId })?
+            .content
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let isLegacySkillOnlyTurn = parentText == "请按已选择的技能执行。"
+
+        for (localIndex, localMessage) in localMessages.enumerated() where localMessage.role == .assistant {
+            guard localMessage.id != serverMessage.id,
+                  effectiveParentId(of: localMessage, at: localIndex, in: localMessages) == parentId else {
+                continue
+            }
+
+            if localMessage.isStreaming
+                || localMessage.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || isLegacySkillOnlyTurn
+                || (
+                    rawServerIds.contains(localMessage.id)
+                    && assistantMessagesLookDuplicate(localMessage.content, serverMessage.content)
+                ) {
+                return localMessage
+            }
+        }
+
+        return nil
+    }
+
+    private static func effectiveParentId(
+        of message: ChatMessage,
+        at index: Int,
+        in messages: [ChatMessage]
+    ) -> String? {
+        if let parentId = message.parentId, !parentId.isEmpty {
+            return parentId
+        }
+        guard message.role == .assistant, index > 0 else { return nil }
+        for previous in messages[..<index].reversed() where previous.role == .user {
+            return previous.id
+        }
+        return nil
+    }
+
+    private static func assistantMessagesLookDuplicate(_ lhs: String, _ rhs: String) -> Bool {
+        let left = lhs.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let right = rhs.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !left.isEmpty, !right.isEmpty else { return false }
+        if left == right { return true }
+        guard left.count <= 160, right.count <= 160 else { return false }
+        let readinessMarkers = ["已就绪", "具体任务", "ready"]
+        return readinessMarkers.contains { marker in
+            left.contains(marker) && right.contains(marker)
+        }
+    }
+
+    private static func assistantMessage(
+        serverMessage: ChatMessage,
+        usingLocalIdentity localMessage: ChatMessage,
+        parentId: String
+    ) -> ChatMessage {
+        var metadata = localMessage.metadata ?? [:]
+        for (key, value) in serverMessage.metadata ?? [:] {
+            metadata[key] = value
+        }
+
+        return ChatMessage(
+            id: localMessage.id,
+            parentId: parentId,
+            role: .assistant,
+            content: serverMessage.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? localMessage.content
+                : serverMessage.content,
+            timestamp: localMessage.timestamp,
+            model: serverMessage.model ?? localMessage.model,
+            isStreaming: localMessage.isStreaming && serverMessage.isStreaming,
+            attachmentIds: localMessage.attachmentIds.isEmpty
+                ? serverMessage.attachmentIds
+                : localMessage.attachmentIds,
+            files: preservingInlineImageFiles(local: localMessage.files, incoming: serverMessage.files),
+            sources: serverMessage.sources.isEmpty ? localMessage.sources : serverMessage.sources,
+            statusHistory: serverMessage.statusHistory.isEmpty
+                ? localMessage.statusHistory
+                : serverMessage.statusHistory,
+            followUps: serverMessage.followUps.isEmpty ? localMessage.followUps : serverMessage.followUps,
+            metadata: metadata.isEmpty ? nil : metadata,
+            error: serverMessage.error ?? localMessage.error,
+            versions: serverMessage.versions.isEmpty ? localMessage.versions : serverMessage.versions,
+            usage: serverMessage.usage ?? localMessage.usage,
+            embeds: serverMessage.embeds.isEmpty ? localMessage.embeds : serverMessage.embeds
+        )
+    }
+
+    private static func preferredCanonicalAssistantMessage(
+        _ existing: ChatMessage,
+        _ candidate: ChatMessage
+    ) -> ChatMessage {
+        guard existing.role == .assistant, candidate.role == .assistant else {
+            return candidate
+        }
+        let existingContent = existing.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidateContent = candidate.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if existingContent.isEmpty && !candidateContent.isEmpty {
+            return candidate
+        }
+        if candidateContent.count > existingContent.count
+            && assistantMessagesLookDuplicate(existingContent, candidateContent) {
+            return candidate
+        }
+        return existing
     }
 
     // MARK: - Entry Sync (navigation re-entry)
@@ -6852,7 +7072,11 @@ final class ChatViewModel {
         let pendingLocalSkillIds = selectedLocalSkillIds
         let cleanedText = Self.removingSkillInvocationMarkers(from: rawText)
         let hasPendingSkills = !pendingSkillIds.isEmpty || !pendingLocalSkillIds.isEmpty
-        let text = cleanedText.isEmpty && hasPendingSkills ? "请按已选择的技能执行。" : cleanedText
+        if cleanedText.isEmpty && hasPendingSkills && attachments.isEmpty {
+            errorMessage = "请在已选择的技能后输入具体任务。"
+            return
+        }
+        let text = cleanedText
         guard !text.isEmpty || !attachments.isEmpty else { return }
         guard let manager else { return }
         var pendingInterjectionId: UUID?
@@ -6948,8 +7172,9 @@ final class ChatViewModel {
         // Capture and clear skill IDs — sent as skill_ids in the API request.
         let currentSkillIds = pendingSkillIds
         let currentLocalSkillIds = pendingLocalSkillIds
+        let serverSkillContextIds = isOpenAICompatibleProvider ? currentSkillIds : []
         let currentSelectedSkillContext = await selectedSkillSystemContext(
-            serverSkillIds: currentSkillIds,
+            serverSkillIds: serverSkillContextIds,
             localSkillIds: currentLocalSkillIds
         )
         selectedSkillIds = []
@@ -7313,7 +7538,7 @@ final class ChatViewModel {
             ? "正在提交视频请求"
             : "正在提交图片请求"
         conversation?.messages.append(ChatMessage(
-            id: assistantMessageId, role: .assistant, content: "",
+            id: assistantMessageId, parentId: userMessage.id, role: .assistant, content: "",
             timestamp: .now, model: modelId, isStreaming: true,
             metadata: isDirectMediaGenerationPlaceholder
                 ? [
