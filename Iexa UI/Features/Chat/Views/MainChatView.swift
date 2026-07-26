@@ -294,7 +294,15 @@ struct MainChatView: View {
                                     .scaledFont(size: 14, weight: .medium)
                                     .foregroundStyle(theme.textSecondary)
                                     .frame(width: 34, height: 34)
-                                    .iexaToolbarGlass(cornerRadius: 17, compact: true)
+                                    .background(
+                                        Circle()
+                                            .fill(theme.cardBackground.opacity(0.9))
+                                    )
+                                    .overlay(
+                                        Circle()
+                                            .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
+                                    )
+                                    .clipShape(Circle())
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
