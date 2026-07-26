@@ -36,6 +36,8 @@
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Iexa uses your location to provide location-aware responses when you enable the Share Location feature in Privacy &amp; Security settings.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Iexa can use background location as an optional heartbeat to keep long agent tasks running after you leave the app. Location is not used unless background location tracking is enabled.</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>Iexa uses your local calendars to show, create, and delete calendar events on this device.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
@@ -112,7 +114,9 @@
 	</array>
 	<key>UIBackgroundModes</key>
 	<array>
+		<string>audio</string>
 		<string>fetch</string>
+		<string>location</string>
 		<string>processing</string>
 	</array>
 	<key>UIFileSharingEnabled</key>

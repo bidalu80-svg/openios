@@ -192,7 +192,9 @@ struct Iexa_UIApp: App {
 
                         if newPhase == .background {
                             Task { @MainActor in
-                                await RunLiveActivityService.shared.endAllActivities(detail: "已离开 Iexa")
+                                if !BackgroundKeepAliveService.shared.isActive {
+                                    await RunLiveActivityService.shared.endAllActivities(detail: "已离开 Iexa")
+                                }
                             }
                         }
                     }

@@ -568,6 +568,7 @@ enum LocalAlpineBackgroundExecution {
 
         let trimmedReason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         let taskName = trimmedReason.isEmpty ? "Local Alpine" : "Local Alpine \(trimmedReason)"
+        BackgroundKeepAliveService.shared.begin(reason: "local-alpine")
         taskId = UIApplication.shared.beginBackgroundTask(withName: taskName) {
             Task { @MainActor in
                 expire()
@@ -612,6 +613,7 @@ enum LocalAlpineBackgroundExecution {
         taskId = .invalid
         depth = 0
         UIApplication.shared.endBackgroundTask(id)
+        BackgroundKeepAliveService.shared.finish(reason: "local-alpine")
     }
 }
 

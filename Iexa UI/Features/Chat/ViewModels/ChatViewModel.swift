@@ -650,6 +650,7 @@ final class ChatViewModel {
     @MainActor
     private func beginStreamingBackgroundTaskIfNeeded() {
         guard backgroundTaskId == .invalid else { return }
+        BackgroundKeepAliveService.shared.begin(reason: "chat-stream")
         backgroundTaskId = UIApplication.shared.beginBackgroundTask { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -5814,6 +5815,7 @@ final class ChatViewModel {
         guard backgroundTaskId != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTaskId)
         backgroundTaskId = .invalid
+        BackgroundKeepAliveService.shared.finish(reason: "chat-stream")
     }
 
     /// Recovers streaming state when the app returns to foreground.
