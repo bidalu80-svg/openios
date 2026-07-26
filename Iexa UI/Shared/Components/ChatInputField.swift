@@ -379,28 +379,19 @@ struct ChatInputField: View {
                     ))
             }
         }
-        .background {
-            IexaNativeGlassFill(
-                shape: RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous),
-                lightTintOpacity: 0.20,
-                darkTintOpacity: 0.16,
-                highlightOpacity: 0.32,
-                allowsDarkTint: true,
-                darkBlurOpacity: 0.96
-            )
-        }
+        .background(composerBackground)
         .clipShape(RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous))
-        .overlay {
+        .overlay(
             RoundedRectangle(cornerRadius: composerCornerRadius, style: .continuous)
-                .strokeBorder(composerBorderColor, lineWidth: isFocused ? 0.8 : 0.6)
-        }
+                .strokeBorder(composerBorderColor, lineWidth: 0.5)
+        )
         .shadow(
             color: theme.isDark
-                ? Color.black.opacity(isFocused ? 0.28 : 0.22)
-                : Color.black.opacity(isFocused ? 0.13 : 0.09),
-            radius: theme.isDark ? (isFocused ? 13 : 10) : (isFocused ? 22 : 16),
+                ? Color.black.opacity(isFocused ? 0.3 : 0.2)
+                : Color.black.opacity(isFocused ? 0.1 : 0.06),
+            radius: 8,
             x: 0,
-            y: theme.isDark ? 5 : 8
+            y: 2
         )
     }
 
@@ -409,10 +400,16 @@ struct ChatInputField: View {
         text.contains("\n") || text.count > 60 ? 18 : 22
     }
 
+    private var composerBackground: Color {
+        theme.isDark
+            ? theme.cardBackground.opacity(0.95)
+            : theme.inputBackground
+    }
+
     private var composerBorderColor: Color {
         isFocused
-            ? theme.brandPrimary.opacity(theme.isDark ? 0.34 : 0.22)
-            : (theme.isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.045))
+            ? theme.brandPrimary.opacity(0.35)
+            : theme.cardBorder.opacity(0.4)
     }
 
     // MARK: - Inline Plus Button

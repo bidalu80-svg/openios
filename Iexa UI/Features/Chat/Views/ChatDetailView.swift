@@ -5123,7 +5123,14 @@ struct ChatDetailView: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
             .frame(minWidth: toolbarControlsMinWidth, minHeight: 40)
-            .iexaToolbarGlass(cornerRadius: 20, compact: true)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(theme.cardBackground.opacity(0.9))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
+            )
             .clipShape(Capsule(style: .continuous))
         }
     }
@@ -5167,7 +5174,14 @@ struct ChatDetailView: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
                     .frame(minHeight: 40)
-                    .iexaToolbarGlass(cornerRadius: 22, compact: true)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(theme.cardBackground.opacity(0.9))
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(theme.cardBorder.opacity(0.5), lineWidth: 0.5)
+                    )
                     .clipShape(Capsule(style: .continuous))
                 }
                 .buttonStyle(.plain)
