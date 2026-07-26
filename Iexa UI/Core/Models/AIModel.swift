@@ -412,6 +412,10 @@ enum LocalModelCapabilityRegistry {
         if AIModel.imageInputHintTokens.contains(where: { haystack.contains($0) }) {
             capability.inputModalities.insert("image")
         }
+        if isKnownImageInputModel(model) {
+            capability.inputModalities.insert("image")
+            capability.inputModalities.insert("pdf")
+        }
         if AIModel.videoGenerationHintTokens.contains(where: { haystack.contains($0) }) {
             capability.outputModalities.insert("video")
             capability.endpointTypes.insert("video_generation")
@@ -428,6 +432,26 @@ enum LocalModelCapabilityRegistry {
     static func isCodeModel(_ model: AIModel) -> Bool {
         let haystack = searchableText(for: model)
         return AIModel.codeModelHintTokens.contains { haystack.contains($0) }
+    }
+
+    private static func isKnownImageInputModel(_ model: AIModel) -> Bool {
+        let haystack = searchableText(for: model)
+        let textOnlyTokens = [
+            "grok-stt", "grok-tts", "tts", "stt", "speech", "audio",
+            "whisper", "embedding", "rerank", "moderation"
+        ]
+        guard !textOnlyTokens.contains(where: { haystack.contains($0) }) else { return false }
+
+        let visionFamilyTokens = [
+            "grok",
+            "gpt-4o", "gpt-4.1", "gpt-5", "o3", "o4",
+            "claude-3", "claude-sonnet", "claude-opus", "claude-haiku",
+            "gemini",
+            "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl",
+            "qvq", "llava", "pixtral", "internvl", "minicpm-v",
+            "glm-4v", "glm-4.5v", "step-1v"
+        ]
+        return visionFamilyTokens.contains { haystack.contains($0) }
     }
 
     static func contextLength(for model: AIModel?, modelId: String?) -> Int? {

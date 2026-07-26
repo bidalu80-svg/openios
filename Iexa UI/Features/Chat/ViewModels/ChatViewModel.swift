@@ -1926,6 +1926,10 @@ final class ChatViewModel {
             || lower.hasPrefix("local-alpine:")
             || lower.hasPrefix("data:")
             || lower.hasPrefix("file://")
+            || lower.hasPrefix("/shared/")
+            || lower.hasPrefix("/mounts/")
+            || lower.hasPrefix("/attachments/")
+            || lower.hasPrefix("/mnt/iexa/")
     }
 
     private static func preservingInlineImageFiles(
@@ -16292,7 +16296,7 @@ final class ChatViewModel {
         let references = localNativeBrowserVisualReferences(in: object, limit: 4)
         var imageParts: [[String: Any]] = []
         for reference in references {
-            guard let dataURL = await browserVisualDataURL(from: reference) else { continue }
+            guard let dataURL = await modelVisionDataURL(from: reference) else { continue }
             imageParts.append([
                 "type": "image_url",
                 "image_url": ["url": dataURL]
@@ -16342,6 +16346,124 @@ final class ChatViewModel {
             return [visualMessage]
         }
         return []
+    }
+
+    private static func localToolVisualContextMessages(for message: ChatMessage, limit: Int = 4) async -> [[String: Any]] {
+        let references = localToolVisualReferences(for: message, limit: limit)
+        guard !references.isEmpty else { return [] }
+
+        var imageParts: [[String: Any]] = []
+        var unresolved: [String] = []
+        for reference in references {
+            if let dataURL = await modelVisionDataURL(from: reference) {
+                imageParts.append([
+                    "type": "image_url",
+                    "image_url": ["url": dataURL]
+                ])
+            } else if isExplicitLocalImageReference(reference) {
+                unresolved.append(reference)
+            }
+        }
+        guard !imageParts.isEmpty || !unresolved.isEmpty else { return [] }
+
+        var content: [[String: Any]] = [
+            [
+                "type": "text",
+                "text": "Hidden local visual observation. These image(s) were produced or referenced by browser_use, Local Alpine, or Local Native tools. Use them as real visual evidence for the next answer or tool action. Do not mention this hidden wrapper unless the user asks."
+            ]
+        ]
+        content.append(contentsOf: imageParts)
+        if !unresolved.isEmpty {
+            content.append([
+                "type": "text",
+                "text": "Some referenced local image path(s) could not be read before the API call: \(unresolved.prefix(limit).joined(separator: ", "))"
+            ])
+        }
+
+        return [
+            [
+                "role": "user",
+                "content": content
+            ]
+        ]
+    }
+
+    private static func localToolVisualReferences(for message: ChatMessage, limit: Int) -> [String] {
+        var candidates: [String] = []
+        let metadata = message.metadata ?? [:]
+
+        candidates.append(contentsOf: message.files.flatMap { file -> [String] in
+            guard isImageFile(file) else { return [] }
+            return [file.displayURL, file.url]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        })
+        candidates.append(contentsOf: localAlpineGeneratedMediaPaths(from: message))
+        candidates.append(contentsOf: localAlpineImagePaths(in: message.content))
+
+        let metadataKeys = [
+            "iexa_local_alpine_raw_result",
+            "iexa_local_alpine_command_results",
+            "iexa_local_alpine_written_files",
+            "iexa_local_native_raw_result",
+            "iexa_local_native_tool_turns",
+            "iexa_local_native_tool_calls"
+        ]
+        for key in metadataKeys {
+            candidates.append(contentsOf: localAlpineImagePaths(in: metadata[key] ?? ""))
+            if let value = metadata[key],
+               let object = jsonObjectFromToolArguments(value) {
+                collectLocalToolVisualReferences(in: object, into: &candidates)
+            }
+        }
+        if let object = jsonObjectFromToolArguments(message.content) {
+            collectLocalToolVisualReferences(in: object, into: &candidates)
+        }
+
+        var seen = Set<String>()
+        return candidates.compactMap { rawReference in
+            let reference = rawReference.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !reference.isEmpty else { return nil }
+            let key = normalizedVisionImageReferenceKey(reference)
+            guard seen.insert(key).inserted else { return nil }
+            if normalizedImageDataURI(reference) != nil { return reference }
+            if localImageFileURL(from: reference) != nil { return reference }
+            if let path = normalizedLocalAlpineSharedMediaPath(reference),
+               localAlpinePathLooksLikeImage(path) {
+                return reference
+            }
+            return nil
+        }.prefix(limit).map { $0 }
+    }
+
+    private static func collectLocalToolVisualReferences(in value: Any, into candidates: inout [String]) {
+        if let dictionary = value as? [String: Any] {
+            for (key, rawValue) in dictionary {
+                let normalizedKey = key
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .replacingOccurrences(of: "-", with: "_")
+                    .lowercased()
+                if let string = rawValue as? String {
+                    let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if normalizedKey.contains("image")
+                        || normalizedKey.contains("screenshot")
+                        || normalizedKey.contains("snapshot")
+                        || normalizedKey == "file_path"
+                        || normalizedKey == "file_url"
+                        || normalizedKey == "path"
+                        || normalizedKey == "url" {
+                        candidates.append(trimmed)
+                    }
+                    candidates.append(contentsOf: localAlpineImagePaths(in: string))
+                } else {
+                    collectLocalToolVisualReferences(in: rawValue, into: &candidates)
+                }
+            }
+        } else if let array = value as? [Any] {
+            for item in array {
+                collectLocalToolVisualReferences(in: item, into: &candidates)
+            }
+        }
     }
 
     private static func localNativeBrowserVisualReferences(in value: Any, limit: Int) -> [String] {
@@ -16454,8 +16576,13 @@ final class ChatViewModel {
         }
     }
 
-    private static func browserVisualDataURL(from reference: String) async -> String? {
-        guard let data = await browserVisualImageData(from: reference),
+    private static func modelVisionDataURL(from reference: String) async -> String? {
+        if let normalized = normalizedImageDataURI(reference),
+           let compact = compactImageDataURI(normalized) {
+            return compact
+        }
+
+        guard let data = await modelVisionImageData(from: reference),
               let image = UIImage(data: data),
               image.size.width > 0,
               image.size.height > 0 else {
@@ -16490,7 +16617,7 @@ final class ChatViewModel {
         return nil
     }
 
-    private static func browserVisualImageData(from reference: String) async -> Data? {
+    private static func modelVisionImageData(from reference: String) async -> Data? {
         let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
@@ -22945,7 +23072,9 @@ final class ChatViewModel {
     private static func localAlpineImagePaths(in text: String) -> [String] {
         guard !text.isEmpty else { return [] }
         let patterns = [
-            #"(?:^|[\s`'"])(/mnt/iexa/[^\s`'"]+\.(?:png|jpe?g|webp|gif|bmp|avif))(?:$|[\s`'".,;:!?)\]])"#,
+            #"(?:^|[\s`'"])(file://[^\s`'"]+\.(?:png|jpe?g|webp|gif|bmp|avif))(?:$|[\s`'".,;:!?)\]])"#,
+            #"(?:^|[\s`'"])((?:local-alpine:)?/(?:shared|mounts|attachments)/[^\s`'"]+\.(?:png|jpe?g|webp|gif|bmp|avif))(?:$|[\s`'".,;:!?)\]])"#,
+            #"(?:^|[\s`'"])((?:local-alpine:)?/mnt/iexa/[^\s`'"]+\.(?:png|jpe?g|webp|gif|bmp|avif))(?:$|[\s`'".,;:!?)\]])"#,
             #"(?:^|[\s`'"])([A-Za-z0-9._/\-]+?\.(?:png|jpe?g|webp|gif|bmp|avif))(?:$|[\s`'".,;:!?)\]])"#
         ]
         var paths: [String] = []
@@ -22964,6 +23093,9 @@ final class ChatViewModel {
         var path = rawPath.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "`\"'“”‘’，。；：、）)]}")))
         guard !path.isEmpty else { return nil }
         path = path.replacingOccurrences(of: "\\", with: "/")
+        if path.lowercased().hasPrefix("local-alpine:") {
+            path = String(path.dropFirst("local-alpine:".count))
+        }
         if path.hasPrefix("file://") {
             guard let url = URL(string: path) else { return nil }
             path = url.path
@@ -22998,6 +23130,33 @@ final class ChatViewModel {
 
     private static func localAlpinePathLooksLikeImage(_ path: String) -> Bool {
         path.lowercased().range(of: #"\.(png|jpe?g|webp|gif|bmp|avif)$"#, options: .regularExpression) != nil
+    }
+
+    private static func normalizedVisionImageReferenceKey(_ reference: String) -> String {
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let path = normalizedLocalAlpineSharedMediaPath(trimmed),
+           localAlpinePathLooksLikeImage(path) {
+            return "local-alpine:\(path.lowercased())"
+        }
+        if let normalized = normalizedImageDataURI(trimmed),
+           let data = imageData(fromDataURL: normalized) {
+            return "data-image:\(stableImageHash(data))"
+        }
+        if let fileURL = localImageFileURL(from: trimmed) {
+            return "file:\(fileURL.standardizedFileURL.path.lowercased())"
+        }
+        return trimmed.lowercased()
+    }
+
+    private static func isExplicitLocalImageReference(_ reference: String) -> Bool {
+        let lower = reference.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard localAlpinePathLooksLikeImage(lower) else { return false }
+        return lower.hasPrefix("local-alpine:")
+            || lower.hasPrefix("file://")
+            || lower.hasPrefix("/shared/")
+            || lower.hasPrefix("/mounts/")
+            || lower.hasPrefix("/attachments/")
+            || lower.hasPrefix("/mnt/iexa/")
     }
 
     private func buildAPIMessagesAsync(
@@ -23123,7 +23282,7 @@ final class ChatViewModel {
         if !combinedSystemPrompt.isEmpty {
             apiMessages.append(["role": "system", "content": combinedSystemPrompt])
         }
-        let recentBrowserVisualMessageIDs = Set(conversation.messages.suffix(8).map(\.id))
+        let recentLocalVisualMessageIDs = Set(conversation.messages.suffix(8).map(\.id))
         for message in conversation.messages where !excludingMessageIDs.contains(message.id)
             && !message.isStreaming
             && !Self.isLocalWorkspaceAgentResult(message) {
@@ -23144,8 +23303,8 @@ final class ChatViewModel {
                     providerType: currentProviderType
                 ) {
                     apiMessages.append(contentsOf: exactToolHistory)
-                    if recentBrowserVisualMessageIDs.contains(message.id) {
-                        apiMessages.append(contentsOf: await Self.localNativeBrowserVisualContextMessages(for: message))
+                    if recentLocalVisualMessageIDs.contains(message.id) {
+                        apiMessages.append(contentsOf: await Self.localToolVisualContextMessages(for: message))
                     }
                 } else {
                     if Self.localNativeMessageHasBrowserToolTurn(message) {
@@ -23153,8 +23312,8 @@ final class ChatViewModel {
                             "role": "system",
                             "content": Self.localNativePlainContinuationObservation(for: message)
                         ])
-                        if recentBrowserVisualMessageIDs.contains(message.id) {
-                            apiMessages.append(contentsOf: await Self.localNativeBrowserVisualContextMessages(for: message))
+                        if recentLocalVisualMessageIDs.contains(message.id) {
+                            apiMessages.append(contentsOf: await Self.localToolVisualContextMessages(for: message))
                         }
                     } else {
                         let modelContent = contentForModel(
@@ -23162,6 +23321,9 @@ final class ChatViewModel {
                             includeImageCanvasInstruction: false
                         )
                         apiMessages.append(["role": "system", "content": modelContent])
+                        if recentLocalVisualMessageIDs.contains(message.id) {
+                            apiMessages.append(contentsOf: await Self.localToolVisualContextMessages(for: message))
+                        }
                     }
                 }
                 continue
@@ -23178,6 +23340,9 @@ final class ChatViewModel {
                 providerType: currentProviderType
                ) {
                 apiMessages.append(contentsOf: exactToolHistory)
+                if recentLocalVisualMessageIDs.contains(message.id) {
+                    apiMessages.append(contentsOf: await Self.localToolVisualContextMessages(for: message))
+                }
                 let finalContent = contentForModel(
                     message: message,
                     includeImageCanvasInstruction: false
@@ -23194,8 +23359,8 @@ final class ChatViewModel {
                 providerType: currentProviderType
                 ) {
                 apiMessages.append(contentsOf: exactToolHistory)
-                if recentBrowserVisualMessageIDs.contains(message.id) {
-                    apiMessages.append(contentsOf: await Self.localNativeBrowserVisualContextMessages(for: message))
+                if recentLocalVisualMessageIDs.contains(message.id) {
+                    apiMessages.append(contentsOf: await Self.localToolVisualContextMessages(for: message))
                 }
                 let finalContent = contentForModel(
                     message: message,
@@ -23217,6 +23382,9 @@ final class ChatViewModel {
                 providerType: currentProviderType
                ) {
                 apiMessages.append(contentsOf: exactToolHistory)
+                if recentLocalVisualMessageIDs.contains(message.id) {
+                    apiMessages.append(contentsOf: await Self.localToolVisualContextMessages(for: message))
+                }
                 continue
             }
             let modelContent = contentForModel(
@@ -23237,70 +23405,105 @@ final class ChatViewModel {
                 f.type != "image" && !(f.contentType ?? "").hasPrefix("image/")
             }
 
-            if !imageFiles.isEmpty && message.role == .user {
+            let inlineDataURLs = inlineImageDataURLsByMessageId[message.id] ?? []
+            let localImagePathsInText = Self.localAlpineImagePaths(in: modelContent)
+            if message.role == .user
+                && (!imageFiles.isEmpty || !inlineDataURLs.isEmpty || !localImagePathsInText.isEmpty) {
                 // Build multimodal content array (OpenAI vision format)
                 // Fetch image base64 from server, matching Flutter behavior
                 var contentArray: [[String: Any]] = []
-                if !modelContent.isEmpty {
-                    contentArray.append(["type": "text", "text": modelContent])
-                }
-                let inlineDataURLs = inlineImageDataURLsByMessageId[message.id] ?? []
-                for dataURL in inlineDataURLs {
+                var appendedVisionReferences = Set<String>()
+                var unresolvedLocalImageReferences: [String] = []
+
+                func appendVisionImage(_ dataURL: String, source: String) {
+                    let sourceKey = Self.normalizedVisionImageReferenceKey(source)
+                    let dataKey = Self.normalizedVisionImageReferenceKey(dataURL)
+                    guard appendedVisionReferences.insert(sourceKey).inserted,
+                          appendedVisionReferences.insert(dataKey).inserted else {
+                        return
+                    }
                     contentArray.append([
                         "type": "image_url",
                         "image_url": ["url": dataURL]
                     ])
                 }
+
+                if !modelContent.isEmpty {
+                    contentArray.append(["type": "text", "text": modelContent])
+                }
+                for dataURL in inlineDataURLs {
+                    appendVisionImage(dataURL, source: dataURL)
+                }
+                for imagePath in localImagePathsInText.prefix(4) {
+                    if let dataURL = await Self.modelVisionDataURL(from: imagePath) {
+                        appendVisionImage(dataURL, source: imagePath)
+                    } else if Self.isExplicitLocalImageReference(imagePath) {
+                        unresolvedLocalImageReferences.append(imagePath)
+                    }
+                }
                 for imgFile in imageFiles {
-                    if let fileId = imgFile.url, !fileId.isEmpty {
-                        if fileId.hasPrefix("local-inline-image:") {
-                            continue
+                    var appendedImage = false
+                    let imageReferences = [imgFile.displayURL, imgFile.url]
+                        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                    for reference in imageReferences {
+                        if reference.hasPrefix("local-inline-image:") {
+                            appendedImage = true
+                            break
                         }
-                        if let displayURL = imgFile.displayURL, displayURL.hasPrefix("data:image/") {
+                        if let dataURL = await Self.modelVisionDataURL(from: reference) {
+                            appendVisionImage(dataURL, source: reference)
+                            appendedImage = true
+                            break
+                        }
+                    }
+                    guard !appendedImage,
+                          let fileId = imgFile.url?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !fileId.isEmpty,
+                          !Self.isLocalOnlyFileReference(fileId) else {
+                        continue
+                    }
+
+                    // Fetch from server, downsample to ≤ 2 MP, then base64-encode.
+                    // The server stores the original full-resolution file; without
+                    // downsampling here, the base64 payload easily exceeds the
+                    // vision API's 5 MB per-image limit.
+                    if let apiClient = manager?.apiClient {
+                        do {
+                            let (rawData, contentType) = try await apiClient.getFileContent(id: fileId)
+                            let fallbackName = imgFile.name ?? "image.\(Self.fileExtension(forImageContentType: contentType))"
+                            let prepared = FileAttachmentService.prepareImageForUpload(
+                                data: rawData,
+                                originalName: fallbackName
+                            )
+                            let data = prepared.data
+                            let base64 = data.base64EncodedString()
+                            let mimeType = contentType.hasPrefix("image/")
+                                ? FileAttachmentService.imageContentType(for: data, fileName: prepared.fileName)
+                                : FileAttachmentService.imageContentType(for: data, fileName: prepared.fileName)
+                            let dataUrl = "data:\(mimeType);base64,\(base64)"
                             contentArray.append([
                                 "type": "image_url",
-                                "image_url": ["url": displayURL]
+                                "image_url": ["url": dataUrl]
                             ])
-                        } else if fileId.hasPrefix("data:image/") {
-                            // Already a data URL
+                        } catch {
+                            logger.warning("Failed to fetch image content for \(fileId): \(error)")
+                            // Fallback: send file ID, server may resolve it
                             contentArray.append([
                                 "type": "image_url",
                                 "image_url": ["url": fileId]
                             ])
-                        } else {
-                            // Fetch from server, downsample to ≤ 2 MP, then base64-encode.
-                            // The server stores the original full-resolution file; without
-                            // downsampling here, the base64 payload easily exceeds the
-                            // vision API's 5 MB per-image limit.
-                            if let apiClient = manager?.apiClient {
-                                do {
-                                    let (rawData, contentType) = try await apiClient.getFileContent(id: fileId)
-                                    let fallbackName = imgFile.name ?? "image.\(Self.fileExtension(forImageContentType: contentType))"
-                                    let prepared = FileAttachmentService.prepareImageForUpload(
-                                        data: rawData,
-                                        originalName: fallbackName
-                                    )
-                                    let data = prepared.data
-                                    let base64 = data.base64EncodedString()
-                                    let mimeType = contentType.hasPrefix("image/")
-                                        ? FileAttachmentService.imageContentType(for: data, fileName: prepared.fileName)
-                                        : FileAttachmentService.imageContentType(for: data, fileName: prepared.fileName)
-                                    let dataUrl = "data:\(mimeType);base64,\(base64)"
-                                    contentArray.append([
-                                        "type": "image_url",
-                                        "image_url": ["url": dataUrl]
-                                    ])
-                                } catch {
-                                    logger.warning("Failed to fetch image content for \(fileId): \(error)")
-                                    // Fallback: send file ID, server may resolve it
-                                    contentArray.append([
-                                        "type": "image_url",
-                                        "image_url": ["url": fileId]
-                                    ])
-                                }
-                            }
                         }
                     }
+                }
+                if !unresolvedLocalImageReferences.isEmpty {
+                    let unresolved = unresolvedLocalImageReferences
+                        .prefix(4)
+                        .joined(separator: ", ")
+                    contentArray.append([
+                        "type": "text",
+                        "text": "Image reference(s) were provided but could not be read locally before the API call: \(unresolved)"
+                    ])
                 }
 
                 var msgDict: [String: Any] = [
@@ -23317,6 +23520,9 @@ final class ChatViewModel {
                 }
 
                 apiMessages.append(msgDict)
+                if recentLocalVisualMessageIDs.contains(message.id), message.role != .user {
+                    apiMessages.append(contentsOf: await Self.localToolVisualContextMessages(for: message))
+                }
             } else {
                 var msgDict: [String: Any] = [
                     "role": modelRole,
@@ -23336,6 +23542,9 @@ final class ChatViewModel {
                 }
 
                 apiMessages.append(msgDict)
+                if recentLocalVisualMessageIDs.contains(message.id), message.role != .user {
+                    apiMessages.append(contentsOf: await Self.localToolVisualContextMessages(for: message))
+                }
             }
         }
         let compacted = Self.compactMessagesIfNeeded(
@@ -27864,7 +28073,16 @@ final class ChatViewModel {
 
         let capability = model?.resolvedCapabilities
         let contextLength = LocalModelCapabilityRegistry.contextLength(for: model, modelId: resolvedModelId)
-        let input = capability?.inputModalities.sorted().joined(separator: ", ") ?? "unknown"
+        let declaredInput = capability?.inputModalities.sorted().joined(separator: ", ") ?? "unknown"
+        let explicitlyTextOnly = model.map(LocalModelCapabilityRegistry.isKnownTextOnlyModel) ?? false
+        let imageInputSupportLine: String = {
+            guard let model else { return "unknown" }
+            if model.supportsImageInput { return "true" }
+            return explicitlyTextOnly ? "false" : "unknown_not_declared_by_provider"
+        }()
+        let input = (declaredInput == "text" && model?.supportsImageInput != true && !explicitlyTextOnly)
+            ? "text, image_unknown_not_declared_by_provider"
+            : declaredInput
         let output = capability?.outputModalities.sorted().joined(separator: ", ") ?? "unknown"
         let endpointTypes = capability?.endpointTypes.sorted().joined(separator: ", ") ?? ""
 
@@ -27884,7 +28102,7 @@ final class ChatViewModel {
             lines.append("endpoint_types: \(endpointTypes)")
         }
         if let model {
-            lines.append("supports_image_input: \(model.supportsImageInput)")
+            lines.append("supports_image_input: \(imageInputSupportLine)")
             lines.append("supports_image_generation: \(model.supportsImageGeneration)")
             lines.append("supports_reasoning: \(model.supportsReasoning)")
             lines.append("supports_tool_calling: \(model.supportsToolCalling)")

@@ -26,6 +26,49 @@ private func androidToolCapsuleTint(for toolName: String) -> Color {
     )
 }
 
+private enum AssistantToolProtocolDisplayCleaner {
+    static func visibleContent(_ content: String) -> String {
+        let withoutAlpineProtocol = LocalAlpineAgentService.visibleContent(from: content)
+        let withoutNativeProtocol = LocalNativeToolService.visibleContent(from: withoutAlpineProtocol)
+        return stripNativeToolProtocolBlocks(from: withoutNativeProtocol)
+    }
+
+    private static func stripNativeToolProtocolBlocks(from content: String) -> String {
+        var cleaned = content.replacingOccurrences(
+            of: #"```iexa_native\s*[\s\S]*?```"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        cleaned = cleaned.replacingOccurrences(
+            of: #"<\s*(?:tool_call|tool_use|function_call|function|iexa_native)\b[^>]*>[\s\S]*?</\s*(?:tool_call|tool_use|function_call|function|iexa_native)\s*>"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.range(
+            of: #"(?is)^\{[\s\S]*"(?:tool|name|function|function_call|tool_calls)"[\s\S]*"(?:arguments|args|input|tool|name)"[\s\S]*\}$"#,
+            options: .regularExpression
+        ) != nil {
+            return ""
+        }
+        if trimmed.range(
+            of: #"(?is)^[\{\[][\s\S]*"(?:action|browser_action|browser_use_action)"\s*:\s*"(?:browser_use|browser\.use|browser\.[^"]+)"[\s\S]*[\}\]]$"#,
+            options: .regularExpression
+        ) != nil {
+            return ""
+        }
+        if trimmed.range(
+            of: #"(?is)^[\{\[][\s\S]*"(?:items|focused_element|node_id|nodeId|page_x|page_center_x|selector)"\s*:[\s\S]*"(?:page_url|image_path|iexa_url|url|link)"\s*:[\s\S]*[\}\]]$"#,
+            options: .regularExpression
+        ) != nil {
+            return ""
+        }
+        return trimmed
+            .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 private func agentToolWebPreviewReference(for target: String) -> String {
     agentToolWebPreviewPrefix + target
 }
@@ -3384,11 +3427,7 @@ struct ChatDetailView: View {
             assistantVisibleTextCache.store(messageId: message.id, signature: signature, value: "")
             return ""
         }
-        let withoutAlpineProtocol = LocalAlpineAgentService.visibleContent(from: raw)
-        let withoutNativeProtocol = stripNativeToolProtocolBlocks(
-            from: LocalNativeToolService.visibleContent(from: withoutAlpineProtocol)
-        )
-        let visible = withoutNativeProtocol.trimmingCharacters(in: .whitespacesAndNewlines)
+        let visible = AssistantToolProtocolDisplayCleaner.visibleContent(raw)
         let resolved = visible == "正在准备本地执行，结果会自动回来。" ? "" : visible
         assistantVisibleTextCache.store(messageId: message.id, signature: signature, value: resolved)
         return resolved
@@ -3423,39 +3462,6 @@ struct ChatDetailView: View {
         let visible = visibleAssistantTextAfterToolProtocolCleanup(for: message)
         guard !visible.isEmpty, visible != raw else { return nil }
         return visible
-    }
-
-    private func stripNativeToolProtocolBlocks(from content: String) -> String {
-        var cleaned = content.replacingOccurrences(
-            of: #"```iexa_native\s*[\s\S]*?```"#,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-        cleaned = cleaned.replacingOccurrences(
-            of: #"<\s*(?:tool_call|tool_use|function_call|function|iexa_native)\b[^>]*>[\s\S]*?</\s*(?:tool_call|tool_use|function_call|function|iexa_native)\s*>"#,
-            with: "",
-            options: [.regularExpression, .caseInsensitive]
-        )
-        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.range(
-            of: #"(?is)^\{[\s\S]*"(?:tool|name|function|function_call|tool_calls)"[\s\S]*"(?:arguments|args|input|tool|name)"[\s\S]*\}$"#,
-            options: .regularExpression
-        ) != nil {
-            return ""
-        }
-        if trimmed.range(
-            of: #"(?is)^[\{\[][\s\S]*"(?:action|browser_action|browser_use_action)"\s*:\s*"(?:browser_use|browser\.use|browser\.[^"]+)"[\s\S]*[\}\]]$"#,
-            options: .regularExpression
-        ) != nil {
-            return ""
-        }
-        if trimmed.range(
-            of: #"(?is)^[\{\[][\s\S]*"(?:items|focused_element|node_id|nodeId|page_x|page_center_x|selector)"\s*:[\s\S]*"(?:page_url|image_path|iexa_url|url|link)"\s*:[\s\S]*[\}\]]$"#,
-            options: .regularExpression
-        ) != nil {
-            return ""
-        }
-        return trimmed
     }
 
     private func hasLaterLocalAlpineTurnMessage(after message: ChatMessage) -> Bool {
@@ -4124,9 +4130,7 @@ struct ChatDetailView: View {
     }
 
     private func orderedVisibleAssistantText(from rawText: String) -> String {
-        let visible = stripNativeToolProtocolBlocks(
-            from: LocalAlpineAgentService.visibleContent(from: rawText)
-        )
+        let visible = AssistantToolProtocolDisplayCleaner.visibleContent(rawText)
         return removingOrderedReasoningArtifacts(from: visible)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -11275,10 +11279,10 @@ private struct IsolatedAssistantMessage: View {
             if vIdx >= 0 && vIdx < message.versions.count { return message.versions[vIdx].content }
             return message.content
         }()
-        let renderableRawContent = Self.localAlpineFinalSummaryDisplayContent(
+        let renderableRawContent = AssistantToolProtocolDisplayCleaner.visibleContent(Self.localAlpineFinalSummaryDisplayContent(
             rawContent,
             metadata: message.metadata
-        )
+        ))
 
         let baseSources: [ChatSourceReference] = isActivelyStreaming
             ? streamingStore.streamingSources : message.sources
