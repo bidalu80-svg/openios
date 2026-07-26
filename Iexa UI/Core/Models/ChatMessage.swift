@@ -242,6 +242,7 @@ struct ChatMessage: Identifiable, Hashable, Sendable {
     /// every SwiftUI diff cycle (~7x/sec during streaming).
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
         lhs.id == rhs.id
+            && lhs.parentId == rhs.parentId
             && lhs.content.utf8.count == rhs.content.utf8.count
             && lhs.isStreaming == rhs.isStreaming
             && lhs.statusHistory.count == rhs.statusHistory.count
@@ -256,6 +257,7 @@ struct ChatMessage: Identifiable, Hashable, Sendable {
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
+        hasher.combine(parentId)
         hasher.combine(content.utf8.count)
         hasher.combine(isStreaming)
         hasher.combine(followUps.count)
@@ -280,7 +282,7 @@ struct ChatMessage: Identifiable, Hashable, Sendable {
 
 extension ChatMessage: Codable {
     enum CodingKeys: String, CodingKey {
-        case id, role, content, timestamp, model, isStreaming
+        case id, parentId, role, content, timestamp, model, isStreaming
         case attachmentIds, files, sources, statusHistory, followUps
         case metadata, error, versions, usage
     }
@@ -288,6 +290,7 @@ extension ChatMessage: Codable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id            = try c.decode(String.self, forKey: .id)
+        parentId      = try? c.decodeIfPresent(String.self, forKey: .parentId)
         role          = try c.decode(MessageRole.self, forKey: .role)
         content       = try c.decode(String.self, forKey: .content)
         timestamp     = try c.decode(Date.self, forKey: .timestamp)
@@ -314,6 +317,7 @@ extension ChatMessage: Codable {
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
+        try c.encodeIfPresent(parentId, forKey: .parentId)
         try c.encode(role, forKey: .role)
         try c.encode(content, forKey: .content)
         try c.encode(timestamp, forKey: .timestamp)
