@@ -59,6 +59,8 @@ final class NotificationService: NSObject, @unchecked Sendable {
     /// looking at that chat.
     var bypassActiveConversationSuppression: Bool = false
 
+    private var recentGenerationNotifications: [String: (signature: Int, date: Date)] = [:]
+
     /// Callback when user taps a notification action.
     var onOpenChat: ((String) -> Void)?
     var onEndCall: (() -> Void)?
@@ -193,6 +195,15 @@ final class NotificationService: NSObject, @unchecked Sendable {
         title: String,
         preview: String
     ) async {
+        let notificationSignature = preview.trimmingCharacters(in: .whitespacesAndNewlines).hashValue
+        if let recent = recentGenerationNotifications[conversationId],
+           recent.signature == notificationSignature,
+           Date().timeIntervalSince(recent.date) < 8 {
+            logger.info("Skipped duplicate generation notification for \(conversationId)")
+            return
+        }
+        recentGenerationNotifications[conversationId] = (notificationSignature, Date())
+
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
 

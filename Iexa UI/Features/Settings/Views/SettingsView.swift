@@ -1,5 +1,7 @@
 import SwiftUI
+import ActivityKit
 import AVFoundation
+import CoreLocation
 import Speech
 import UserNotifications
 
@@ -22,6 +24,7 @@ struct SettingsView: View {
     @State private var defaultModelId: String?
     @State private var isLoadingModels = false
     @State private var usageStore = TokenUsageHistoryStore.shared
+    @ObservedObject private var backgroundKeepAlive = BackgroundKeepAliveService.shared
 
     init(
         viewModel: AuthViewModel,
@@ -167,10 +170,20 @@ struct SettingsView: View {
                             icon: "bell.badge",
                             title: "通知",
                             subtitle: notificationStatusSubtitle,
-                            showDivider: false,
+                            showDivider: true,
                             accessory: .chevron
                         ) {
                             navigationPath.append(SettingsDestination.notifications)
+                        }
+                        SettingsCell(
+                            icon: "bolt.horizontal.circle",
+                            title: "后台运行与灵动岛",
+                            subtitle: backgroundExecutionSubtitle,
+                            iconColor: .green,
+                            showDivider: false,
+                            accessory: .chevron
+                        ) {
+                            navigationPath.append(SettingsDestination.backgroundExecution)
                         }
                     }
 
@@ -338,6 +351,8 @@ struct SettingsView: View {
                     STTSettingsView()
                 case .notifications:
                     NotificationSettingsView()
+                case .backgroundExecution:
+                    BackgroundSettingsView()
                 case .adminConsole:
                     AdminConsoleView()
                 case .localAgentCenter:
@@ -420,6 +435,15 @@ struct SettingsView: View {
 
     private var notificationStatusSubtitle: String {
         NotificationService.shared.isAuthorized ? "已开启" : "已关闭"
+    }
+
+    private var backgroundExecutionSubtitle: String {
+        if backgroundKeepAlive.isActive {
+            return RunLiveActivityService.isEnabled ? "任务运行中，灵动岛已开启" : "任务运行中，灵动岛已关闭"
+        }
+        let keepAliveText = backgroundKeepAlive.enhancedBackgroundEnabled ? "增强后台已开" : "增强后台已关"
+        let liveActivityText = RunLiveActivityService.isEnabled ? "灵动岛已开" : "灵动岛已关"
+        return "\(keepAliveText)，\(liveActivityText)"
     }
 
     private var defaultModelDisplayName: String {
@@ -614,6 +638,7 @@ enum SettingsDestination: Hashable {
     case ttsSettings
     case sttSettings
     case notifications
+    case backgroundExecution
     case adminConsole
     case localAgentCenter
     case mcpAgents
@@ -2535,6 +2560,165 @@ struct NotificationSettingsView: View {
     }
 
     private func permissionPill(_ text: String, color: Color) -> some View {
+        Text(text)
+            .scaledFont(size: 11, weight: .semibold)
+            .foregroundStyle(color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.12))
+            .clipShape(Capsule())
+    }
+}
+
+// MARK: - Background Settings View
+
+struct BackgroundSettingsView: View {
+    @Environment(\.theme) private var theme
+    @ObservedObject private var keepAlive = BackgroundKeepAliveService.shared
+    @AppStorage("runLiveActivityEnabled") private var liveActivityEnabled = true
+
+    var body: some View {
+        List {
+            Section {
+                Toggle("增强后台运行", isOn: enhancedBackgroundBinding)
+                    .tint(theme.brandPrimary)
+            } footer: {
+                Text("开启后，聊天流式回复和本地 Alpine 任务会在进入后台时保持后台任务、静音音频保活和可选定位心跳，不会把后台到期误判为回复完成。")
+            }
+
+            Section {
+                Toggle("锁屏与灵动岛", isOn: $liveActivityEnabled)
+                    .tint(theme.brandPrimary)
+                    .disabled(!keepAlive.liveActivitySystemEnabled)
+                    .onChange(of: liveActivityEnabled) { _, enabled in
+                        if !enabled {
+                            Task {
+                                await RunLiveActivityService.shared.endAllActivities(detail: "灵动岛已关闭")
+                            }
+                        }
+                    }
+
+                HStack {
+                    Label("系统 Live Activity", systemImage: "rectangle.on.rectangle")
+                    Spacer()
+                    statusPill(
+                        keepAlive.liveActivitySystemEnabled ? "可用" : "不可用",
+                        color: keepAlive.liveActivitySystemEnabled ? theme.success : theme.warning
+                    )
+                }
+            } footer: {
+                Text("显示长任务进度到锁屏和灵动岛。关闭后会立即移除当前 Live Activity，并且新的任务不会再创建灵动岛进度。")
+            }
+
+            Section {
+                Toggle("后台定位心跳", isOn: locationHeartbeatBinding)
+                    .tint(theme.brandPrimary)
+
+                HStack {
+                    Label("定位权限", systemImage: "location.fill")
+                    Spacer()
+                    statusPill(
+                        keepAlive.locationAuthorizationLabel(),
+                        color: locationStatusColor
+                    )
+                }
+
+                if keepAlive.locationAuthorizationStatus == .notDetermined
+                    || keepAlive.locationAuthorizationStatus == .authorizedWhenInUse {
+                    Button {
+                        keepAlive.requestBackgroundLocationPermission()
+                    } label: {
+                        Label("请求始终允许定位", systemImage: "location.badge.plus")
+                    }
+                }
+
+                if keepAlive.locationAuthorizationStatus == .denied
+                    || keepAlive.locationAuthorizationStatus == .restricted {
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        Label("打开 iOS 设置", systemImage: "gear")
+                    }
+                }
+            } footer: {
+                Text("定位只作为低精度后台心跳使用，用来让长任务和灵动岛进度在后台继续刷新。未开启时仍会使用静音音频保活。")
+            }
+
+            Section {
+                statusRow("任务状态", value: keepAlive.isActive ? "运行中" : "空闲", isGood: keepAlive.isActive)
+                statusRow("静音音频保活", value: keepAlive.silentAudioKeepAliveActive ? "运行中" : "未运行", isGood: keepAlive.silentAudioKeepAliveActive)
+                statusRow("定位心跳", value: keepAlive.locationHeartbeatActive ? "运行中" : "未运行", isGood: keepAlive.locationHeartbeatActive)
+                survivalRow
+            } header: {
+                Text("状态")
+            } footer: {
+                Text("这里显示当前后台生存能力。只有任务正在流式回复或本地工具正在运行时，保活状态才会进入运行中。")
+            }
+        }
+        .navigationTitle("后台运行")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var enhancedBackgroundBinding: Binding<Bool> {
+        Binding(
+            get: { keepAlive.enhancedBackgroundEnabled },
+            set: { keepAlive.enhancedBackgroundEnabled = $0 }
+        )
+    }
+
+    private var locationHeartbeatBinding: Binding<Bool> {
+        Binding(
+            get: { keepAlive.backgroundLocationEnabled },
+            set: { keepAlive.backgroundLocationEnabled = $0 }
+        )
+    }
+
+    private var survivalRow: some View {
+        HStack {
+            Label("后台能力", systemImage: "bolt.heart")
+            Spacer()
+            switch keepAlive.survivalTier {
+            case .short:
+                statusPill("约 30 秒", color: theme.warning)
+            case .extended(let location, let audio):
+                statusPill(survivalTierLabel(location: location, audio: audio), color: theme.success)
+            }
+        }
+    }
+
+    private func survivalTierLabel(location: Bool, audio: Bool) -> String {
+        switch (location, audio) {
+        case (true, true): return "定位 + 音频"
+        case (true, false): return "定位"
+        case (false, true): return "音频"
+        case (false, false): return "增强"
+        }
+    }
+
+    private var locationStatusColor: Color {
+        switch keepAlive.locationAuthorizationStatus {
+        case .authorizedAlways:
+            return theme.success
+        case .authorizedWhenInUse:
+            return theme.warning
+        case .denied, .restricted:
+            return theme.error
+        default:
+            return theme.textTertiary
+        }
+    }
+
+    private func statusRow(_ title: String, value: String, isGood: Bool) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            statusPill(value, color: isGood ? theme.success : theme.textTertiary)
+        }
+    }
+
+    private func statusPill(_ text: String, color: Color) -> some View {
         Text(text)
             .scaledFont(size: 11, weight: .semibold)
             .foregroundStyle(color)

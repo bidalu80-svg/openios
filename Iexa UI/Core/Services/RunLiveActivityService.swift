@@ -19,6 +19,14 @@ struct IexaRunActivityAttributes: ActivityAttributes {
 @MainActor
 final class RunLiveActivityService {
     static let shared = RunLiveActivityService()
+    static let enabledKey = "runLiveActivityEnabled"
+
+    static var isEnabled: Bool {
+        if UserDefaults.standard.object(forKey: enabledKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: enabledKey)
+    }
 
     private var activity: Activity<IexaRunActivityAttributes>?
     private var activeRunId: String?
@@ -38,6 +46,7 @@ final class RunLiveActivityService {
         progress: Double = 0.08,
         isIndeterminate: Bool = true
     ) async {
+        guard Self.isEnabled else { return }
         guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
 
         if let activity, activeRunId != id {

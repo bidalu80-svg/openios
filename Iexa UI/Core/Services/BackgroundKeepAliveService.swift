@@ -1,3 +1,4 @@
+import ActivityKit
 import AVFoundation
 import Combine
 import CoreLocation
@@ -10,6 +11,9 @@ final class BackgroundKeepAliveService: NSObject, ObservableObject, CLLocationMa
     static let shared = BackgroundKeepAliveService()
 
     @Published private(set) var isActive = false
+    @Published private(set) var locationAuthorizationStatus: CLAuthorizationStatus = .notDetermined
+    @Published private(set) var silentAudioKeepAliveActive = false
+    @Published private(set) var locationHeartbeatActive = false
 
     var enhancedBackgroundEnabled: Bool {
         get {
@@ -19,6 +23,7 @@ final class BackgroundKeepAliveService: NSObject, ObservableObject, CLLocationMa
             return UserDefaults.standard.bool(forKey: "enhancedBackgroundExecution")
         }
         set {
+            objectWillChange.send()
             UserDefaults.standard.set(newValue, forKey: "enhancedBackgroundExecution")
             reevaluate()
         }
@@ -27,9 +32,30 @@ final class BackgroundKeepAliveService: NSObject, ObservableObject, CLLocationMa
     var backgroundLocationEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "backgroundLocationTrackingEnabled") }
         set {
+            objectWillChange.send()
             UserDefaults.standard.set(newValue, forKey: "backgroundLocationTrackingEnabled")
+            if newValue && locationAuthorizationStatus == .notDetermined {
+                requestBackgroundLocationPermission()
+            }
             reevaluate()
         }
+    }
+
+    enum BackgroundSurvivalTier: Equatable {
+        case short
+        case extended(location: Bool, audio: Bool)
+    }
+
+    var survivalTier: BackgroundSurvivalTier {
+        let locationLeg = enhancedBackgroundEnabled
+            && backgroundLocationEnabled
+            && (locationAuthorizationStatus == .authorizedAlways || locationAuthorizationStatus == .authorizedWhenInUse)
+        let audioLeg = enhancedBackgroundEnabled
+        return (locationLeg || audioLeg) ? .extended(location: locationLeg, audio: audioLeg) : .short
+    }
+
+    var liveActivitySystemEnabled: Bool {
+        ActivityAuthorizationInfo().areActivitiesEnabled
     }
 
     private let logger = Logger(subsystem: "com.openui", category: "BackgroundKeepAlive")
@@ -44,6 +70,7 @@ final class BackgroundKeepAliveService: NSObject, ObservableObject, CLLocationMa
 
     private override init() {
         super.init()
+        locationAuthorizationStatus = locationManager.authorizationStatus
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
         locationManager.pausesLocationUpdatesAutomatically = false
@@ -79,6 +106,30 @@ final class BackgroundKeepAliveService: NSObject, ObservableObject, CLLocationMa
         endBackgroundTask()
     }
 
+    func requestBackgroundLocationPermission() {
+        let status = locationManager.authorizationStatus
+        locationAuthorizationStatus = status
+        switch status {
+        case .notDetermined:
+            locationManager.requestAlwaysAuthorization()
+        case .authorizedWhenInUse:
+            locationManager.requestAlwaysAuthorization()
+        default:
+            break
+        }
+    }
+
+    func locationAuthorizationLabel(for status: CLAuthorizationStatus? = nil) -> String {
+        switch status ?? locationAuthorizationStatus {
+        case .notDetermined: return "未请求"
+        case .restricted: return "受限"
+        case .denied: return "已拒绝"
+        case .authorizedWhenInUse: return "使用期间"
+        case .authorizedAlways: return "始终允许"
+        @unknown default: return "未知"
+        }
+    }
+
     private func installLifecycleObservers() {
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
@@ -107,8 +158,9 @@ final class BackgroundKeepAliveService: NSObject, ObservableObject, CLLocationMa
         guard backgroundTaskId == .invalid else { return }
         backgroundTaskId = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
             Task { @MainActor in
-                self?.logger.warning("Background task expired; releasing keep-alive")
-                self?.finishAll()
+                self?.logger.warning("Background task expired; keeping active reasons until the task finishes")
+                self?.endBackgroundTask()
+                self?.reevaluate()
             }
         }
     }
@@ -150,6 +202,7 @@ final class BackgroundKeepAliveService: NSObject, ObservableObject, CLLocationMa
             audioEngine = engine
             silentPlayerNode = player
             silentAudioActive = true
+            silentAudioKeepAliveActive = true
             logger.info("Silent background audio started")
         } catch {
             logger.warning("Silent background audio failed: \(error.localizedDescription, privacy: .public)")
@@ -171,6 +224,7 @@ final class BackgroundKeepAliveService: NSObject, ObservableObject, CLLocationMa
         silentPlayerNode = nil
         audioEngine = nil
         silentAudioActive = false
+        silentAudioKeepAliveActive = false
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
         logger.info("Silent background audio stopped")
     }
@@ -178,10 +232,12 @@ final class BackgroundKeepAliveService: NSObject, ObservableObject, CLLocationMa
     private func startLocationIfAllowed() {
         guard backgroundLocationEnabled, !locationUpdating else { return }
         let status = locationManager.authorizationStatus
+        locationAuthorizationStatus = status
         guard status == .authorizedAlways || status == .authorizedWhenInUse else { return }
         locationManager.allowsBackgroundLocationUpdates = true
         locationManager.startUpdatingLocation()
         locationUpdating = true
+        locationHeartbeatActive = true
         logger.info("Background location heartbeat started")
     }
 
@@ -190,7 +246,15 @@ final class BackgroundKeepAliveService: NSObject, ObservableObject, CLLocationMa
         locationManager.stopUpdatingLocation()
         locationManager.allowsBackgroundLocationUpdates = false
         locationUpdating = false
+        locationHeartbeatActive = false
         logger.info("Background location heartbeat stopped")
+    }
+
+    nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        Task { @MainActor in
+            self.locationAuthorizationStatus = manager.authorizationStatus
+            self.reevaluate()
+        }
     }
 
     private func normalizedReason(_ reason: String) -> String {

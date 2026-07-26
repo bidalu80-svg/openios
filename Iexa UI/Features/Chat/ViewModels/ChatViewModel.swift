@@ -654,10 +654,7 @@ final class ChatViewModel {
         backgroundTaskId = UIApplication.shared.beginBackgroundTask { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let content = self.conversation?.messages.last(where: { $0.role == .assistant })?.content ?? ""
-                if !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    await self.sendCompletionNotificationIfNeeded(content: content)
-                }
+                self.logger.warning("Streaming background task expired; keeping stream state open without sending completion notification")
                 self.endBackgroundTask()
             }
         }
@@ -5756,6 +5753,12 @@ final class ChatViewModel {
 
     // MARK: - Background Completion Polling
 
+    private func serverAssistantIsFinished(_ message: ChatMessage) -> Bool {
+        !message.isStreaming && !message.statusHistory.contains { status in
+            status.done != true && status.hidden != true
+        }
+    }
+
     /// Starts a background task that polls the server for streaming completion.
     /// iOS grants ~30s of background execution. If the generation completes within
     /// that window, we fire a local notification and adopt the server state.
@@ -5782,7 +5785,8 @@ final class ChatViewModel {
                 do {
                     let refreshed = try await manager.fetchConversation(id: chatId)
                     if let serverAssistant = refreshed.messages.last(where: { $0.role == .assistant }),
-                       !serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                       !serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       self.serverAssistantIsFinished(serverAssistant) {
                         self.logger.info("Background poll: server completed (\(serverAssistant.content.count) chars)")
                         self.adoptServerMessages(serverConversation: refreshed)
                         let finalAssistantContent = self.conversation?.messages
@@ -5831,7 +5835,7 @@ final class ChatViewModel {
             let serverContent = serverAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines)
 
             // If server has content, the generation completed while we were backgrounded
-            if !serverContent.isEmpty {
+            if !serverContent.isEmpty, serverAssistantIsFinished(serverAssistant) {
                 logger.info("Foreground recovery: server has completed content (\(serverContent.count) chars, \(serverAssistant.files.count) files)")
 
                 // Adopt server state fully (includes files from tool calls)
