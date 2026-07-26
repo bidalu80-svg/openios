@@ -662,7 +662,6 @@ final class ChatViewModel {
 
     private func startRunLiveActivity(id: String, modelId: String, prompt: String) async {
         let kind = runLiveActivityKind(modelId: modelId, prompt: prompt)
-        guard kind != "chat" else { return }
         await RunLiveActivityService.shared.start(
             id: id,
             kind: kind,
