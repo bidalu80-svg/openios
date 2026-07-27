@@ -315,6 +315,11 @@ final class StreamingContentStore {
         streamingError = error
     }
 
+    /// Clears a transient streaming error while keeping the active stream state.
+    func clearError() {
+        streamingError = nil
+    }
+
     /// Ends the streaming session.
     ///
     /// Returns the full `StreamingResult` immediately so the caller can write

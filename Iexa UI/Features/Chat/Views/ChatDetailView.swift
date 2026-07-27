@@ -2700,6 +2700,7 @@ private struct AgentActivityItem: Identifiable, Hashable {
         if mergedSteps.contains(where: { !$0.isLocalStatusPlaceholder }) {
             mergedSteps.removeAll { $0.isLocalStatusPlaceholder }
         }
+        mergedSteps = orderedActivitySteps(mergedSteps)
 
         let fileCount = activeOrConcreteItems.reduce(0) { $0 + $1.fileCount }
         let commandCount = activeOrConcreteItems.reduce(0) { $0 + $1.commandCount }
@@ -4054,8 +4055,6 @@ struct ChatDetailView: View {
             return nil
         }
 
-        let visible = orderedVisibleAssistantText(from: message.content)
-
         if !activityItem.id.hasPrefix("turn-"),
            let orderedLocalBlocks = orderedLocalAlpineTranscriptBlocks(
                 for: message,
@@ -4064,6 +4063,14 @@ struct ChatDetailView: View {
             return orderedLocalBlocks
         }
 
+        if let orderedOffsetBlocks = orderedAgentTranscriptBlocksFromToolOffsets(
+            for: message,
+            activityItem: activityItem
+        ) {
+            return orderedOffsetBlocks
+        }
+
+        let visible = orderedVisibleAssistantText(from: message.content)
         var blocks: [OrderedAgentTranscriptBlock] = []
         appendOrderedReasoningBlockIfNeeded(for: message, to: &blocks)
         if isLocalAlpineResultMessage(message) {
@@ -4274,6 +4281,26 @@ struct ChatDetailView: View {
         return blocks
     }
 
+    private func orderedAgentTranscriptBlocksFromToolOffsets(
+        for message: ChatMessage,
+        activityItem: AgentActivityItem
+    ) -> [OrderedAgentTranscriptBlock]? {
+        let content = orderedVisibleAssistantText(from: message.content)
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        let orderedPairs = orderedToolOffsetPairs(for: activityItem, contentLength: content.count)
+        guard !orderedPairs.isEmpty else { return nil }
+
+        return orderedTranscriptBlocks(
+            message: message,
+            activityItem: activityItem,
+            visibleContent: content,
+            orderedPairs: orderedPairs
+        )
+    }
+
     private func orderedLocalAlpineTranscriptBlocksFromToolOffsets(
         for message: ChatMessage,
         activityItem: AgentActivityItem
@@ -4283,28 +4310,52 @@ struct ChatDetailView: View {
             return nil
         }
 
+        let orderedPairs = orderedToolOffsetPairs(for: activityItem, contentLength: content.count)
+        guard !orderedPairs.isEmpty else { return nil }
+
+        return orderedTranscriptBlocks(
+            message: message,
+            activityItem: activityItem,
+            visibleContent: content,
+            orderedPairs: orderedPairs
+        )
+    }
+
+    private func orderedToolOffsetPairs(
+        for activityItem: AgentActivityItem,
+        contentLength: Int
+    ) -> [(offset: Int, step: AgentActivityStep)] {
         var stepsByToolId: [String: AgentActivityStep] = [:]
         for step in activityItem.steps where step.id.hasPrefix("tool-") {
             let toolId = String(step.id.dropFirst("tool-".count))
             stepsByToolId[toolId] = stepsByToolId[toolId] ?? step
         }
-        let orderedPairs = activityItem.toolCalls
+        return activityItem.toolCalls
             .compactMap { call -> (offset: Int, step: AgentActivityStep)? in
                 guard let rawOffset = call.contentOffset,
                       let step = stepsByToolId[call.id] else {
                     return nil
                 }
-                return (max(0, min(rawOffset, content.count)), step)
+                return (max(0, min(rawOffset, contentLength)), step)
             }
             .sorted {
                 if $0.offset != $1.offset { return $0.offset < $1.offset }
-                return $0.step.id < $1.step.id
+                return $0.step.sortOrder == $1.step.sortOrder
+                    ? $0.step.id < $1.step.id
+                    : $0.step.sortOrder < $1.step.sortOrder
             }
-        guard !orderedPairs.isEmpty else { return nil }
+    }
 
+    private func orderedTranscriptBlocks(
+        message: ChatMessage,
+        activityItem: AgentActivityItem,
+        visibleContent content: String,
+        orderedPairs: [(offset: Int, step: AgentActivityStep)]
+    ) -> [OrderedAgentTranscriptBlock]? {
         var blocks: [OrderedAgentTranscriptBlock] = []
         appendOrderedReasoningBlockIfNeeded(for: message, to: &blocks)
         var cursorOffset = 0
+        let messageId = message.id
 
         func stringIndex(for offset: Int) -> String.Index {
             content.index(
@@ -4321,7 +4372,7 @@ struct ChatDetailView: View {
             guard !text.isEmpty else { return }
             blocks.append(
                 OrderedAgentTranscriptBlock(
-                    id: "\(message.id)-offset-text-\(ordinal)",
+                    id: "\(messageId)-offset-text-\(ordinal)",
                     content: .text(text)
                 )
             )
@@ -4332,7 +4383,7 @@ struct ChatDetailView: View {
             if let item = activityItem.retainingSteps([pair.step], idSuffix: "offset-\(index)") {
                 blocks.append(
                     OrderedAgentTranscriptBlock(
-                        id: "\(message.id)-offset-steps-\(index)",
+                        id: "\(messageId)-offset-steps-\(index)",
                         content: .steps(item)
                     )
                 )
@@ -14330,34 +14381,19 @@ private struct AgentFloatingStepPreviewSheet: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            VStack(spacing: 0) {
-                topActionBar
-                Divider()
-                previewArea
-                Divider()
-                controlPanel
-            }
-            .background(theme.background)
-            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(theme.isDark ? 0.14 : 0.08), lineWidth: 0.8)
-            )
-
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .scaledFont(size: 16, weight: .semibold)
-                    .foregroundStyle(theme.textPrimary)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(theme.surfaceContainerHighest.opacity(theme.isDark ? 0.42 : 0.72)))
-            }
-            .buttonStyle(.plain)
-            .padding(.leading, 16)
-            .padding(.top, 16)
+        VStack(spacing: 0) {
+            topActionBar
+            Divider()
+            previewArea
+            Divider()
+            controlPanel
         }
+        .background(theme.background)
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(Color.primary.opacity(theme.isDark ? 0.14 : 0.08), lineWidth: 0.8)
+        )
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(theme.background.opacity(theme.isDark ? 0.98 : 1.0))
@@ -14369,16 +14405,35 @@ private struct AgentFloatingStepPreviewSheet: View {
     }
 
     private var topActionBar: some View {
-        HStack(spacing: 10) {
-            Spacer(minLength: 34)
-
+        ZStack {
             Text("IEXA 电脑")
                 .scaledFont(size: 17, weight: .bold)
                 .foregroundStyle(theme.textPrimary)
                 .lineLimit(1)
+                .minimumScaleFactor(0.82)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 132)
 
-            Spacer(minLength: 0)
+            HStack(spacing: 10) {
+                Button {
+                    dismiss()
+                } label: {
+                    topActionIcon("xmark", accessibilityLabel: "Close")
+                }
+                .buttonStyle(.plain)
 
+                Spacer(minLength: 0)
+
+                topTrailingActions
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.92 : 0.98))
+    }
+
+    private var topTrailingActions: some View {
+        HStack(spacing: 10) {
             if let selectedCommand {
                 Button {
                     NotificationCenter.default.post(
@@ -14413,11 +14468,6 @@ private struct AgentFloatingStepPreviewSheet: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.leading, 16)
-        .padding(.trailing, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
-        .background(theme.surfaceContainer.opacity(theme.isDark ? 0.92 : 0.98))
     }
 
     private func topActionIcon(_ systemName: String, accessibilityLabel: String) -> some View {

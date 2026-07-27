@@ -717,8 +717,9 @@ final class NetworkManager: NSObject, Sendable {
         }
     }
 
-    /// Retries up to `maxRetries` times with exponential backoff for network errors and 5xx responses.
-    /// Does not retry 4xx, cancelled requests, or SSL errors.
+    /// Retries up to `maxRetries` times with exponential backoff for network errors,
+    /// HTTP 429, and 5xx responses.
+    /// Does not retry other 4xx, cancelled requests, or SSL errors.
     func performRequestWithRetry(
         _ request: URLRequest,
         maxRetries: Int = 3,
@@ -731,21 +732,24 @@ final class NetworkManager: NSObject, Sendable {
                 let (data, response) = try await performRequest(request)
 
                 if let httpResponse = response as? HTTPURLResponse,
-                   httpResponse.statusCode >= 500 && attempt < maxRetries {
-                    let delay = baseDelay * pow(2.0, Double(attempt))
-                    logger.warning("Server error \(httpResponse.statusCode) on attempt \(attempt + 1)/\(maxRetries + 1), retrying in \(delay)s")
-                    DiagnosticLogManager.shared.warning(
-                        "Retrying \(diagnosticRequestLabel(for: request)) after HTTP \(httpResponse.statusCode) attempt=\(attempt + 1)/\(maxRetries + 1) delay=\(String(format: "%.1f", delay))s",
-                        category: "Network"
-                    )
-                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                    lastError = parseHTTPError(
+                   !(200..<400).contains(httpResponse.statusCode) {
+                    let statusError = parseHTTPError(
                         statusCode: httpResponse.statusCode,
                         data: data,
                         path: request.url?.path,
                         authenticated: request.value(forHTTPHeaderField: "Authorization") != nil
                     )
-                    continue
+                    if statusError.isRetryable && attempt < maxRetries {
+                        let delay = baseDelay * pow(2.0, Double(attempt))
+                        logger.warning("Server error \(httpResponse.statusCode) on attempt \(attempt + 1)/\(maxRetries + 1), retrying in \(delay)s")
+                        DiagnosticLogManager.shared.warning(
+                            "Retrying \(diagnosticRequestLabel(for: request)) after HTTP \(httpResponse.statusCode) attempt=\(attempt + 1)/\(maxRetries + 1) delay=\(String(format: "%.1f", delay))s",
+                            category: "Network"
+                        )
+                        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                        lastError = statusError
+                        continue
+                    }
                 }
 
                 return (data, response)

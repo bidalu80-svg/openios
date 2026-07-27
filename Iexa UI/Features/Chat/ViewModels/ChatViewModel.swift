@@ -268,6 +268,7 @@ final class ChatViewModel {
     private static let codeEditingTogglePreferenceKey = "chatInput.codeEditingEnabled"
     private static let quickPillsPreferenceKey = "quickPills"
     private static let directImageGenerationMaxConcurrency = 3
+    private static let upstreamAutoRetryDelays: [Int] = [3, 5, 10, 15, 30]
 
     /// Isolated store for streaming content. Only the actively streaming
     /// message view observes this — all other message views read from
@@ -7966,7 +7967,11 @@ final class ChatViewModel {
                             )
                             fallbackRequest.tools = nil
                             fallbackRequest.toolChoice = nil
-                            let sseStream = try await manager.sendPreferredOpenAIStreaming(request: fallbackRequest)
+                            let sseStream = try await self.openPreferredOpenAIStreamingWithAutoRetry(
+                                manager: manager,
+                                request: fallbackRequest,
+                                assistantMessageId: assistantMessageId
+                            )
                             for try await event in sseStream {
                                 if Task.isCancelled { break }
                                 if let usage = event.usage, !usage.isEmpty {
@@ -7995,7 +8000,11 @@ final class ChatViewModel {
                             var fallbackRequest = request
                             fallbackRequest.tools = nil
                             fallbackRequest.toolChoice = nil
-                            let sseStream = try await manager.sendPreferredOpenAIStreaming(request: fallbackRequest)
+                            let sseStream = try await self.openPreferredOpenAIStreamingWithAutoRetry(
+                                manager: manager,
+                                request: fallbackRequest,
+                                assistantMessageId: assistantMessageId
+                            )
                             for try await event in sseStream {
                                 if Task.isCancelled { break }
                                 if let usage = event.usage, !usage.isEmpty {
@@ -8010,7 +8019,11 @@ final class ChatViewModel {
                             }
                         }
                     } else {
-                        let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                        let sseStream = try await self.openPreferredOpenAIStreamingWithAutoRetry(
+                            manager: manager,
+                            request: request,
+                            assistantMessageId: assistantMessageId
+                        )
 
                         for try await event in sseStream {
                             if Task.isCancelled { break }
@@ -8287,7 +8300,11 @@ final class ChatViewModel {
                     var exactUsage: [String: Any]?
 
                     do {
-                        let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
+                        let sseStream = try await self.openPipeSSEWithAutoRetry(
+                            manager: manager,
+                            request: request,
+                            assistantMessageId: assistantMessageId
+                        )
                         for try await event in sseStream {
                             if Task.isCancelled { break }
 
@@ -11080,7 +11097,10 @@ final class ChatViewModel {
         // preceding tool-result turns. Browser continuations keep their result
         // on a parent node, so inspect the active parent chain, not just this row.
         guard hasStructuredToolContinuation(endingAt: messageId) else {
-            await regenerateResponse(messageId: messageId)
+            await retryOrdinaryAssistantResponseInPlace(
+                messageId: messageId,
+                failedMessage: failedMessage
+            )
             return
         }
 
@@ -11144,7 +11164,11 @@ final class ChatViewModel {
                 await self.populateCommonRequestFields(&request)
                 Self.disableAgentToolsForResultContinuation(&request)
 
-                let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                let sseStream = try await self.openPreferredOpenAIStreamingWithAutoRetry(
+                    manager: manager,
+                    request: request,
+                    assistantMessageId: messageId
+                )
                 for try await event in sseStream {
                     if Task.isCancelled { return }
                     if let usage = event.usage, !usage.isEmpty {
@@ -11162,6 +11186,135 @@ final class ChatViewModel {
                         content: "",
                         isStreaming: false,
                         error: ChatMessageError(content: emptyResponseError)
+                    )
+                    self.cleanupStreaming()
+                    await self.persistLocalConversationIfNeeded()
+                    NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                    return
+                }
+
+                self.updateAssistantMessage(id: messageId, accumulator: acc, isStreaming: false)
+                self.normalizeAssistantGeneratedMedia(messageId: messageId)
+                let finalContent = self.conversation?.messages.first(where: { $0.id == messageId })?.content
+                    ?? acc.bodyContent
+                self.applyUsage(exactUsage, toMessageId: messageId)
+                let lastUser = self.conversation?.messages.last(where: {
+                    $0.role == .user && !Self.isLocalAlpineAgentResult($0)
+                })
+                self.recordTokenUsageForCompletedTurn(
+                    assistantMessageId: messageId,
+                    userText: lastUser?.content ?? "",
+                    assistantText: finalContent,
+                    userAttachments: [],
+                    usage: exactUsage
+                )
+                self.hasFinishedStreaming = true
+                self.isStreaming = false
+                self.selfInitiatedStream = false
+                self.activeTaskId = nil
+                self.lastTaskExtractionLength = 0
+                await self.persistLocalConversationIfNeeded()
+                await self.sendCompletionNotificationIfNeeded(content: finalContent)
+                self.endBackgroundTask()
+                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.updateAssistantMessage(
+                    id: messageId,
+                    accumulator: acc,
+                    isStreaming: false,
+                    error: ChatMessageError(content: Self.localizedGenerationError(error))
+                )
+                self.cleanupStreaming()
+                await self.persistLocalConversationIfNeeded()
+                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            }
+        }
+    }
+
+    private func retryOrdinaryAssistantResponseInPlace(
+        messageId: String,
+        failedMessage: ChatMessage
+    ) async {
+        if !isOpenAICompatibleProvider {
+            await regenerateIntoExistingMessage(assistantMessageId: messageId)
+            return
+        }
+
+        guard let manager else { return }
+        let modelId = (selectedModelId ?? failedMessage.model ?? conversation?.model ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !modelId.isEmpty else { return }
+
+        let apiMessages = await buildAPIMessagesAsync(excludingMessageIDs: Set([messageId]))
+        guard !apiMessages.isEmpty else { return }
+
+        if let index = conversation?.messages.firstIndex(where: { $0.id == messageId }) {
+            conversation?.messages[index].content = ""
+            conversation?.messages[index].error = nil
+            conversation?.messages[index].isStreaming = true
+        }
+        conversation?.history.updateNode(id: messageId) { node in
+            node.content = ""
+            node.error = nil
+            node.done = false
+        }
+
+        isStreaming = true
+        hasFinishedStreaming = false
+        selfInitiatedStream = true
+        activeTaskId = nil
+        sessionId = UUID().uuidString
+        beginStreamingBackgroundTaskIfNeeded()
+        streamingStore.beginStreaming(
+            messageId: messageId,
+            modelId: modelId,
+            initialStatusHistory: failedMessage.statusHistory,
+            initialSources: failedMessage.sources
+        )
+        appendContextCompressionStatusIfNeeded(to: messageId)
+
+        streamingTask = Task { [weak self] in
+            guard let self else { return }
+            let acc = ContentAccumulator()
+            var exactUsage: [String: Any]?
+
+            do {
+                var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
+                await self.populateCommonRequestFields(&request)
+
+                if Self.requestUsesLocalNativeFunctionTools(request) {
+                    exactUsage = try await self.streamProviderLocalNativeFunctionLoop(
+                        manager: manager,
+                        initialRequest: request,
+                        assistantMessageId: messageId,
+                        acc: acc
+                    )
+                } else {
+                    let sseStream = try await self.openPreferredOpenAIStreamingWithAutoRetry(
+                        manager: manager,
+                        request: request,
+                        assistantMessageId: messageId
+                    )
+                    for try await event in sseStream {
+                        if Task.isCancelled { return }
+                        if let usage = event.usage, !usage.isEmpty {
+                            exactUsage = usage
+                        }
+                        self.applyStreamingEventDelta(event, to: acc, assistantMessageId: messageId)
+                        if event.isFinished { break }
+                    }
+                }
+
+                if Task.isCancelled { return }
+                acc.markReasoningDone()
+                if acc.bodyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   !self.assistantMessageHasRenderableImage(messageId: messageId) {
+                    self.updateAssistantMessage(
+                        id: messageId,
+                        content: "",
+                        isStreaming: false,
+                        error: ChatMessageError(content: "未收到模型回复或图片数据，请重试。")
                     )
                     self.cleanupStreaming()
                     await self.persistLocalConversationIfNeeded()
@@ -11356,7 +11509,11 @@ final class ChatViewModel {
                 do {
                     var request = ChatCompletionRequest(model: modelId, messages: apiMessages, stream: true)
                     await self.populateCommonRequestFields(&request)
-                    let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                    let sseStream = try await self.openPreferredOpenAIStreamingWithAutoRetry(
+                        manager: manager,
+                        request: request,
+                        assistantMessageId: capturedNewAssistantId
+                    )
 
                     for try await event in sseStream {
                         if Task.isCancelled { break }
@@ -11523,7 +11680,11 @@ final class ChatViewModel {
                     var exactUsage: [String: Any]?
 
                     do {
-                        let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
+                        let sseStream = try await self.openPipeSSEWithAutoRetry(
+                            manager: manager,
+                            request: request,
+                            assistantMessageId: capturedNewAssistantId
+                        )
                         for try await event in sseStream {
                             if Task.isCancelled { break }
                             if let usage = event.usage, !usage.isEmpty {
@@ -11936,7 +12097,11 @@ final class ChatViewModel {
                     let acc = ContentAccumulator()
                     var exactUsage: [String: Any]?
                     do {
-                        let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
+                        let sseStream = try await self.openPipeSSEWithAutoRetry(
+                            manager: manager,
+                            request: request,
+                            assistantMessageId: assistantMessageId
+                        )
                         for try await event in sseStream {
                             if Task.isCancelled { break }
                             if let usage = event.usage, !usage.isEmpty {
@@ -13206,7 +13371,11 @@ final class ChatViewModel {
             request.messages = apiMessages
             Self.disableAgentToolsForResultContinuation(&request)
             do {
-                let finalStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                let finalStream = try await openPreferredOpenAIStreamingWithAutoRetry(
+                    manager: manager,
+                    request: request,
+                    assistantMessageId: assistantMessageId
+                )
                 for try await event in finalStream {
                     if Task.isCancelled { break }
                     if let usage = event.usage, !usage.isEmpty {
@@ -13236,7 +13405,11 @@ final class ChatViewModel {
         for _ in 0..<localAlpineAgentMaxSteps {
             request.messages = apiMessages
             let toolAccumulator = LocalAlpineNativeToolCallAccumulator()
-            let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+            let sseStream = try await openPreferredOpenAIStreamingWithAutoRetry(
+                manager: manager,
+                request: request,
+                assistantMessageId: assistantMessageId
+            )
 
             for try await event in sseStream {
                 if Task.isCancelled { break }
@@ -13288,6 +13461,7 @@ final class ChatViewModel {
             var skipRemainingToolMessage: String?
             var needsFinalAnswerWithoutTools = false
             var finalAnswerFallback: String?
+            var pendingVisualContextMessages: [[String: Any]] = []
             for call in calls {
                 if shouldSkipRemainingCalls {
                     let message = skipRemainingToolMessage
@@ -13345,6 +13519,10 @@ final class ChatViewModel {
                     providerType: currentProviderType,
                     to: &apiMessages
                 )
+                pendingVisualContextMessages.append(contentsOf: await Self.localToolVisualContextMessages(
+                    for: result,
+                    renderedContent: content
+                ))
                 if Self.localAlpineNativeToolShouldStopAfterResult(
                     call,
                     result: result,
@@ -13357,6 +13535,7 @@ final class ChatViewModel {
                     shouldSkipRemainingCalls = true
                 }
             }
+            apiMessages.append(contentsOf: pendingVisualContextMessages)
             if let blockedLoopMessage {
                 let guardMessage = Self.localAlpineNativeLoopGuardModelMessage(blockedLoopMessage)
                     ?? "本地工具循环保护已停止重复执行。"
@@ -13371,7 +13550,11 @@ final class ChatViewModel {
                 Self.disableAgentToolsForResultContinuation(&request)
                 let fallback = Self.localAlpineNativeLoopBlockedFallbackMessage(blockedLoopMessage)
                 do {
-                    let finalStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                    let finalStream = try await openPreferredOpenAIStreamingWithAutoRetry(
+                        manager: manager,
+                        request: request,
+                        assistantMessageId: assistantMessageId
+                    )
                     for try await event in finalStream {
                         if Task.isCancelled { break }
                         if let usage = event.usage, !usage.isEmpty {
@@ -13466,7 +13649,11 @@ final class ChatViewModel {
             request.messages = apiMessages
             Self.disableAgentToolsForResultContinuation(&request)
             do {
-                let finalStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                let finalStream = try await openPreferredOpenAIStreamingWithAutoRetry(
+                    manager: manager,
+                    request: request,
+                    assistantMessageId: assistantMessageId
+                )
                 for try await event in finalStream {
                     if Task.isCancelled { break }
                     if let usage = event.usage, !usage.isEmpty {
@@ -13496,7 +13683,11 @@ final class ChatViewModel {
         for _ in 0..<Self.localNativeFunctionMaxSteps {
             request.messages = apiMessages
             let toolAccumulator = LocalAlpineNativeToolCallAccumulator()
-            let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+            let sseStream = try await openPreferredOpenAIStreamingWithAutoRetry(
+                manager: manager,
+                request: request,
+                assistantMessageId: assistantMessageId
+            )
 
             for try await event in sseStream {
                 if Task.isCancelled { break }
@@ -16580,6 +16771,49 @@ final class ChatViewModel {
 
     private static func localToolVisualContextMessages(for message: ChatMessage, limit: Int = 4) async -> [[String: Any]] {
         let references = localToolVisualReferences(for: message, limit: limit)
+        return await localToolVisualContextMessages(from: references, limit: limit)
+    }
+
+    private static func localToolVisualContextMessages(
+        for result: LocalAlpineAgentResult,
+        renderedContent: String,
+        limit: Int = 4
+    ) async -> [[String: Any]] {
+        var candidates: [String] = []
+        collectLocalToolVisualReferences(inText: renderedContent, into: &candidates)
+        collectLocalToolVisualReferences(inText: result.summary, into: &candidates)
+        if let modelObservation = result.modelObservation {
+            collectLocalToolVisualReferences(inText: modelObservation, into: &candidates)
+        }
+        for file in result.writtenFiles {
+            candidates.append(file.path)
+        }
+        for commandResult in result.commandResults {
+            collectLocalToolVisualReferences(inText: commandResult.outputPreview, into: &candidates)
+            if let outputReference = commandResult.outputReference {
+                candidates.append(outputReference)
+            }
+        }
+        for call in result.toolCalls {
+            if let imageFilePath = call.imageFilePath {
+                candidates.append(imageFilePath)
+            }
+            if let outputPreview = call.outputPreview {
+                collectLocalToolVisualReferences(inText: outputPreview, into: &candidates)
+            }
+            if let outputReference = call.outputReference {
+                candidates.append(outputReference)
+            }
+            candidates.append(contentsOf: call.filePaths)
+        }
+        let references = filteredLocalToolVisualReferences(candidates, limit: limit)
+        return await localToolVisualContextMessages(from: references, limit: limit)
+    }
+
+    private static func localToolVisualContextMessages(
+        from references: [String],
+        limit: Int = 4
+    ) async -> [[String: Any]] {
         guard !references.isEmpty else { return [] }
 
         var imageParts: [[String: Any]] = []
@@ -16635,21 +16869,23 @@ final class ChatViewModel {
             "iexa_local_alpine_raw_result",
             "iexa_local_alpine_command_results",
             "iexa_local_alpine_written_files",
+            "iexa_local_alpine_native_tool_turns",
+            "iexa_local_alpine_native_calls",
             "iexa_local_native_raw_result",
             "iexa_local_native_tool_turns",
             "iexa_local_native_tool_calls"
         ]
         for key in metadataKeys {
-            candidates.append(contentsOf: localAlpineImagePaths(in: metadata[key] ?? ""))
-            if let value = metadata[key],
-               let object = jsonObjectFromToolArguments(value) {
-                collectLocalToolVisualReferences(in: object, into: &candidates)
+            if let value = metadata[key] {
+                collectLocalToolVisualReferences(inText: value, into: &candidates)
             }
         }
-        if let object = jsonObjectFromToolArguments(message.content) {
-            collectLocalToolVisualReferences(in: object, into: &candidates)
-        }
+        collectLocalToolVisualReferences(inText: message.content, into: &candidates)
 
+        return filteredLocalToolVisualReferences(candidates, limit: limit)
+    }
+
+    private static func filteredLocalToolVisualReferences(_ candidates: [String], limit: Int) -> [String] {
         var seen = Set<String>()
         return candidates.compactMap { rawReference in
             let reference = rawReference.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -16664,6 +16900,15 @@ final class ChatViewModel {
             }
             return nil
         }.prefix(limit).map { $0 }
+    }
+
+    private static func collectLocalToolVisualReferences(inText text: String, into candidates: inout [String]) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        candidates.append(contentsOf: localAlpineImagePaths(in: trimmed))
+        if let object = jsonObjectFromToolArguments(trimmed) {
+            collectLocalToolVisualReferences(in: object, into: &candidates)
+        }
     }
 
     private static func collectLocalToolVisualReferences(in value: Any, into candidates: inout [String]) {
@@ -24378,7 +24623,11 @@ final class ChatViewModel {
                 await self.populateCommonRequestFields(&request)
 
                 if self.isOpenAICompatibleProvider {
-                    let sseStream = try await manager.sendPreferredOpenAIStreaming(request: request)
+                    let sseStream = try await self.openPreferredOpenAIStreamingWithAutoRetry(
+                        manager: manager,
+                        request: request,
+                        assistantMessageId: assistantMessageId
+                    )
                     for try await event in sseStream {
                         if Task.isCancelled { break }
                         if let usage = event.usage, !usage.isEmpty {
@@ -24401,7 +24650,11 @@ final class ChatViewModel {
                 }
 
                 if request.isPipeModel {
-                    let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
+                    let sseStream = try await self.openPipeSSEWithAutoRetry(
+                        manager: manager,
+                        request: request,
+                        assistantMessageId: assistantMessageId
+                    )
                     for try await event in sseStream {
                         if Task.isCancelled { break }
                         if let usage = event.usage, !usage.isEmpty {
@@ -25877,7 +26130,11 @@ final class ChatViewModel {
                 }
 
                 if request.isPipeModel {
-                    let stream = try await manager.apiClient.sendMessagePipeSSE(request: request)
+                    let stream = try await self.openPipeSSEWithAutoRetry(
+                        manager: manager,
+                        request: request,
+                        assistantMessageId: assistantMessageId
+                    )
                     for try await event in stream {
                         if Task.isCancelled { break }
                         if let usage = event.usage, !usage.isEmpty {
@@ -27249,7 +27506,11 @@ final class ChatViewModel {
                             )
                             fallbackRequest.tools = nil
                             fallbackRequest.toolChoice = nil
-                            let sseStream = try await manager.sendPreferredOpenAIStreaming(request: fallbackRequest)
+                            let sseStream = try await self.openPreferredOpenAIStreamingWithAutoRetry(
+                                manager: manager,
+                                request: fallbackRequest,
+                                assistantMessageId: assistantMessageId
+                            )
                             for try await event in sseStream {
                                 if Task.isCancelled { break }
                                 if let usage = event.usage, !usage.isEmpty {
@@ -27274,7 +27535,11 @@ final class ChatViewModel {
                 }
 
                 if request.isPipeModel {
-                    let sseStream = try await manager.apiClient.sendMessagePipeSSE(request: request)
+                    let sseStream = try await self.openPipeSSEWithAutoRetry(
+                        manager: manager,
+                        request: request,
+                        assistantMessageId: assistantMessageId
+                    )
                     for try await event in sseStream {
                         if Task.isCancelled { break }
                         if let usage = event.usage, !usage.isEmpty {
@@ -28413,6 +28678,156 @@ final class ChatViewModel {
             reasoningContent: accumulator.reasoningContent,
             reasoningDone: accumulator.reasoningDone
         )
+    }
+
+    private func openPreferredOpenAIStreamingWithAutoRetry(
+        manager: ConversationManager,
+        request: ChatCompletionRequest,
+        assistantMessageId: String
+    ) async throws -> SSEStream {
+        try await openUpstreamStreamingWithAutoRetry(assistantMessageId: assistantMessageId) {
+            try await manager.sendPreferredOpenAIStreaming(request: request)
+        }
+    }
+
+    private func openPipeSSEWithAutoRetry(
+        manager: ConversationManager,
+        request: ChatCompletionRequest,
+        assistantMessageId: String
+    ) async throws -> SSEStream {
+        try await openUpstreamStreamingWithAutoRetry(assistantMessageId: assistantMessageId) {
+            try await manager.apiClient.sendMessagePipeSSE(request: request)
+        }
+    }
+
+    private func openUpstreamStreamingWithAutoRetry(
+        assistantMessageId: String,
+        openStream: () async throws -> SSEStream
+    ) async throws -> SSEStream {
+        var lastError: Error?
+
+        for attempt in 0...Self.upstreamAutoRetryDelays.count {
+            if attempt > 0 {
+                clearUpstreamAutoRetryState(assistantMessageId: assistantMessageId)
+            }
+
+            do {
+                let stream = try await openStream()
+                clearUpstreamAutoRetryState(assistantMessageId: assistantMessageId)
+                return stream
+            } catch {
+                lastError = error
+                guard Self.shouldAutoRetryUpstreamOpenError(error),
+                      attempt < Self.upstreamAutoRetryDelays.count else {
+                    clearUpstreamAutoRetryState(assistantMessageId: assistantMessageId)
+                    throw error
+                }
+
+                let retryAttempt = attempt + 1
+                let delay = Self.upstreamAutoRetryDelays[attempt]
+                logger.warning(
+                    "Upstream stream open failed; auto retry \(retryAttempt)/\(Self.upstreamAutoRetryDelays.count) in \(delay)s: \(Self.localizedGenerationError(error))"
+                )
+                DiagnosticLogManager.shared.warning(
+                    "Auto retry upstream stream messageId=\(assistantMessageId) attempt=\(retryAttempt)/\(Self.upstreamAutoRetryDelays.count) delay=\(delay)s error=\(Self.localizedGenerationError(error))",
+                    category: "Chat"
+                )
+                try await showUpstreamAutoRetryCountdown(
+                    assistantMessageId: assistantMessageId,
+                    error: error,
+                    attempt: retryAttempt,
+                    delay: delay
+                )
+            }
+        }
+
+        if let lastError {
+            throw lastError
+        }
+        throw APIError.unknown(underlying: nil)
+    }
+
+    private func showUpstreamAutoRetryCountdown(
+        assistantMessageId: String,
+        error: Error,
+        attempt: Int,
+        delay: Int
+    ) async throws {
+        let errorText = Self.localizedGenerationError(error)
+        for remaining in stride(from: delay, through: 1, by: -1) {
+            try Task.checkCancellation()
+            setUpstreamAutoRetryState(
+                assistantMessageId: assistantMessageId,
+                message: "网络错误，\(remaining) 秒后重试 (\(attempt)/\(Self.upstreamAutoRetryDelays.count))：\(errorText)"
+            )
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        try Task.checkCancellation()
+    }
+
+    private func setUpstreamAutoRetryState(assistantMessageId: String, message: String) {
+        let error = ChatMessageError(content: message)
+        if streamingStore.streamingMessageId == assistantMessageId {
+            streamingStore.setError(error)
+        }
+        if let index = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) {
+            conversation?.messages[index].error = error
+        }
+        conversation?.history.updateNode(id: assistantMessageId) { node in
+            node.error = error
+        }
+    }
+
+    private func clearUpstreamAutoRetryState(assistantMessageId: String) {
+        if streamingStore.streamingMessageId == assistantMessageId {
+            streamingStore.clearError()
+        }
+        if let index = conversation?.messages.firstIndex(where: { $0.id == assistantMessageId }) {
+            conversation?.messages[index].error = nil
+        }
+        conversation?.history.updateNode(id: assistantMessageId) { node in
+            node.error = nil
+        }
+    }
+
+    private static func shouldAutoRetryUpstreamOpenError(_ error: Error) -> Bool {
+        let apiError = APIError.from(error)
+        switch apiError {
+        case .httpError(let statusCode, let message, _):
+            if statusCode == 429 || statusCode >= 500 { return true }
+            return upstreamErrorMessageLooksRetryable(message)
+        case .networkError, .streamError:
+            return true
+        case .responseDecoding(_, let data):
+            guard let data,
+                  let text = String(data: data, encoding: .utf8) else {
+                return upstreamErrorMessageLooksRetryable(error.localizedDescription)
+            }
+            return upstreamErrorMessageLooksRetryable(text)
+        case .unknown:
+            return upstreamErrorMessageLooksRetryable(error.localizedDescription)
+        case .requestEncoding, .invalidURL, .unauthorized, .tokenExpired, .proxyAuthRequired,
+             .sslError, .redirectDetected, .cancelled:
+            return false
+        }
+    }
+
+    private static func upstreamErrorMessageLooksRetryable(_ message: String?) -> Bool {
+        guard let message else { return false }
+        let lowercased = message.lowercased()
+        return lowercased.contains("too many requests")
+            || lowercased.contains("rate limit")
+            || lowercased.contains("rate_limit")
+            || lowercased.contains("overloaded")
+            || lowercased.contains("temporarily unavailable")
+            || lowercased.contains("temporary unavailable")
+            || lowercased.contains("try again later")
+            || lowercased.contains("please retry")
+            || lowercased.contains("timeout")
+            || lowercased.contains("timed out")
+            || lowercased.contains("请求过多")
+            || lowercased.contains("限流")
+            || lowercased.contains("稍后重试")
     }
 
     private func updateAssistantMessage(
