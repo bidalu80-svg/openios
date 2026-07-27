@@ -106,9 +106,11 @@ final class StreamingContentStore {
     private var lastKnownTotal: Int = 0
 
     /// Exponential moving average of the inter-burst interval in display-link
-    /// frames. Seed at 25 (≈417ms) — matches the typical 400ms gap at 20 tok/s.
+    /// frames. Seed at 16 (≈267ms at 60fps) for a tighter Minis-style cadence.
     /// Updated on every burst: EMA = 0.3 × observed + 0.7 × EMA
-    private var burstIntervalEMA: Double = 25
+    private var burstIntervalEMA: Double = 16
+
+    private static let initialBurstIntervalFrames: Double = 16
 
     /// Frame counter incremented every tick, reset to 0 on each burst arrival.
     /// Used to measure the actual gap between consecutive token bursts.
@@ -125,10 +127,10 @@ final class StreamingContentStore {
     private var isFinishing: Bool = false
 
     /// Hard cap on chars revealed per frame, regardless of server speed.
-    /// At 30fps: 10.0 chars/frame = 300 chars/sec — comfortable typewriter pace.
+    /// At 60fps: 8.0 chars/frame = 480 chars/sec — quick but still bounded.
     /// Prevents fast models from dumping large bursts instantly, which destroys
     /// the character-by-character feel. The buffer simply grows and drains steadily.
-    private let maxCharsPerFrame: Double = 10.0
+    private let maxCharsPerFrame: Double = 8.0
 
     /// Once the server has finished, keeping a multi-KB buffer on CADisplayLink
     /// makes tool-heavy/code-heavy turns re-render for seconds after execution.
@@ -410,7 +412,7 @@ final class StreamingContentStore {
         drainAccumulator = 0
         steadyRate = 0
         lastKnownTotal = 0
-        burstIntervalEMA = 25
+        burstIntervalEMA = Self.initialBurstIntervalFrames
         framesSinceLastBurst = 0
         isFirstBurst = true
         vizTransitionPending = false
@@ -419,9 +421,9 @@ final class StreamingContentStore {
         displayLinkTarget = target
         let link = CADisplayLink(target: target, selector: #selector(DisplayLinkTarget.tick(_:)))
         if #available(iOS 15.0, *) {
-            link.preferredFrameRateRange = CAFrameRateRange(minimum: 20, maximum: 30, preferred: 30)
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
         } else {
-            link.preferredFramesPerSecond = 30
+            link.preferredFramesPerSecond = 60
         }
         link.add(to: .main, forMode: .common)
         displayLink = link
@@ -434,7 +436,7 @@ final class StreamingContentStore {
         drainAccumulator = 0
         steadyRate = 0
         lastKnownTotal = 0
-        burstIntervalEMA = 25
+        burstIntervalEMA = Self.initialBurstIntervalFrames
         framesSinceLastBurst = 0
         isFirstBurst = true
         vizTransitionPending = false
@@ -777,7 +779,7 @@ final class StreamingContentStore {
                 // Skip EMA update on the very first burst to prevent the model's
                 // thinking time (potentially seconds = hundreds of frames) from
                 // inflating burstIntervalEMA and making the first drain far too slow.
-                // Use the seeded EMA value (25 frames ≈ 417ms) for the first burst.
+                // Use the seeded EMA value for the first burst.
                 isFirstBurst = false
             } else {
                 // Update EMA with the observed inter-burst interval (frames).
@@ -805,12 +807,10 @@ final class StreamingContentStore {
         if buffered <= 40 {
             charsThisFrame = steadyRate
 
-            // Tail-reserve brake: when only 3 or fewer chars remain AND we are
-            // still actively receiving tokens (not finishing), apply a quadratic
-            // slow-down so the last chars linger until the next burst arrives.
-            // During finishing mode we skip this so the tail drains naturally.
-            if buffered <= 3 && !isFinishing {
-                let brakeFactor = Double(buffered) / 4.0  // 0.25 … 0.75
+            // Tail-reserve brake only for the final single character. The older
+            // 3-character brake made fast replies pause at line ends.
+            if buffered <= 1 && !isFinishing {
+                let brakeFactor = 0.5
                 charsThisFrame = steadyRate * brakeFactor
             }
         } else {

@@ -11272,15 +11272,41 @@ private struct StreamingPlainTextTail: View {
     let content: String
 
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var revealOpacity: Double = 1
 
     var body: some View {
-        Text(content)
+        let parts = splitForStreamingReveal(content)
+        (Text(parts.prefix).foregroundColor(theme.textPrimary)
+            + Text(parts.tail).foregroundColor(theme.textPrimary.opacity(reduceMotion ? 1 : revealOpacity)))
             .scaledFont(size: 16, context: .content)
-            .foregroundStyle(theme.textPrimary)
             .lineSpacing(3.5)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
             .transaction { $0.animation = nil }
+            .onAppear {
+                revealOpacity = 1
+            }
+            .onChange(of: content) { oldValue, newValue in
+                guard !reduceMotion,
+                      newValue.count > oldValue.count,
+                      newValue.hasPrefix(oldValue) else {
+                    revealOpacity = 1
+                    return
+                }
+                revealOpacity = 0.28
+                withAnimation(.easeOut(duration: 0.42)) {
+                    revealOpacity = 1
+                }
+            }
+    }
+
+    private func splitForStreamingReveal(_ text: String) -> (prefix: String, tail: String) {
+        guard !text.isEmpty else { return ("", "") }
+        let tailCount = min(36, max(8, text.count / 8))
+        guard text.count > tailCount else { return ("", text) }
+        let split = text.index(text.endIndex, offsetBy: -tailCount)
+        return (String(text[..<split]), String(text[split...]))
     }
 }
 
