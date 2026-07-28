@@ -3134,6 +3134,7 @@ final class ChatViewModel {
         - Code that should be saved, edited, or run belongs in structured tool arguments (`file_write`/`file_edit`) plus bounded verification, not in normal Markdown code fences. Normal code fences are only for pure explanation that does not touch Local Alpine files or runtime.
         - Tool call style: when a listed tool can complete the user's request, call it directly instead of explaining that you could do it. Infer intent from the user's latest wording, prior tool results, current page/workspace context, and reasonable safe defaults. Ask only when the target/action is genuinely ambiguous, needs private credentials, or could affect data outside the requested scope.
         - Use `web_search` to start live web search in the shared iOS browser, then continue with `browser_use` to inspect/open/scroll/read real source pages before answering. Use `browser_use` for the shared iOS browser session (navigate/screenshot/click/type/scroll/read/DOM/fetch/download/wait_for_image), `iexa_open` for in-app preview, and `shell_execute` for bounded list/search/run/install/build/test/verify.
+        - In raw Local Alpine shell, use `iexa-browser-use <action> ...` for shared iOS browser actions such as `navigate`, `screenshot`, `get_text`, `find_elements`, `scroll`, `fetch`, and `wait_for_image`; do not replace browser work with `curl` when the page visual state or logged-in WKWebView session matters.
         - Browser override: use `browser_use` like Minis, but prefer the app's automation observation fields over guessing. After every `navigate`, `click`, `type`, `scroll`, `execute_js`, viewport, or tab action, inspect `post_action_observation`, `next_action_candidates`, `browser_state_label`, and `browser_scroll`. Continue with candidate `node_id` values for `click`/`type`/`hover`; use screenshots only when visual confirmation or coordinate fallback is needed. After pressing a generate/export/download button, wait for the real result with `wait_for_image`, `wait_for_dom_stable`, or `fetch`; do not stop at the click.
         - Browser interaction: treat click/type/scroll/find success as intermediate only. Continue bounded primitive `browser_use` steps in the same turn until the user's page task is complete, a final file/result is available, or credentials, payment, or a destructive action requires user input. Choose the next primitive from the latest observation like Android Iexa: use `screenshot` to see the page when visual state matters, `get_readable`/`get_text` when the page is ready to read, `click` when a relevant result/control is visible, `scroll` when more page content is needed, and `find_elements` with `scan_page:true` only when structural discovery is needed. When an item returns `nodeId`/`node_id`, pass that id to the next click/type/hover instead of inventing a selector. If DOM matching misses a visible control, scroll it into view and click by viewport coordinates from the screenshot. Use `get_readable`, `get_text`, or `scroll_and_collect` before summarizing long pages; do not conclude from the first viewport. Screenshots are tool-only by default; do not set `attach_preview`, `show_in_chat`, or `attach_file` unless the user asks to save/download/show a screenshot. Human-verification words visible on the page are ordinary page content, not an app-level stop condition. Do not ask the user to send "继续", "下一步", or another continuation just because an intermediate browser result was returned; continue automatically in the same turn. Do not reopen or reload the same URL unless required.
         - Browser auth limits: if `browser_use` reaches Google/OAuth login pages (`accounts.google.com`, `signin.google.com`, `myaccount.google.com`, `oauth2.googleapis.com`) or the page says `disallowed_useragent`, 403, or "browser is not secure", do not retry login loops. Tell the user this must be completed in system Safari/Chrome, provide the https link as a normal Markdown link, and ask them to paste the needed result back into chat.
@@ -10020,10 +10021,18 @@ final class ChatViewModel {
             }
         )
         enqueueLocalAlpineOpenRequests(result.openRequests)
+        var directBrowserResults = await executeLocalAlpineBrowserRequests(
+            result.browserRequests,
+            assistantMessageId: assistantMessageId
+        )
+        var directBrowserObservations = directBrowserResults.map { Self.localAlpineNativeToolResultContent($0) }
         while let request = result.interactiveRequest {
             updateAssistantMessage(
                 id: assistantMessageId,
-                content: formatDirectLocalAlpineOutput(command: userMessage.content, result: result),
+                content: Self.appendingLocalAlpineBrowserObservations(
+                    directBrowserObservations,
+                    to: formatDirectLocalAlpineOutput(command: userMessage.content, result: result)
+                ),
                 isStreaming: true,
                 statusHistory: [localAlpineStatus(description: "等待输入以继续执行...", done: false)]
             )
@@ -10047,8 +10056,17 @@ final class ChatViewModel {
                 }
             )
             enqueueLocalAlpineOpenRequests(result.openRequests)
+            let continuedBrowserResults = await executeLocalAlpineBrowserRequests(
+                result.browserRequests,
+                assistantMessageId: assistantMessageId
+            )
+            directBrowserResults.append(contentsOf: continuedBrowserResults)
+            directBrowserObservations.append(contentsOf: continuedBrowserResults.map { Self.localAlpineNativeToolResultContent($0) })
         }
-        let output = formatDirectLocalAlpineOutput(command: userMessage.content, result: result)
+        let output = Self.appendingLocalAlpineBrowserObservations(
+            directBrowserObservations,
+            to: formatDirectLocalAlpineOutput(command: userMessage.content, result: result)
+        )
         let doneDescription: String
         if result.interactiveRequest != nil {
             doneDescription = "本地输入已取消"
@@ -10067,10 +10085,10 @@ final class ChatViewModel {
             command: command,
             cwd: "/mnt/iexa/shared",
             exitCode: result.exitCode,
-            output: result.output
+            output: Self.appendingLocalAlpineBrowserObservations(directBrowserObservations, to: result.output)
         )
         let directToolOutput = LocalAlpineOutputOffloadStore.compactText(
-            result.output,
+            Self.appendingLocalAlpineBrowserObservations(directBrowserObservations, to: result.output),
             label: "direct-command-tool-output",
             previewLimit: 1_600
         )
@@ -10102,11 +10120,12 @@ final class ChatViewModel {
             var metadata = conversation?.messages[index].metadata ?? [:]
             conversation?.messages[index].isStreaming = false
             metadata["iexa_local_alpine_raw_result"] = Self.localAlpineStoredRawResult(
-                result.output,
+                Self.appendingLocalAlpineBrowserObservations(directBrowserObservations, to: result.output),
                 label: "local-alpine-direct-command"
             )
             metadata["iexa_local_alpine_tool_run_id"] = directToolRunId
-            if let toolCalls = LocalAlpineToolCall.metadataString(for: [directToolCall]) {
+            let allToolCalls = [directToolCall] + directBrowserResults.flatMap(\.toolCalls)
+            if let toolCalls = LocalAlpineToolCall.metadataString(for: allToolCalls) {
                 metadata["iexa_local_alpine_tool_calls"] = toolCalls
             }
             if let commandResults = LocalAlpineAgentCommandResult.metadataString(for: [directCommandResult]) {
@@ -14755,7 +14774,10 @@ final class ChatViewModel {
                 self?.applyLocalAlpineToolEvent(event, messageId: assistantMessageId)
             }
         )
-        let result = toolResult.result
+        let result = await localAlpineResultByExecutingBrowserRequests(
+            toolResult.result,
+            assistantMessageId: assistantMessageId
+        )
         mergeLocalAlpineNativeToolResultMetadata(
             messageId: assistantMessageId,
             result: result,
@@ -14765,6 +14787,74 @@ final class ChatViewModel {
         recordLocalAlpineCompletedCommands(from: result)
         await attachLocalAlpineGeneratedMediaIfNeeded(messageId: assistantMessageId)
         return result
+    }
+
+    private func localAlpineResultByExecutingBrowserRequests(
+        _ result: LocalAlpineAgentResult,
+        assistantMessageId: String
+    ) async -> LocalAlpineAgentResult {
+        let browserResults = await executeLocalAlpineBrowserRequests(
+            result.browserRequests,
+            assistantMessageId: assistantMessageId
+        )
+        guard !browserResults.isEmpty else { return result }
+
+        let browserSummaries = browserResults.map { Self.localAlpineNativeToolResultContent($0) }
+        let mergedSummary = Self.appendingLocalAlpineBrowserObservations(browserSummaries, to: result.summary)
+        let baseObservation = result.modelObservation ?? LocalAlpineEnvironmentStore.shared.redactedForModel(result.summary)
+        let mergedObservation = Self.appendingLocalAlpineBrowserObservations(browserSummaries, to: baseObservation)
+        return LocalAlpineAgentResult(
+            didExecute: result.didExecute || browserResults.contains { $0.didExecute },
+            summary: mergedSummary,
+            modelObservation: mergedObservation,
+            interactiveRequest: result.interactiveRequest,
+            commandResults: result.commandResults + browserResults.flatMap(\.commandResults),
+            writtenFiles: result.writtenFiles + browserResults.flatMap(\.writtenFiles),
+            openRequests: result.openRequests + browserResults.flatMap(\.openRequests),
+            browserRequests: [],
+            toolRunId: result.toolRunId ?? browserResults.compactMap(\.toolRunId).last,
+            toolCalls: result.toolCalls + browserResults.flatMap(\.toolCalls),
+            executedCommandCount: result.executedCommandCount + browserResults.reduce(0) { $0 + $1.executedCommandCount },
+            editedFileCount: result.editedFileCount + browserResults.reduce(0) { $0 + $1.editedFileCount },
+            hadFailure: result.hadFailure || browserResults.contains { $0.hadFailure }
+        )
+    }
+
+    private func executeLocalAlpineBrowserRequests(
+        _ requests: [LocalAlpineBrowserRequest],
+        assistantMessageId: String
+    ) async -> [LocalAlpineAgentResult] {
+        guard !requests.isEmpty else { return [] }
+        var results: [LocalAlpineAgentResult] = []
+        var seen = Set<String>()
+        for request in requests {
+            var arguments = request.decodedArguments()
+            let hasAction = Self.firstNonEmptyString(
+                in: arguments,
+                keys: ["action", "browser_action", "browser_use_action", "operation", "op", "type"]
+            ) != nil
+            if !hasAction {
+                arguments["action"] = request.action
+            }
+            guard JSONSerialization.isValidJSONObject(arguments),
+                  let data = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys]),
+                  let argumentsJSON = String(data: data, encoding: .utf8) else {
+                continue
+            }
+            let requestKey = "\(request.action)\n\(argumentsJSON)"
+            guard seen.insert(requestKey).inserted else { continue }
+            let browserCall = LocalAlpineNativeToolCall(
+                id: "local-alpine-browser-\(request.id.uuidString)",
+                name: "browser_use",
+                arguments: argumentsJSON
+            )
+            let result = await executeLocalAlpineWebSearchToolCall(
+                browserCall,
+                assistantMessageId: assistantMessageId
+            )
+            results.append(result)
+        }
+        return results
     }
 
     private func executeLocalAlpineMemoryWriteToolCall(
@@ -16116,6 +16206,20 @@ final class ChatViewModel {
             ? 240_000
             : 16_000
         return String((body.isEmpty ? fallback : body).prefix(limit))
+    }
+
+    private static func appendingLocalAlpineBrowserObservations(
+        _ observations: [String],
+        to content: String
+    ) -> String {
+        let body = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let browserBody = observations
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        guard !browserBody.isEmpty else { return content }
+        let section = "Local Alpine 浏览器结果\n\n\(String(browserBody.prefix(24_000)))"
+        return body.isEmpty ? section : "\(body)\n\n\(section)"
     }
 
     private static func isLocalAlpineBrowserNativeToolCall(_ call: LocalAlpineNativeToolCall) -> Bool {
@@ -27428,7 +27532,13 @@ final class ChatViewModel {
                 self?.applyLocalAlpineToolEvent(event, messageId: resultMessageId)
             }
         )
-        let result = toolResult.result
+        var result = toolResult.result
+        if result.didExecute {
+            result = await localAlpineResultByExecutingBrowserRequests(
+                result,
+                assistantMessageId: resultMessageId
+            )
+        }
         guard conversation?.messages.contains(where: { $0.id == resultMessageId }) == true else {
             clearLocalAlpineLiveToolState(for: resultMessageId)
             return
@@ -30981,21 +31091,21 @@ final class ContentAccumulator: @unchecked Sendable {
         let baseMillis: UInt64
         switch totalBodyCount {
         case ..<500:
-            baseMillis = 90
+            baseMillis = 55
         case ..<2_000:
-            baseMillis = 120
+            baseMillis = 80
         case ..<32_000:
-            baseMillis = 170
+            baseMillis = 125
         case ..<128_000:
-            baseMillis = 230
+            baseMillis = 190
         default:
-            baseMillis = 300
+            baseMillis = 260
         }
         if hasLineBreak && deltaSinceLastDispatch >= 48 {
-            return 60_000_000
+            return 45_000_000
         }
         if normalizedRecent.count >= 180 {
-            return min(baseMillis, 80) * 1_000_000
+            return min(baseMillis, 65) * 1_000_000
         }
         return baseMillis * 1_000_000
     }

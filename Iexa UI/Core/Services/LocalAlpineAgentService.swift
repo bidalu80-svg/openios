@@ -9,6 +9,7 @@ nonisolated struct LocalAlpineAgentResult: Sendable {
     let commandResults: [LocalAlpineAgentCommandResult]
     let writtenFiles: [LocalAlpineWrittenFile]
     let openRequests: [LocalAlpineOpenRequest]
+    let browserRequests: [LocalAlpineBrowserRequest]
     let toolRunId: String?
     let toolCalls: [LocalAlpineToolCall]
     let executedCommandCount: Int
@@ -23,6 +24,7 @@ nonisolated struct LocalAlpineAgentResult: Sendable {
         commandResults: [LocalAlpineAgentCommandResult] = [],
         writtenFiles: [LocalAlpineWrittenFile] = [],
         openRequests: [LocalAlpineOpenRequest] = [],
+        browserRequests: [LocalAlpineBrowserRequest] = [],
         toolRunId: String? = nil,
         toolCalls: [LocalAlpineToolCall] = [],
         executedCommandCount: Int = 0,
@@ -36,6 +38,7 @@ nonisolated struct LocalAlpineAgentResult: Sendable {
         self.commandResults = commandResults
         self.writtenFiles = writtenFiles
         self.openRequests = openRequests
+        self.browserRequests = browserRequests
         self.toolRunId = toolRunId
         self.toolCalls = toolCalls
         self.executedCommandCount = executedCommandCount
@@ -905,6 +908,7 @@ actor LocalAlpineAgentService {
         ]
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var openRequests: [LocalAlpineOpenRequest] = []
+        var browserRequests: [LocalAlpineBrowserRequest] = []
         let writtenFiles = writeResult.writtenFiles
         if writeResult.hadFailure {
             let result = LocalAlpineCommandResult(
@@ -940,6 +944,7 @@ actor LocalAlpineAgentService {
             stdinInput: stdinInput
         )
         openRequests.append(contentsOf: result.openRequests)
+        browserRequests.append(contentsOf: result.browserRequests)
         lines.append(format(command: command, cwd: cwd, result: result))
         commandResults.append(Self.commandResult(command: command, cwd: cwd, result: result))
 
@@ -951,6 +956,7 @@ actor LocalAlpineAgentService {
                 commandResults: commandResults,
                 writtenFiles: writtenFiles,
                 openRequests: openRequests,
+                browserRequests: browserRequests,
                 executedCommandCount: Self.actualCommandCount(commandResults),
                 editedFileCount: writeResult.writtenPaths.isEmpty ? 0 : 1,
                 hadFailure: true
@@ -960,6 +966,7 @@ actor LocalAlpineAgentService {
         let cleanupCommand = "rm -f \(shellSingleQuoted(runtimeFile))"
         let cleanupResult = await LocalAlpineTerminalService.shared.execute(command: cleanupCommand, cwd: cwd)
         openRequests.append(contentsOf: cleanupResult.openRequests)
+        browserRequests.append(contentsOf: cleanupResult.browserRequests)
         if cleanupResult.exitCode != 0 {
             lines.append(format(command: cleanupCommand, cwd: cwd, result: cleanupResult))
             commandResults.append(Self.commandResult(command: cleanupCommand, cwd: cwd, result: cleanupResult))
@@ -972,6 +979,7 @@ actor LocalAlpineAgentService {
             commandResults: commandResults,
             writtenFiles: writtenFiles,
             openRequests: openRequests,
+            browserRequests: browserRequests,
             executedCommandCount: Self.actualCommandCount(commandResults),
             editedFileCount: writeResult.writtenPaths.isEmpty ? 0 : 1,
             hadFailure: commandResults.contains { $0.failed }
@@ -1029,6 +1037,7 @@ actor LocalAlpineAgentService {
         var commandResults: [LocalAlpineAgentCommandResult] = []
         var writtenFiles: [LocalAlpineWrittenFile] = []
         var openRequests: [LocalAlpineOpenRequest] = []
+        var browserRequests: [LocalAlpineBrowserRequest] = []
         var toolCalls: [LocalAlpineToolCall] = []
         var editedFilePaths = Set<String>()
         var stopRemainingCommands = false
@@ -1376,6 +1385,7 @@ actor LocalAlpineAgentService {
                     }
                 )
                 openRequests.append(contentsOf: result.openRequests)
+                browserRequests.append(contentsOf: result.browserRequests)
                 while let request = result.interactiveRequest {
                     if let inputProvider,
                        let stdinInput = await inputProvider(request) {
@@ -1398,6 +1408,7 @@ actor LocalAlpineAgentService {
                             }
                         )
                         openRequests.append(contentsOf: result.openRequests)
+                        browserRequests.append(contentsOf: result.browserRequests)
                     } else {
                         stepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result))
                         modelStepLines.append(format(command: commandToExecute, cwd: effectiveCWD, result: result, truncateOutput: false))
@@ -1424,6 +1435,7 @@ actor LocalAlpineAgentService {
                             commandResults: commandResults,
                             writtenFiles: writtenFiles,
                             openRequests: openRequests,
+                            browserRequests: browserRequests,
                             toolRunId: toolRunId,
                             toolCalls: toolCalls,
                             executedCommandCount: Self.actualCommandCount(commandResults),
@@ -1451,6 +1463,7 @@ actor LocalAlpineAgentService {
                     cwd: effectiveCWD
                 ) {
                     openRequests.append(contentsOf: diagnostic.result.openRequests)
+                    browserRequests.append(contentsOf: diagnostic.result.browserRequests)
                     let diagnosticContext = Self.toolCallContext(
                         runId: toolRunId,
                         name: "diagnostic",
@@ -1505,6 +1518,7 @@ actor LocalAlpineAgentService {
             commandResults: commandResults,
             writtenFiles: writtenFiles,
             openRequests: openRequests,
+            browserRequests: browserRequests,
             toolRunId: toolRunId,
             toolCalls: toolCalls,
             executedCommandCount: Self.actualCommandCount(commandResults),
@@ -3373,68 +3387,50 @@ actor LocalAlpineAgentService {
             || selector == "web_fetch" || selector == "fetch_url" || selector == "open_url" {
             let object = dict["browser_use"] ?? dict["browser"] ?? dict["browse"]
                 ?? dict["web_fetch"] ?? dict["fetch_url"] ?? dict["open_url"] ?? dict
-            guard let url = urlString(from: object) ?? urlString(from: dict) else {
-                return nil
-            }
-            if let previewTarget = localPreviewTarget(fromURLString: url) {
-                let command = "iexa-open \(shellSingleQuotedStatic(previewTarget))"
-                return (command, "browser_use", previewTarget, [previewTarget], cwd)
-            }
-            let quotedURL = shellSingleQuotedStatic(url)
-            let lineCount = max(20, min(intValue(value(for: ["max_lines", "line_count", "lines"], in: object))
-                ?? intValue(value(for: ["max_lines", "line_count", "lines"], in: dict))
-                ?? 160, 500))
-            let timeoutSeconds = max(5, min(intValue(value(for: ["timeout", "timeout_seconds", "max_time"], in: object))
-                ?? intValue(value(for: ["timeout", "timeout_seconds", "max_time"], in: dict))
-                ?? 25, 120))
+            let objectDict = dictionaryValue(object) ?? [:]
+            let url = urlString(from: object) ?? urlString(from: dict)
             let savePath = value(for: ["save_to", "saveTo", "output", "output_path", "file", "path"], in: object)
                 .flatMap { pathString(from: $0) }
                 ?? value(for: ["save_to", "saveTo", "output", "output_path"], in: dict)
                     .flatMap { pathString(from: $0) }
-            let openPreview = boolValue(value(for: ["open_preview", "openPreview", "preview", "open"], in: object))
-                ?? boolValue(value(for: ["open_preview", "openPreview", "preview", "open"], in: dict))
-                ?? false
-
-            if let savePath {
-                let quotedOutput = shellSingleQuotedStatic(savePath)
-                let command = """
-                set -eu
-                out=\(quotedOutput)
-                mkdir -p "$(dirname "$out")"
-                if command -v curl >/dev/null 2>&1 || apk add --no-cache curl >/dev/null 2>&1; then
-                  curl -L --max-time \(timeoutSeconds) --silent --show-error \(quotedURL) -o "$out"
-                elif command -v wget >/dev/null 2>&1; then
-                  wget -qO "$out" \(quotedURL)
-                else
-                  printf 'browser_use unavailable: curl/wget not installed\\n' >&2
-                  exit 127
-                fi
-                bytes=$(wc -c < "$out" 2>/dev/null | tr -d ' ')
-                printf 'Saved browser_use response: %s (%s bytes)\\n' "$out" "${bytes:-0}"
-                if [ "\(openPreview ? "1" : "0")" = "1" ]; then
-                  iexa-open "$out" 2>/dev/null || true
-                fi
-                printf '\\n== preview ==\\n'
-                if grep -Iq . "$out" 2>/dev/null; then
-                  sed -n '1,\(lineCount)p' "$out"
-                else
-                  printf 'Binary or non-text file saved; inline preview skipped.\\n'
-                fi
-                """
-                return (command, "browser_use", "\(url) -> \(savePath)", [savePath], cwd)
+            if let url, let previewTarget = localPreviewTarget(fromURLString: url), savePath == nil {
+                let command = "iexa-open \(shellSingleQuotedStatic(previewTarget))"
+                return (command, "browser_use", previewTarget, [previewTarget], cwd)
             }
 
-            let command = """
-            if command -v curl >/dev/null 2>&1 || apk add --no-cache curl >/dev/null 2>&1; then
-              curl -L --max-time \(timeoutSeconds) --silent --show-error \(quotedURL) | sed -n '1,\(lineCount)p'
-            elif command -v wget >/dev/null 2>&1; then
-              wget -qO- \(quotedURL) | sed -n '1,\(lineCount)p'
-            else
-              printf 'browser_use unavailable: curl/wget not installed\\n' >&2
-              exit 127
-            fi
-            """
-            return (command, "browser_use", url, [], cwd)
+            var arguments = objectDict
+            if arguments.isEmpty, let text = stringValue(object)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                if isHTTPURL(text) || localPreviewTarget(fromURLString: text) != nil {
+                    arguments["url"] = text
+                } else {
+                    arguments["query"] = text
+                }
+            }
+            if arguments["url"] == nil, let url {
+                arguments["url"] = url
+            }
+            if arguments["save_to"] == nil, let savePath {
+                arguments["save_to"] = savePath
+            }
+            let rawAction = stringValue(value(for: ["action", "browser_action", "browser_use_action", "operation", "op", "type"], in: arguments))
+                ?? stringValue(value(for: ["action", "browser_action", "browser_use_action", "operation", "op", "type"], in: dict))
+                ?? (selector == "web_fetch" || selector == "fetch_url" || savePath != nil ? "fetch" : nil)
+                ?? (selector == "open_url" || url != nil ? "navigate" : "screenshot")
+            let action = rawAction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "screenshot" : rawAction
+            arguments["action"] = action
+
+            let payload: [String: Any] = [
+                "action": action,
+                "arguments": arguments
+            ]
+            guard JSONSerialization.isValidJSONObject(payload),
+                  let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+                  let json = String(data: data, encoding: .utf8) else {
+                return nil
+            }
+            let command = "iexa-browser-use --json \(shellSingleQuotedStatic(json))"
+            let detail = url ?? stringValue(arguments["query"]) ?? action
+            return (command, "browser_use", detail, savePath.map { [$0] } ?? [], cwd)
         }
 
         if let shellCommand,

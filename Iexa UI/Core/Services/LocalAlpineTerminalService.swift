@@ -353,19 +353,22 @@ nonisolated struct LocalAlpineCommandResult: Sendable {
     let exitCode: Int?
     let interactiveRequest: LocalAlpineInteractiveRequest?
     let openRequests: [LocalAlpineOpenRequest]
+    let browserRequests: [LocalAlpineBrowserRequest]
 
     init(
         command: String,
         output: String,
         exitCode: Int?,
         interactiveRequest: LocalAlpineInteractiveRequest?,
-        openRequests: [LocalAlpineOpenRequest] = []
+        openRequests: [LocalAlpineOpenRequest] = [],
+        browserRequests: [LocalAlpineBrowserRequest] = []
     ) {
         self.command = command
         self.output = output
         self.exitCode = exitCode
         self.interactiveRequest = interactiveRequest
         self.openRequests = openRequests
+        self.browserRequests = browserRequests
     }
 }
 
@@ -487,6 +490,21 @@ nonisolated struct LocalAlpineOpenRequest: Identifiable, Hashable, Sendable {
     }
 }
 
+nonisolated struct LocalAlpineBrowserRequest: Identifiable, Hashable, Sendable {
+    let id = UUID()
+    let action: String
+    let argumentsJSON: String
+
+    func decodedArguments() -> [String: Any] {
+        guard let data = argumentsJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any] else {
+            return [:]
+        }
+        return dict
+    }
+}
+
 nonisolated enum LocalAlpineOpenMarkerParser {
     private static let escape = Character("\u{001B}")
     private static let bell = Character("\u{0007}")
@@ -554,6 +572,88 @@ nonisolated enum LocalAlpineOpenMarkerParser {
             return target.isEmpty ? nil : target
         }
         return nil
+    }
+}
+
+nonisolated enum LocalAlpineBrowserMarkerParser {
+    private static let escape = Character("\u{001B}")
+    private static let bell = Character("\u{0007}")
+    private static let stTerminator = "\u{001B}\\"
+    private static let oscPrefix = "]1337;"
+    private static let key = "IexaBrowserUse="
+
+    static func extract(from text: String) -> (cleaned: String, requests: [LocalAlpineBrowserRequest]) {
+        guard text.contains("\u{001B}]1337;") || text.contains("]1337;IexaBrowserUse=") else {
+            return (text, [])
+        }
+
+        var cleaned = ""
+        var requests: [LocalAlpineBrowserRequest] = []
+        var cursor = text.startIndex
+
+        while cursor < text.endIndex {
+            guard let escapeIndex = text[cursor...].firstIndex(of: escape) else {
+                cleaned.append(contentsOf: text[cursor...])
+                break
+            }
+
+            cleaned.append(contentsOf: text[cursor..<escapeIndex])
+            let afterEscape = text.index(after: escapeIndex)
+            guard afterEscape < text.endIndex, text[afterEscape] == "]" else {
+                cleaned.append(text[escapeIndex])
+                cursor = afterEscape
+                continue
+            }
+
+            guard text[afterEscape...].hasPrefix(oscPrefix),
+                  let terminatorRange = oscTerminatorRange(in: text, from: afterEscape) else {
+                cleaned.append(text[escapeIndex])
+                cursor = afterEscape
+                continue
+            }
+
+            let payloadStart = text.index(afterEscape, offsetBy: oscPrefix.count)
+            let payload = String(text[payloadStart..<terminatorRange.lowerBound])
+            if let request = browserRequest(from: payload) {
+                requests.append(request)
+            } else {
+                cleaned.append(contentsOf: text[escapeIndex..<terminatorRange.upperBound])
+            }
+            cursor = terminatorRange.upperBound
+        }
+
+        return (cleaned, requests)
+    }
+
+    private static func oscTerminatorRange(in text: String, from start: String.Index) -> Range<String.Index>? {
+        var candidates: [Range<String.Index>] = []
+        if let bellIndex = text[start...].firstIndex(of: bell) {
+            candidates.append(bellIndex..<text.index(after: bellIndex))
+        }
+        if let stRange = text[start...].range(of: stTerminator) {
+            candidates.append(stRange)
+        }
+        return candidates.min { $0.lowerBound < $1.lowerBound }
+    }
+
+    private static func browserRequest(from payload: String) -> LocalAlpineBrowserRequest? {
+        guard payload.hasPrefix(key) else { return nil }
+        let raw = String(payload.dropFirst(key.count))
+        let decoded = raw.removingPercentEncoding ?? raw
+        guard let data = decoded.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dict = object as? [String: Any] else {
+            return nil
+        }
+        let action = (dict["action"] as? String ?? "browser.use")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !action.isEmpty else { return nil }
+        let argsObject = dict["arguments"] as? [String: Any] ?? dict
+        guard let argsData = try? JSONSerialization.data(withJSONObject: argsObject),
+              let argsJSON = String(data: argsData, encoding: .utf8) else {
+            return nil
+        }
+        return LocalAlpineBrowserRequest(action: action, argumentsJSON: argsJSON)
     }
 }
 
@@ -1595,19 +1695,34 @@ actor LocalAlpineTerminalService {
         var lastVisibleOutput = ""
         var openTargets = Set<String>()
         var openRequests: [LocalAlpineOpenRequest] = []
+        var browserRequestKeys = Set<String>()
+        var browserRequests: [LocalAlpineBrowserRequest] = []
         let deadline = Date().addingTimeInterval(max(1, timeoutSeconds))
 
-        func commandResult(rawOutput: String, exitCode: Int?) -> LocalAlpineCommandResult {
-            let parsed = LocalAlpineOpenMarkerParser.extract(from: rawOutput)
-            for request in parsed.requests where openTargets.insert(request.target).inserted {
+        func cleanedOutputAndCollectRequests(_ output: String) -> String {
+            let openParsed = LocalAlpineOpenMarkerParser.extract(from: output)
+            for request in openParsed.requests where openTargets.insert(request.target).inserted {
                 openRequests.append(request)
             }
+            let browserParsed = LocalAlpineBrowserMarkerParser.extract(from: openParsed.cleaned)
+            for request in browserParsed.requests {
+                let key = "\(request.action)\n\(request.argumentsJSON)"
+                if browserRequestKeys.insert(key).inserted {
+                    browserRequests.append(request)
+                }
+            }
+            return browserParsed.cleaned.replacingOccurrences(of: "\u{0007}", with: "")
+        }
+
+        func commandResult(rawOutput: String, exitCode: Int?) -> LocalAlpineCommandResult {
+            let cleaned = cleanedOutputAndCollectRequests(rawOutput)
             return LocalAlpineCommandResult(
                 command: originalCommand,
-                output: trimTrailingNewlines(parsed.cleaned.replacingOccurrences(of: "\u{0007}", with: "")),
+                output: trimTrailingNewlines(cleaned),
                 exitCode: exitCode,
                 interactiveRequest: nil,
-                openRequests: openRequests
+                openRequests: openRequests,
+                browserRequests: browserRequests
             )
         }
 
@@ -1625,9 +1740,7 @@ actor LocalAlpineTerminalService {
                 rawOutput += chunk
                 let parsed = parseStreamingCommandOutput(rawOutput, markerPrefix: markerPrefix)
                 let visibleOutput = trimTrailingNewlines(
-                    LocalAlpineOpenMarkerParser.extract(from: parsed.visibleOutput)
-                        .cleaned
-                        .replacingOccurrences(of: "\u{0007}", with: "")
+                    cleanedOutputAndCollectRequests(parsed.visibleOutput)
                 )
                 if visibleOutput != lastVisibleOutput {
                     lastVisibleOutput = visibleOutput
@@ -1796,16 +1909,20 @@ actor LocalAlpineTerminalService {
     }
 
     private func resultByExtractingOpenMarkers(_ result: LocalAlpineCommandResult) -> LocalAlpineCommandResult {
-        let parsed = LocalAlpineOpenMarkerParser.extract(from: result.output)
-        guard !parsed.requests.isEmpty || parsed.cleaned != result.output else {
+        let openParsed = LocalAlpineOpenMarkerParser.extract(from: result.output)
+        let browserParsed = LocalAlpineBrowserMarkerParser.extract(from: openParsed.cleaned)
+        guard !openParsed.requests.isEmpty
+                || !browserParsed.requests.isEmpty
+                || browserParsed.cleaned != result.output else {
             return result
         }
         return LocalAlpineCommandResult(
             command: result.command,
-            output: parsed.cleaned,
+            output: browserParsed.cleaned,
             exitCode: result.exitCode,
             interactiveRequest: result.interactiveRequest,
-            openRequests: result.openRequests + parsed.requests
+            openRequests: result.openRequests + openParsed.requests,
+            browserRequests: result.browserRequests + browserParsed.requests
         )
     }
 
@@ -2135,6 +2252,94 @@ actor LocalAlpineTerminalService {
         exit 0
         """
         try writeExecutableText(bridgeScript, to: binURL.appendingPathComponent("iexa-open"))
+
+        let browserUseScript = """
+        #!/bin/sh
+        ESC=$(printf '\\033')
+        BEL=$(printf '\\007')
+
+        emit_browser_marker() {
+          printf '%s]1337;IexaBrowserUse=%s%s\\n' "$ESC" "$1" "$BEL"
+        }
+
+        if [ "$#" -eq 0 ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+          cat >&2 <<'HELP'
+        Usage: iexa-browser-use <action> [--flag value ...]
+               iexa-browser-use --json '{"action":"navigate","url":"https://example.com"}'
+
+        Actions mirror the in-app browser_use tool: navigate, screenshot, click, type,
+        get_text, get_readable, scroll, scroll_and_collect, find_elements, get_page_info,
+        get_backbone, fetch, new_tab, close_tab, list_tabs, set_viewport, get_cookies,
+        wait_for_dom_stable, wait_for_image, execute_js.
+        HELP
+          exit 1
+        fi
+
+        if command -v python3 >/dev/null 2>&1; then
+          payload=$(python3 - "$@" <<'PY'
+        import json
+        import sys
+        import urllib.parse
+
+        args = sys.argv[1:]
+        if args[:1] == ["--json"]:
+            if len(args) < 2:
+                raise SystemExit("iexa-browser-use --json requires a JSON object")
+            obj = json.loads(args[1])
+            if "arguments" not in obj:
+                action = obj.get("action") or obj.get("browser_use_action") or "browser.use"
+                obj = {"action": action, "arguments": obj}
+            print(urllib.parse.quote(json.dumps(obj, separators=(",", ":"), ensure_ascii=False), safe=""))
+            raise SystemExit(0)
+
+        action = args[0]
+        result = {"action": action}
+        i = 1
+        while i < len(args):
+            key = args[i]
+            if not key.startswith("--"):
+                i += 1
+                continue
+            key = key[2:].replace("-", "_")
+            if i + 1 >= len(args) or args[i + 1].startswith("--"):
+                result[key] = True
+                i += 1
+                continue
+            value = args[i + 1]
+            low = value.lower()
+            if low in ("true", "false"):
+                parsed = low == "true"
+            else:
+                try:
+                    parsed = int(value)
+                except ValueError:
+                    parsed = value
+            result[key] = parsed
+            i += 2
+        print(urllib.parse.quote(json.dumps({"action": action, "arguments": result}, separators=(",", ":"), ensure_ascii=False), safe=""))
+        PY
+        ) || exit 1
+        else
+          if [ "${1:-}" = "--json" ]; then
+            payload=${2:-}
+            emit_browser_marker "$payload"
+            printf 'Requested Iexa browser_use: %s\\n' "$payload"
+            exit 0
+          fi
+          action=$1
+          shift
+          url=
+          if [ "${1:-}" = "--url" ]; then
+            url=${2:-}
+          fi
+          payload=$(printf '{"action":"%s","arguments":{"action":"%s","url":"%s"}}' "$action" "$action" "$url")
+        fi
+
+        emit_browser_marker "$payload"
+        printf 'Requested Iexa browser_use: %s\\n' "$payload"
+        exit 0
+        """
+        try writeExecutableText(browserUseScript, to: binURL.appendingPathComponent("iexa-browser-use"))
 
         let serveScript = """
         #!/bin/sh
@@ -2863,14 +3068,23 @@ actor LocalAlpineTerminalService {
         var emptyPollsAfterExit = 0
         var openTargets = Set<String>()
         var openRequests: [LocalAlpineOpenRequest] = []
+        var browserRequestKeys = Set<String>()
+        var browserRequests: [LocalAlpineBrowserRequest] = []
         let deadline = timeoutSeconds.map { Date().addingTimeInterval(max(1, $0)) }
 
         func cleanedOutputAndCollectOpenRequests(_ output: String) -> String {
-            let parsed = LocalAlpineOpenMarkerParser.extract(from: output)
-            for request in parsed.requests where openTargets.insert(request.target).inserted {
+            let openParsed = LocalAlpineOpenMarkerParser.extract(from: output)
+            for request in openParsed.requests where openTargets.insert(request.target).inserted {
                 openRequests.append(request)
             }
-            return parsed.cleaned.replacingOccurrences(of: "\u{0007}", with: "")
+            let browserParsed = LocalAlpineBrowserMarkerParser.extract(from: openParsed.cleaned)
+            for request in browserParsed.requests {
+                let key = "\(request.action)\n\(request.argumentsJSON)"
+                if browserRequestKeys.insert(key).inserted {
+                    browserRequests.append(request)
+                }
+            }
+            return browserParsed.cleaned.replacingOccurrences(of: "\u{0007}", with: "")
         }
 
         func commandResult(
@@ -2883,7 +3097,8 @@ actor LocalAlpineTerminalService {
                 output: cleaned,
                 exitCode: exitCode,
                 interactiveRequest: nil,
-                openRequests: openRequests
+                openRequests: openRequests,
+                browserRequests: browserRequests
             )
         }
 
@@ -3535,9 +3750,9 @@ actor LocalAlpineTerminalService {
         \(customEnvironmentExports)
         iexa_bootstrap_preview_helpers() {
           _iexa_bootstrap_bin=/tmp/iexa-bootstrap-bin
-          _iexa_bootstrap_version=2026-07-18.3
+          _iexa_bootstrap_version=2026-07-28.1
           mkdir -p "$_iexa_bootstrap_bin" 2>/dev/null || return 0
-          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ -x "$_iexa_bootstrap_bin/nslookup" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
+          if [ -x "$_iexa_bootstrap_bin/iexa-open" ] && [ -x "$_iexa_bootstrap_bin/iexa-browser-use" ] && [ -x "$_iexa_bootstrap_bin/iexa-serve" ] && [ -x "$_iexa_bootstrap_bin/lsof" ] && [ -x "$_iexa_bootstrap_bin/netstat" ] && [ -x "$_iexa_bootstrap_bin/ping" ] && [ -x "$_iexa_bootstrap_bin/top" ] && [ -x "$_iexa_bootstrap_bin/nslookup" ] && [ "$(cat "$_iexa_bootstrap_bin/.iexa-bootstrap-version" 2>/dev/null)" = "$_iexa_bootstrap_version" ]; then
             export PATH="$_iexa_bootstrap_bin:${PATH:-}"
             export BROWSER=iexa-open
             hash -r 2>/dev/null || true
@@ -3595,6 +3810,72 @@ actor LocalAlpineTerminalService {
           esac
         done
         IEXA_OPEN_FALLBACK
+          cat > "$_iexa_bootstrap_bin/iexa-browser-use" <<'IEXA_BROWSER_USE_FALLBACK'
+        #!/bin/sh
+        ESC=$(printf '\\033')
+        BEL=$(printf '\\007')
+        emit_browser_marker() {
+          printf '%s]1337;IexaBrowserUse=%s%s\n' "$ESC" "$1" "$BEL"
+        }
+        if [ "$#" -eq 0 ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+          printf 'Usage: iexa-browser-use <action> [--flag value ...]\n' >&2
+          printf '       iexa-browser-use --json '\''{"action":"navigate","url":"https://example.com"}'\''\n' >&2
+          exit 1
+        fi
+        if command -v python3 >/dev/null 2>&1; then
+          payload=$(python3 - "$@" <<'PY'
+        import json, sys, urllib.parse
+        args = sys.argv[1:]
+        if args[:1] == ["--json"]:
+            if len(args) < 2:
+                raise SystemExit("iexa-browser-use --json requires a JSON object")
+            obj = json.loads(args[1])
+            if "arguments" not in obj:
+                action = obj.get("action") or obj.get("browser_use_action") or "browser.use"
+                obj = {"action": action, "arguments": obj}
+            print(urllib.parse.quote(json.dumps(obj, separators=(",", ":"), ensure_ascii=False), safe=""))
+            raise SystemExit(0)
+        action = args[0]
+        result = {"action": action}
+        i = 1
+        while i < len(args):
+            key = args[i]
+            if not key.startswith("--"):
+                i += 1
+                continue
+            key = key[2:].replace("-", "_")
+            if i + 1 >= len(args) or args[i + 1].startswith("--"):
+                result[key] = True
+                i += 1
+                continue
+            value = args[i + 1]
+            low = value.lower()
+            if low in ("true", "false"):
+                parsed = low == "true"
+            else:
+                try: parsed = int(value)
+                except ValueError: parsed = value
+            result[key] = parsed
+            i += 2
+        print(urllib.parse.quote(json.dumps({"action": action, "arguments": result}, separators=(",", ":"), ensure_ascii=False), safe=""))
+        PY
+        ) || exit 1
+        else
+          if [ "${1:-}" = "--json" ]; then
+            payload=${2:-}
+            emit_browser_marker "$payload"
+            printf 'Requested Iexa browser_use: %s\n' "$payload"
+            exit 0
+          fi
+          action=$1
+          shift
+          url=
+          if [ "${1:-}" = "--url" ]; then url=${2:-}; fi
+          payload=$(printf '{"action":"%s","arguments":{"action":"%s","url":"%s"}}' "$action" "$action" "$url")
+        fi
+        emit_browser_marker "$payload"
+        printf 'Requested Iexa browser_use: %s\n' "$payload"
+        IEXA_BROWSER_USE_FALLBACK
           cat > "$_iexa_bootstrap_bin/iexa-serve" <<'IEXA_SERVE_FALLBACK'
         #!/bin/sh
         set -u
@@ -3873,7 +4154,7 @@ actor LocalAlpineTerminalService {
             fi
           done
           cp "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" 2>/dev/null || true
-          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" "$_iexa_bootstrap_bin/top" "$_iexa_bootstrap_bin/nslookup" 2>/dev/null || true
+          chmod +x "$_iexa_bootstrap_bin/iexa-open" "$_iexa_bootstrap_bin/iexa-browser-use" "$_iexa_bootstrap_bin/iexa-serve" "$_iexa_bootstrap_bin/lsof" "$_iexa_bootstrap_bin/netstat" "$_iexa_bootstrap_bin/ping" "$_iexa_bootstrap_bin/top" "$_iexa_bootstrap_bin/nslookup" 2>/dev/null || true
           for tool in dig host drill; do
             [ -x "$_iexa_bootstrap_bin/$tool" ] && chmod +x "$_iexa_bootstrap_bin/$tool" 2>/dev/null || true
           done
