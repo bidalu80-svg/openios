@@ -614,9 +614,16 @@ final class ChatViewModel {
     @ObservationIgnored private var localAlpinePendingToolStatusByMessageId: [String: ChatStatusUpdate] = [:]
     @ObservationIgnored private var localAlpineToolEventFlushTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var localAlpineLastToolEventFlushAtByMessageId: [String: Date] = [:]
+    @ObservationIgnored private var conversationListRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var lastConversationListRefreshAt: Date = .distantPast
+    @ObservationIgnored private var streamingStoreStatusFlushTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var pendingStreamingStoreStatusHistoryByMessageId: [String: [ChatStatusUpdate]] = [:]
+    @ObservationIgnored private var lastStreamingStoreStatusFlushAtByMessageId: [String: Date] = [:]
     private let localAlpineAgentMaxSteps = 120
     private let localAlpineNoProgressRepeatLimit = 4
     private let localAlpineToolEventFlushInterval: TimeInterval = 0.45
+    private let conversationListRefreshInterval: TimeInterval = 0.75
+    private let streamingStoreStatusFlushInterval: TimeInterval = 0.25
     private let localAlpineLiveToolPreviewLimit = 6_000
     private let localAlpineLiveToolDetailLimit = 180
     private let localAlpineLiveToolCommandLimit = 420
@@ -1413,6 +1420,131 @@ final class ChatViewModel {
             await self?.persistLocalConversationIfNeeded()
             self?.localConversationAutosaveTask = nil
         }
+    }
+
+    private func postConversationListNeedsRefresh(immediate: Bool = false) {
+        if immediate {
+            conversationListRefreshTask?.cancel()
+            conversationListRefreshTask = nil
+            lastConversationListRefreshAt = Date()
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            return
+        }
+
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastConversationListRefreshAt)
+        if elapsed >= conversationListRefreshInterval {
+            lastConversationListRefreshAt = now
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            return
+        }
+
+        guard conversationListRefreshTask == nil else { return }
+        let delay = UInt64((conversationListRefreshInterval - elapsed) * 1_000_000_000)
+        conversationListRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            self?.conversationListRefreshTask = nil
+            self?.lastConversationListRefreshAt = Date()
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        }
+    }
+
+    private func setStreamingStoreStatusHistory(
+        _ statusHistory: [ChatStatusUpdate],
+        messageId: String,
+        immediate: Bool = false
+    ) {
+        guard streamingStore.streamingMessageId == messageId,
+              streamingStore.isActive else {
+            return
+        }
+
+        if immediate {
+            streamingStoreStatusFlushTasks[messageId]?.cancel()
+            streamingStoreStatusFlushTasks.removeValue(forKey: messageId)
+            pendingStreamingStoreStatusHistoryByMessageId.removeValue(forKey: messageId)
+            lastStreamingStoreStatusFlushAtByMessageId[messageId] = Date()
+            streamingStore.setStatusHistory(statusHistory)
+            return
+        }
+
+        pendingStreamingStoreStatusHistoryByMessageId[messageId] = statusHistory
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastStreamingStoreStatusFlushAtByMessageId[messageId] ?? .distantPast)
+        if elapsed >= streamingStoreStatusFlushInterval {
+            flushPendingStreamingStoreStatusHistory(messageId: messageId)
+            return
+        }
+
+        guard streamingStoreStatusFlushTasks[messageId] == nil else { return }
+        let delay = UInt64((streamingStoreStatusFlushInterval - elapsed) * 1_000_000_000)
+        streamingStoreStatusFlushTasks[messageId] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            self?.flushPendingStreamingStoreStatusHistory(messageId: messageId)
+        }
+    }
+
+    private func flushPendingStreamingStoreStatusHistory(messageId: String) {
+        streamingStoreStatusFlushTasks[messageId]?.cancel()
+        streamingStoreStatusFlushTasks.removeValue(forKey: messageId)
+        guard let statusHistory = pendingStreamingStoreStatusHistoryByMessageId.removeValue(forKey: messageId) else {
+            return
+        }
+        lastStreamingStoreStatusFlushAtByMessageId[messageId] = Date()
+        guard streamingStore.streamingMessageId == messageId,
+              streamingStore.isActive else {
+            return
+        }
+        streamingStore.setStatusHistory(statusHistory)
+    }
+
+    private func clearStreamingStoreStatusFlushes(for messageId: String? = nil) {
+        if let messageId {
+            streamingStoreStatusFlushTasks[messageId]?.cancel()
+            streamingStoreStatusFlushTasks.removeValue(forKey: messageId)
+            pendingStreamingStoreStatusHistoryByMessageId.removeValue(forKey: messageId)
+            lastStreamingStoreStatusFlushAtByMessageId.removeValue(forKey: messageId)
+            return
+        }
+
+        for task in streamingStoreStatusFlushTasks.values {
+            task.cancel()
+        }
+        streamingStoreStatusFlushTasks.removeAll()
+        pendingStreamingStoreStatusHistoryByMessageId.removeAll()
+        lastStreamingStoreStatusFlushAtByMessageId.removeAll()
+    }
+
+    private static func sameStatusHistory(_ lhs: [ChatStatusUpdate], _ rhs: [ChatStatusUpdate]) -> Bool {
+        statusHistorySignature(lhs) == statusHistorySignature(rhs)
+    }
+
+    private static func statusHistorySignature(_ statuses: [ChatStatusUpdate]) -> String {
+        statuses.map { status in
+            let urls = status.urls.joined(separator: ",")
+            let items = status.items.map { item in
+                [
+                    item.title ?? "",
+                    item.link ?? "",
+                    item.snippet ?? "",
+                    item.thumbnailURL ?? ""
+                ].joined(separator: "\u{1f}")
+            }.joined(separator: "\u{1e}")
+            return [
+                status.action ?? "",
+                status.status ?? "",
+                status.description ?? "",
+                status.done == true ? "1" : "0",
+                status.hidden == true ? "1" : "0",
+                urls,
+                items,
+                status.count.map(String.init) ?? "",
+                status.query ?? "",
+                status.queries.joined(separator: ",")
+            ].joined(separator: "\u{1d}")
+        }.joined(separator: "\u{1c}")
     }
 
     var selectedModel: AIModel? {
@@ -5752,6 +5884,8 @@ final class ChatViewModel {
         if let chatWebSearchSettingsObserver {
             NotificationCenter.default.removeObserver(chatWebSearchSettingsObserver)
         }
+        conversationListRefreshTask?.cancel()
+        clearStreamingStoreStatusFlushes()
     }
 
     // MARK: - Background Completion Polling
@@ -10281,6 +10415,7 @@ final class ChatViewModel {
 
     private func resetLocalAlpineAgentLoopForNewTurn() {
         interruptLocalAlpineCommand(reason: "new turn")
+        clearStreamingStoreStatusFlushes()
         localAlpineAgentTask?.cancel()
         localAlpineAgentTask = nil
         localAlpineContinuationTask?.cancel()
@@ -10308,6 +10443,7 @@ final class ChatViewModel {
 
     private func cancelLocalAlpineAgentLoop() {
         completeRunningLocalAlpineLiveToolStateAsStopped(reason: "本地任务已停止")
+        clearStreamingStoreStatusFlushes()
         interruptLocalAlpineCommand(reason: "stop")
         localAlpineAgentStopRequested = true
         localAlpineAutoExecutionPaused = true
@@ -25282,7 +25418,7 @@ final class ChatViewModel {
         }
 
         await persistLocalConversationIfNeeded()
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh()
         await startLocalNativeContinuation(parentId: resultMessage.id)
     }
 
@@ -25330,7 +25466,7 @@ final class ChatViewModel {
         conversation?.history.appendChildId(resultMessage.id, to: messageId)
         conversation?.history.currentId = resultMessage.id
         await persistLocalConversationIfNeeded()
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh()
         await startLocalNativeContinuation(parentId: resultMessage.id)
     }
 
@@ -25356,7 +25492,7 @@ final class ChatViewModel {
                 occurredAt: .now
             )
         )
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh()
     }
 
     private func finishLocalBrowserTool(
@@ -25405,23 +25541,30 @@ final class ChatViewModel {
         metadata["iexa_local_native_tool_parent"] = "true"
 
         let visibleContent = Self.localBrowserToolVisibleContent(content, status: status)
-        conversation?.messages[index].content = visibleContent
-        conversation?.messages[index].isStreaming = isStreaming
         let statusHistory = Self.appendingLocalBrowserStatus(
             status,
             to: conversation?.messages[index].statusHistory ?? []
         )
-        conversation?.messages[index].statusHistory = statusHistory
-        conversation?.messages[index].metadata = metadata
+        let existingMessage = conversation?.messages[index]
+        let shouldMutateMessage = existingMessage?.content != visibleContent
+            || existingMessage?.isStreaming != isStreaming
+            || !Self.sameStatusHistory(existingMessage?.statusHistory ?? [], statusHistory)
+            || existingMessage?.metadata != metadata
+        if shouldMutateMessage {
+            conversation?.messages[index].content = visibleContent
+            conversation?.messages[index].isStreaming = isStreaming
+            conversation?.messages[index].statusHistory = statusHistory
+            conversation?.messages[index].metadata = metadata
+        }
         conversation?.history.updateNode(id: messageId) { node in
-            node.content = visibleContent
-            node.done = !isStreaming
-            node.statusHistory = statusHistory
-            node.metadata = metadata
+            if node.content != visibleContent { node.content = visibleContent }
+            if node.done != !isStreaming { node.done = !isStreaming }
+            if !Self.sameStatusHistory(node.statusHistory, statusHistory) { node.statusHistory = statusHistory }
+            if node.metadata != metadata { node.metadata = metadata }
         }
         if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
             streamingStore.updateContent(visibleContent, displayContent: visibleContent)
-            streamingStore.setStatusHistory(statusHistory)
+            setStreamingStoreStatusHistory(statusHistory, messageId: messageId, immediate: !isStreaming || status.done == true)
         }
         conversation?.history.currentId = messageId
     }
@@ -25636,22 +25779,29 @@ final class ChatViewModel {
             to: conversation?.messages[index].statusHistory ?? []
         )
         let visibleContent = Self.localNativeToolVisibleContent(description, done: done, succeeded: !description.contains("执行失败"))
-        conversation?.messages[index].content = visibleContent
-        conversation?.messages[index].isStreaming = false
-        conversation?.messages[index].statusHistory = history
-        conversation?.messages[index].metadata = metadata
+        let existingMessage = conversation?.messages[index]
+        let shouldMutateMessage = existingMessage?.content != visibleContent
+            || existingMessage?.isStreaming != false
+            || !Self.sameStatusHistory(existingMessage?.statusHistory ?? [], history)
+            || existingMessage?.metadata != metadata
+        if shouldMutateMessage {
+            conversation?.messages[index].content = visibleContent
+            conversation?.messages[index].isStreaming = false
+            conversation?.messages[index].statusHistory = history
+            conversation?.messages[index].metadata = metadata
+        }
         conversation?.history.updateNode(id: messageId) { node in
-            node.content = visibleContent
-            node.done = true
-            node.statusHistory = history
-            node.metadata = metadata
+            if node.content != visibleContent { node.content = visibleContent }
+            if node.done != true { node.done = true }
+            if !Self.sameStatusHistory(node.statusHistory, history) { node.statusHistory = history }
+            if node.metadata != metadata { node.metadata = metadata }
         }
         if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
             streamingStore.updateContent(visibleContent, displayContent: visibleContent)
-            streamingStore.setStatusHistory(history)
+            setStreamingStoreStatusHistory(history, messageId: messageId, immediate: done)
         }
         conversation?.history.currentId = messageId
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh(immediate: done)
     }
 
     private static func localNativeToolVisibleContent(
@@ -25841,7 +25991,7 @@ final class ChatViewModel {
             statusHistory: statuses,
             files: []
         )
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh()
     }
 
     private func updateLocalOfficeGenerationProgress(
@@ -25874,7 +26024,7 @@ final class ChatViewModel {
             ),
             files: []
         )
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh()
     }
 
     private func finishLocalOfficeGeneration(
@@ -25901,7 +26051,7 @@ final class ChatViewModel {
         selfInitiatedStream = false
         activeTaskId = nil
         await persistLocalConversationIfNeeded()
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh(immediate: true)
         await sendCompletionNotificationIfNeeded(content: content)
     }
 
@@ -25998,25 +26148,33 @@ final class ChatViewModel {
             preservingStartsFrom: existingStatusHistory
         )
 
-        conversation?.messages[index].content = content
-        conversation?.messages[index].isStreaming = isStreaming
-        conversation?.messages[index].statusHistory = mergedStatusHistory
-        conversation?.messages[index].metadata = metadata
-        if !files.isEmpty {
-            conversation?.messages[index].files = files
+        let existingMessage = conversation?.messages[index]
+        let shouldMutateMessage = existingMessage?.content != content
+            || existingMessage?.isStreaming != isStreaming
+            || !Self.sameStatusHistory(existingMessage?.statusHistory ?? [], mergedStatusHistory)
+            || existingMessage?.metadata != metadata
+            || (!files.isEmpty && existingMessage?.files != files)
+        if shouldMutateMessage {
+            conversation?.messages[index].content = content
+            conversation?.messages[index].isStreaming = isStreaming
+            conversation?.messages[index].statusHistory = mergedStatusHistory
+            conversation?.messages[index].metadata = metadata
+            if !files.isEmpty {
+                conversation?.messages[index].files = files
+            }
         }
         conversation?.history.updateNode(id: messageId) { node in
-            node.content = content
-            node.done = !isStreaming
-            node.statusHistory = mergedStatusHistory
-            node.metadata = metadata
+            if node.content != content { node.content = content }
+            if node.done != !isStreaming { node.done = !isStreaming }
+            if !Self.sameStatusHistory(node.statusHistory, mergedStatusHistory) { node.statusHistory = mergedStatusHistory }
+            if node.metadata != metadata { node.metadata = metadata }
             if !files.isEmpty {
                 node.files = files
             }
         }
         if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
             streamingStore.updateContent(content, displayContent: content)
-            streamingStore.setStatusHistory(mergedStatusHistory)
+            setStreamingStoreStatusHistory(mergedStatusHistory, messageId: messageId, immediate: !isStreaming)
         }
         conversation?.history.currentId = messageId
     }
@@ -26157,7 +26315,7 @@ final class ChatViewModel {
         self.conversation?.history.addNode(assistantNode)
         self.conversation?.history.appendChildId(assistantMessageId, to: parentId)
         self.conversation?.history.currentId = assistantMessageId
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh()
 
         let apiMessages = await buildAPIMessagesAsync(includeLocalAlpineExecutionContext: false)
 
@@ -26375,7 +26533,7 @@ final class ChatViewModel {
                     )
                     self.cleanupStreaming()
                     await self.persistLocalConversationIfNeeded()
-                    NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                    self.postConversationListNeedsRefresh(immediate: true)
                 }
             }
         }
@@ -26453,7 +26611,7 @@ final class ChatViewModel {
         recoveryDelayTask = nil
         emptyPollCount = 0
         await persistLocalConversationIfNeeded()
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh(immediate: true)
     }
 
     private func attachLocalNativeGeneratedFiles(to assistantMessageId: String) {
@@ -26683,7 +26841,7 @@ final class ChatViewModel {
         conversation?.history.currentId = message.id
         localAlpineAgentStopRequested = true
         Task { await persistLocalConversationIfNeeded() }
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh(immediate: true)
     }
 
     private func repeatedLocalAlpineFailure(for content: String) -> LocalAlpineAgentCommandFailure? {
@@ -27058,7 +27216,7 @@ final class ChatViewModel {
         conversation?.history.appendChildId(message.id, to: parentId)
         conversation?.history.currentId = message.id
         Task { await persistLocalConversationIfNeeded() }
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh(immediate: true)
         return message.id
     }
 
@@ -27179,7 +27337,7 @@ final class ChatViewModel {
         conversation?.history.currentId = resultMessage.id
 
         await persistLocalConversationIfNeeded()
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh()
     }
 
     private func executeLocalAlpineAgent(messageId: String, content: String) async {
@@ -27242,7 +27400,7 @@ final class ChatViewModel {
         conversation?.history.appendChildId(resultMessageId, to: messageId)
         conversation?.history.currentId = resultMessageId
         localAlpineAgentExecutedMessageIds.insert(resultMessageId)
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh()
         publishPendingLocalAlpineExecutionStep(messageId: resultMessageId, content: content)
         await Task.yield()
 
@@ -27292,7 +27450,7 @@ final class ChatViewModel {
             }
             clearLocalAlpineLiveToolState(for: resultMessageId)
             await persistLocalConversationIfNeeded()
-            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            postConversationListNeedsRefresh(immediate: true)
             return
         }
         guard result.didExecute else {
@@ -27300,7 +27458,7 @@ final class ChatViewModel {
             conversation?.messages.removeAll { $0.id == resultMessageId }
             conversation?.history.removeSubtree(rootId: resultMessageId)
             await persistLocalConversationIfNeeded()
-            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            postConversationListNeedsRefresh(immediate: true)
             return
         }
         enqueueLocalAlpineOpenRequests(result.openRequests)
@@ -27372,7 +27530,7 @@ final class ChatViewModel {
         }
 
         await persistLocalConversationIfNeeded()
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh(immediate: true)
 
         let latestUserText = conversation?.messages.last(where: {
             $0.role == .user && !Self.isLocalAlpineAgentResult($0)
@@ -27867,7 +28025,7 @@ final class ChatViewModel {
             localAlpineFinishedContinuationMessageIds.remove(assistantMessageId)
             cleanupStreaming()
             await persistLocalConversationIfNeeded()
-            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            postConversationListNeedsRefresh(immediate: true)
             if finalSummaryOnly {
                 _ = scheduleLocalAlpineFinalSummary(after: parentId)
             } else {
@@ -27889,7 +28047,7 @@ final class ChatViewModel {
                 : "模型长时间没有给出新的本地工具步骤。"
         )
         await persistLocalConversationIfNeeded()
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh(immediate: true)
     }
 
     private func finishLocalAlpineContinuation(
@@ -27927,7 +28085,7 @@ final class ChatViewModel {
                     localAlpineFinalSummaryParentIds.remove(parentResultId)
                     localAlpineFinishedContinuationMessageIds.remove(assistantMessageId)
                     await persistLocalConversationIfNeeded()
-                    NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                    postConversationListNeedsRefresh(immediate: true)
                     if scheduleLocalAlpineFinalSummary(after: parentResultId) {
                         return
                     }
@@ -27966,7 +28124,7 @@ final class ChatViewModel {
                 localAlpineFinishedContinuationMessageIds.remove(assistantMessageId)
                 cleanupStreaming()
                 await persistLocalConversationIfNeeded()
-                NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+                postConversationListNeedsRefresh(immediate: true)
                 scheduleLocalAlpineContinuationIfNeeded(after: parentResultId, forceContinue: true)
                 return
             }
@@ -27980,7 +28138,7 @@ final class ChatViewModel {
                 reason: "模型连续没有给出结构化 `iexa_alpine` 工具步骤，而是返回了普通文本或代码块。"
             )
             await persistLocalConversationIfNeeded()
-            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+            postConversationListNeedsRefresh(immediate: true)
             return
         }
         guard !localAlpineFinishedContinuationMessageIds.contains(assistantMessageId) else {
@@ -28066,7 +28224,7 @@ final class ChatViewModel {
             localAlpineAgentStopRequested = true
             localAlpineContinuationTask = nil
         }
-        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+        postConversationListNeedsRefresh(immediate: true)
     }
 
     private func localAlpineParentNeedsToolFollowUp(_ parentMessageId: String) -> Bool {
@@ -29074,7 +29232,11 @@ final class ChatViewModel {
                 for status in statusHistory {
                     mergedStatusHistory = Self.appendingToolStatus(status, to: mergedStatusHistory)
                 }
-                streamingStore.setStatusHistory(mergedStatusHistory)
+                setStreamingStoreStatusHistory(
+                    mergedStatusHistory,
+                    messageId: id,
+                    immediate: statusHistory.contains { $0.done == true }
+                )
             }
             if let error { streamingStore.setError(error) }
         } else {
@@ -29084,6 +29246,7 @@ final class ChatViewModel {
             guard let index = conversation?.messages.firstIndex(where: { $0.id == id }) else { return }
 
             if !isStreaming && streamingStore.streamingMessageId == id {
+                flushPendingStreamingStoreStatusHistory(messageId: id)
                 // Streaming just ended — flush store to conversation
                 let result = streamingStore.endStreaming()
                 let finalRawContent = content.isEmpty ? result.content : content
@@ -29733,7 +29896,7 @@ final class ChatViewModel {
         // view sees the update in real-time (it reads from streamingStore,
         // not conversation.messages, during active streaming).
         if streamingStore.streamingMessageId == id && streamingStore.isActive {
-            streamingStore.setStatusHistory(statusHistory)
+            setStreamingStoreStatusHistory(statusHistory, messageId: id, immediate: status.done == true)
         }
         if let description = status.description {
             Task {
@@ -29743,7 +29906,7 @@ final class ChatViewModel {
                     phase: status.done == true ? "完成" : "运行中",
                     progress: status.done == true ? 0.92 : nil,
                     isIndeterminate: status.done != true,
-                    force: true
+                    force: status.done == true
                 )
             }
         }
@@ -29825,7 +29988,7 @@ final class ChatViewModel {
                 phase: uiCall.phase == .result ? "完成" : "运行中",
                 progress: uiCall.phase == .result ? 0.72 : nil,
                 isIndeterminate: uiCall.phase != .result,
-                force: true
+                force: uiCall.phase == .result
             )
         }
     }
@@ -29987,7 +30150,7 @@ final class ChatViewModel {
             node.statusHistory = history
         }
         if streamingStore.streamingMessageId == messageId && streamingStore.isActive {
-            streamingStore.setStatusHistory(history)
+            setStreamingStoreStatusHistory(history, messageId: messageId, immediate: status.done == true)
         }
     }
 

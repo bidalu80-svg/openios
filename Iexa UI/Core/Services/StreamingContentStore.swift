@@ -230,12 +230,17 @@ final class StreamingContentStore {
         // prevents a stale token from growing streamingContent while isFinishing
         // is true, which would create a buffer the drain algorithm never catches up to.
         guard !isFinishing else { return }
-        streamingContent = content
-        if let sanitizedDisplayContent, sanitizedDisplayContent != content {
-            presentationContent = sanitizedDisplayContent
-        } else {
-            presentationContent = nil
+        let nextPresentationContent: String? = {
+            if let sanitizedDisplayContent, sanitizedDisplayContent != content {
+                return sanitizedDisplayContent
+            }
+            return nil
+        }()
+        guard content != streamingContent || nextPresentationContent != presentationContent else {
+            return
         }
+        streamingContent = content
+        presentationContent = nextPresentationContent
         contentStructureVersion &+= 1
 
         let displaySource = presentationContent ?? streamingContent
@@ -298,7 +303,37 @@ final class StreamingContentStore {
     /// Replaces the full live status list for tools that expose a multi-step
     /// timeline with repeated action names.
     func setStatusHistory(_ statuses: [ChatStatusUpdate]) {
+        guard Self.statusHistorySignature(statuses) != Self.statusHistorySignature(streamingStatusHistory) else {
+            return
+        }
         streamingStatusHistory = statuses
+    }
+
+    private static func statusHistorySignature(_ statuses: [ChatStatusUpdate]) -> String {
+        statuses.map { status in
+            let urls = status.urls.joined(separator: ",")
+            let items = status.items.map { item in
+                [
+                    item.title ?? "",
+                    item.link ?? "",
+                    item.snippet ?? "",
+                    item.thumbnailURL ?? ""
+                ].joined(separator: "\u{1f}")
+            }.joined(separator: "\u{1e}")
+            let queries = status.queries.joined(separator: ",")
+            return [
+                status.action ?? "",
+                status.status ?? "",
+                status.description ?? "",
+                status.done == true ? "1" : "0",
+                status.hidden == true ? "1" : "0",
+                urls,
+                items,
+                status.count.map(String.init) ?? "",
+                status.query ?? "",
+                queries
+            ].joined(separator: "\u{1d}")
+        }.joined(separator: "\u{1c}")
     }
 
     /// Appends source references.

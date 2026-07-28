@@ -12792,6 +12792,11 @@ private struct AgentStepFloatingBar: View {
            let reference = item.nearestBrowserPreviewThumbnailReference(beforeOrAt: selectedStep) {
             return reference
         }
+        if shouldUseBrowserStepThumbnail,
+           let target = previewOpenURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !target.isEmpty {
+            return agentToolWebPreviewReference(for: target)
+        }
         guard let selectedStep else {
             return item.firstPreviewThumbnailReference
         }
