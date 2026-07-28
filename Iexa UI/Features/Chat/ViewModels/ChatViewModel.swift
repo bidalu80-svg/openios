@@ -5884,8 +5884,6 @@ final class ChatViewModel {
         if let chatWebSearchSettingsObserver {
             NotificationCenter.default.removeObserver(chatWebSearchSettingsObserver)
         }
-        conversationListRefreshTask?.cancel()
-        clearStreamingStoreStatusFlushes()
     }
 
     // MARK: - Background Completion Polling
